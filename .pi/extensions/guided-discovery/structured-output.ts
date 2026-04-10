@@ -20,6 +20,7 @@ export interface DecompositionPhase {
 	dependsOn: string[];
 	touchedPaths: string[];
 	parallelSafe: boolean;
+	designSensitive: boolean;
 }
 
 export interface DecompositionPlan {
@@ -59,10 +60,13 @@ export interface ValidationCoverage {
 }
 
 export interface ValidationDiscrepancy {
+	id?: string;
 	item: string;
 	status: Exclude<CoverageStatus, "implemented">;
 	reason: string;
 	suggestedAction: string;
+	worthImplementingNow?: boolean;
+	worthwhileRationale?: string;
 }
 
 export interface ValidationReport {
@@ -93,7 +97,46 @@ function stringValue(...values: unknown[]): string {
 }
 
 function booleanValue(value: unknown, fallback = false): boolean {
-	return typeof value === "boolean" ? value : fallback;
+	if (typeof value === "boolean") return value;
+	if (typeof value === "string") {
+		const normalized = value.trim().toLowerCase();
+		if (["true", "yes", "y", "1"].includes(normalized)) return true;
+		if (["false", "no", "n", "0"].includes(normalized)) return false;
+	}
+	return fallback;
+}
+
+function slugifyIdentifier(value: string): string {
+	return value
+		.trim()
+		.toLowerCase()
+		.replace(/["']/g, "")
+		.replace(/[^a-z0-9]+/g, "-")
+		.replace(/^-+|-+$/g, "");
+}
+
+function normalizeDiscrepancyId(value: unknown, item: string, index: number): string {
+	const explicitId = stringValue(value);
+	if (explicitId) return explicitId;
+	const itemSlug = slugifyIdentifier(item);
+	return itemSlug ? `discrepancy-${itemSlug}` : `discrepancy-${index + 1}`;
+}
+
+function defaultWorthwhileRationale(worthImplementingNow: boolean): string {
+	return worthImplementingNow
+		? "Marked worthwhile to implement now, but no rationale was provided."
+		: "No worthwhile-now judgment was provided, so this item should not be auto-implemented without review.";
+}
+
+function ensureUniqueDiscrepancyIds(discrepancies: ValidationDiscrepancy[]): ValidationDiscrepancy[] {
+	const seen = new Map<string, number>();
+	return discrepancies.map((discrepancy, index) => {
+		const baseId = stringValue(discrepancy.id, normalizeDiscrepancyId("", discrepancy.item, index));
+		const count = seen.get(baseId) ?? 0;
+		seen.set(baseId, count + 1);
+		if (count === 0) return { ...discrepancy, id: baseId };
+		return { ...discrepancy, id: `${baseId}-${count + 1}` };
+	});
 }
 
 function normalizePhase(value: unknown, index: number): DecompositionPhase {
@@ -111,6 +154,10 @@ function normalizePhase(value: unknown, index: number): DecompositionPhase {
 		dependsOn: uniqueStrings(value.dependsOn, uniqueStrings(value.dependencies)),
 		touchedPaths: uniqueStrings(value.touchedPaths, uniqueStrings(value.paths)),
 		parallelSafe: booleanValue(value.parallelSafe, booleanValue(value.canParallelize, false)),
+		designSensitive: booleanValue(
+			value.designSensitive,
+			booleanValue(value.requiresDesign, booleanValue(value.needsDesignReview, booleanValue(value.uiSensitive, booleanValue(value.uxSensitive, false)))),
+		),
 	};
 }
 
@@ -134,10 +181,58 @@ function normalizeFindingCategory(category: string): CheckerFindingCategory | nu
 		return normalized as CheckerFindingCategory;
 	}
 	if (["correctness", "breakage", "breaking_change", "regression_risk"].includes(normalized)) return "regression";
-	if (["ux", "consistency", "ui_consistency"].includes(normalized)) return "ui";
+	if (
+		[
+			"ux",
+			"consistency",
+			"ui_consistency",
+			"accessibility",
+			"inclusivity",
+			"discoverability",
+			"navigation",
+			"interaction",
+			"clarity",
+			"hierarchy",
+			"information_architecture",
+			"legibility",
+			"readability",
+			"copy",
+			"copy_hierarchy",
+			"polish",
+			"affordance",
+			"friction",
+		].includes(normalized)
+	)
+		return "ui";
 	if (["perf", "efficiency", "performance_risk"].includes(normalized)) return "performance";
-	if (["cleanup", "dead_code", "looseends", "looseend", "maintainability"].includes(normalized)) return "loose_ends";
-	if (["simplicity", "overscoping", "overengineering", "architecture", "design"].includes(normalized)) return "complexity";
+	if (
+		[
+			"cleanup",
+			"dead_code",
+			"looseends",
+			"looseend",
+			"maintainability",
+			"legacy",
+			"obsolete",
+			"obsolete_code",
+			"superseded",
+			"unused",
+			"unused_state",
+			"unused_helper",
+			"dead_state",
+			"stale",
+			"stale_docs",
+			"stale_tests",
+			"stale_config",
+			"duplication",
+			"duplicate_code",
+			"redundancy",
+		].includes(normalized)
+	)
+		return "loose_ends";
+	if (["simplicity", "overscoping", "overengineering", "architecture", "design", "cognitive_load", "overload", "duplicate_plumbing"].includes(normalized)) {
+		return "complexity";
+	}
 	if (["agents", "agent", "instructions", "conventions", "policy", "process"].includes(normalized)) return "guidance";
 	return null;
 }
@@ -192,11 +287,31 @@ function normalizeDiscrepancy(value: unknown, index: number): ValidationDiscrepa
 	if (!(["partial", "missing", "superseded"] as const).includes(status)) {
 		throw new Error(`discrepancies[${index}] has invalid status`);
 	}
+	const item = stringValue(value.item, value.planItem, value.requirement, value.title, `Discrepancy ${index + 1}`);
+	const worthImplementingNow = booleanValue(
+		value.worthImplementingNow,
+		booleanValue(
+			value.worthwhileNow,
+			booleanValue(value.worthDoingNow, booleanValue(value.shouldImplementNow, booleanValue(value.implementNow, false))),
+		),
+	);
+	const worthwhileRationale =
+		stringValue(
+			value.worthwhileRationale,
+			value.worthinessRationale,
+			value.worthImplementingReason,
+			value.whyWorthImplementingNow,
+			value.whyWorthDoingNow,
+			value.judgmentRationale,
+		) || defaultWorthwhileRationale(worthImplementingNow);
 	return {
-		item: stringValue(value.item, value.planItem, `Discrepancy ${index + 1}`),
+		id: normalizeDiscrepancyId(stringValue(value.id, value.discrepancyId, value.issueId, value.key), item, index),
+		item,
 		status,
-		reason: stringValue(value.reason, value.details, value.summary),
-		suggestedAction: stringValue(value.suggestedAction, value.recommendation, value.fix),
+		reason: stringValue(value.reason, value.whyNotDone, value.whyIncomplete, value.details, value.summary),
+		suggestedAction: stringValue(value.suggestedAction, value.recommendedAction, value.nextAction, value.recommendation, value.fix),
+		worthImplementingNow,
+		worthwhileRationale,
 	};
 }
 
@@ -268,7 +383,7 @@ export function parseValidationReport(rawText: string): ValidationReport {
 
 	const coverage = Array.isArray(value.coverage) ? value.coverage.map((item, index) => normalizeCoverage(item, index)) : [];
 	const discrepancies = Array.isArray(value.discrepancies)
-		? value.discrepancies.map((item, index) => normalizeDiscrepancy(item, index))
+		? ensureUniqueDiscrepancyIds(value.discrepancies.map((item, index) => normalizeDiscrepancy(item, index)))
 		: [];
 	const recommendation = stringValue(value.recommendation) as ValidationRecommendation;
 	if (!(["finish", "reformulate", "accept"] as const).includes(recommendation)) {

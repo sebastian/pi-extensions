@@ -157,8 +157,16 @@ export async function detectChangedFiles(cwd: string, exec: ExecLike): Promise<s
 	}
 
 	if (isGitRepo(cwd)) {
-		const result = await exec("git", ["diff", "--name-only", "--relative"], { cwd: repoRoot, timeout: 30_000 });
-		if (result.code === 0) return parseGitDiffNameOnly(result.stdout);
+		const trackedResult = await exec("git", ["diff", "--name-only", "--relative"], { cwd: repoRoot, timeout: 30_000 });
+		const untrackedResult = await exec("git", ["ls-files", "--others", "--exclude-standard"], {
+			cwd: repoRoot,
+			timeout: 30_000,
+		});
+		const changedFiles = dedupePaths([
+			...(trackedResult.code === 0 ? parseGitDiffNameOnly(trackedResult.stdout) : []),
+			...(untrackedResult.code === 0 ? parseGitDiffNameOnly(untrackedResult.stdout) : []),
+		]);
+		if (changedFiles.length > 0 || (trackedResult.code === 0 && untrackedResult.code === 0)) return changedFiles;
 	}
 
 	return [];

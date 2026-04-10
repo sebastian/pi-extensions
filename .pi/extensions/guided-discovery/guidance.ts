@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 
 export interface RelevantGuidanceDocument {
@@ -11,7 +11,6 @@ export interface RelevantGuidanceDocument {
 export interface RelevantGuidanceResult {
 	repoRoot: string;
 	documents: RelevantGuidanceDocument[];
-	fileToDocuments: Record<string, string[]>;
 }
 
 function fileExists(path: string): boolean {
@@ -41,20 +40,28 @@ export function discoverAncestorDocumentPaths(start: string, stopAt: string, fil
 	return [...new Set(files)].filter(fileExists).reverse();
 }
 
+function guidanceStartDirectory(repoRoot: string, changedPath: string): string {
+	const absolutePath = resolve(repoRoot, changedPath);
+	if (existsSync(absolutePath)) {
+		try {
+			if (statSync(absolutePath).isDirectory()) return absolutePath;
+		} catch {
+			// fall through to parent-directory heuristics
+		}
+	}
+	return dirname(absolutePath);
+}
+
 export function discoverRelevantGuidance(cwd: string, changedFiles: string[], fileName = "AGENTS.md"): RelevantGuidanceResult {
 	const repoRoot = findRepoRoot(cwd);
 	const documents = new Map<string, RelevantGuidanceDocument>();
-	const fileToDocuments: Record<string, string[]> = {};
 
 	for (const changedFile of changedFiles) {
-		const absolutePath = resolve(repoRoot, changedFile);
-		let currentDir = dirname(absolutePath);
-		const discoveredForFile: string[] = [];
+		let currentDir = guidanceStartDirectory(repoRoot, changedFile);
 
 		while (true) {
 			const candidate = join(currentDir, fileName);
 			if (fileExists(candidate)) {
-				discoveredForFile.push(candidate);
 				if (!documents.has(candidate)) {
 					documents.set(candidate, {
 						path: candidate,
@@ -73,16 +80,11 @@ export function discoverRelevantGuidance(cwd: string, changedFiles: string[], fi
 			if (parent === currentDir) break;
 			currentDir = parent;
 		}
-
-		fileToDocuments[changedFile] = [
-			...new Set(discoveredForFile.map((path) => relative(repoRoot, path).replace(/\\/g, "/"))),
-		];
 	}
 
 	return {
 		repoRoot,
 		documents: Array.from(documents.values()).sort((left, right) => left.relativePath.localeCompare(right.relativePath)),
-		fileToDocuments,
 	};
 }
 

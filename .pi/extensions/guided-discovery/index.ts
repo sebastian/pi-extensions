@@ -5,6 +5,13 @@ import { Key } from "@mariozechner/pi-tui";
 import { access, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { runGuidedDiscoveryImplementationWorkflow } from "./implement-workflow.ts";
+import {
+	createImplementationProgressState,
+	reduceImplementationProgress,
+	type ImplementationProgressState,
+	type WorkflowProgressUpdate,
+} from "./implementation-progress.ts";
+import { createImplementationProgressWidget } from "./implementation-progress-widget.ts";
 import registerQuestionnaire from "./questionnaire.ts";
 import {
 	type ResearchSource,
@@ -47,7 +54,7 @@ Your job in this mode:
     ## Implementation plan
     ## Acceptance criteria
     ## Risks / follow-ups
-13. If the user clearly wants to start coding, tell them to run /discover-implement or /discover-off first.
+13. If the user clearly wants to start coding, tell them to run /discover-implement, /implement-subagents, or /discover-off first.
 `;
 
 type ImplementationMode = "direct" | "subagents";
@@ -145,7 +152,7 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 			ctx.ui.theme.fg("accent", "Guided discovery mode active"),
 			ctx.ui.theme.fg(
 				"dim",
-				"Read-only repo + web research • structured questions • PLAN.md auto-saves • /discover-implement to start coding",
+				"Read-only repo + web research • structured questions • PLAN.md auto-saves • /discover-implement or /implement-subagents to start coding",
 			),
 		];
 
@@ -215,12 +222,58 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 		return { mode, extraInstructions: text.trim() };
 	}
 
-	function setImplementationProgress(ctx: ExtensionContext, stage: string, lines: string[]): void {
-		ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("accent", "🤖 implement"));
-		ctx.ui.setWidget(WIDGET_KEY, [
-			ctx.ui.theme.fg("accent", `Guided implementation • ${stage}`),
-			...lines.map((line) => ctx.ui.theme.fg("dim", line)),
-		]);
+	function supportsStructuredImplementationWidget(ctx: ExtensionContext): boolean {
+		return ctx.hasUI;
+	}
+
+	function summarizeImplementationStage(stage: string): string {
+		const [baseStage] = stage.split(":");
+		switch (baseStage) {
+			case "starting":
+			case "decomposer":
+			case "worker":
+			case "checker":
+			case "fix":
+			case "validator":
+			case "finish":
+			case "complete":
+			case "failed":
+				return baseStage;
+			default:
+				return baseStage || "implement";
+		}
+	}
+
+	function setImplementationProgress(
+		ctx: ExtensionContext,
+		stage: string,
+		state: ImplementationProgressState,
+		fallbackLines: string[],
+	): void {
+		const stageLabel = summarizeImplementationStage(stage);
+		ctx.ui.setStatus(
+			STATUS_KEY,
+			state.failure
+				? ctx.ui.theme.fg("error", "🤖 failed")
+				: state.finished
+					? ctx.ui.theme.fg("success", "🤖 complete")
+					: ctx.ui.theme.fg("accent", `🤖 ${stageLabel}`),
+		);
+
+		if (supportsStructuredImplementationWidget(ctx)) {
+			ctx.ui.setWidget(WIDGET_KEY, createImplementationProgressWidget(() => state), { placement: "aboveEditor" });
+			return;
+		}
+
+		const detailLines = state.detailLines.length > 0 ? state.detailLines : fallbackLines;
+		ctx.ui.setWidget(
+			WIDGET_KEY,
+			[
+				ctx.ui.theme.fg("accent", `Guided implementation • ${stageLabel}`),
+				...detailLines.map((line) => ctx.ui.theme.fg("dim", line)),
+			],
+			{ placement: "aboveEditor" },
+		);
 	}
 
 	function clearImplementationProgress(ctx: ExtensionContext): void {
@@ -280,54 +333,45 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 		}
 	}
 
-	async function startImplementation(
+	async function runSubagentImplementation(
 		ctx: ExtensionContext,
-		rawArgs: string,
-		options?: { skipConfirmation?: boolean; mode?: ImplementationMode },
+		options: { planPath?: string; rawPrompt?: string; extraInstructions: string },
 	): Promise<boolean> {
-		const request = parseImplementationRequest(rawArgs);
-		const planPath = resolve(ctx.cwd, PLAN_FILE);
-		const hasPlanFile = await fileExists(planPath);
-		let mode = options?.mode ?? request.mode;
-
-		if (!mode && ctx.hasUI) {
-			mode = await chooseImplementationMode(ctx, hasPlanFile);
-			if (!mode) return false;
-			options = { ...options, skipConfirmation: true };
-		}
-		if (!mode) mode = "direct";
-
-		if (mode === "subagents" && !hasPlanFile) {
+		const progressIntro = options.rawPrompt?.trim()
+			? ["Synthesizing a lightweight plan from the provided request."]
+			: [`Using ${PLAN_FILE} as the approved source of truth.`];
+		let implementationProgress = createImplementationProgressState({
+			detailLines: progressIntro,
+			context: {
+				note: options.rawPrompt?.trim()
+					? "Standalone sub-agent implementation workflow starting"
+					: "Sub-agent implementation workflow starting",
+			},
+		});
+		let lastPrintedProgress: string | null = null;
+		const handleImplementationProgress = (update: WorkflowProgressUpdate): void => {
+			implementationProgress = reduceImplementationProgress(implementationProgress, update);
 			if (ctx.hasUI) {
-				ctx.ui.notify(`Sub-agent mode requires an approved ${PLAN_FILE}.`, "warning");
+				setImplementationProgress(ctx, update.stage, implementationProgress, update.lines);
+				return;
 			}
-			return false;
+			const signature = `${update.stage}\n${update.lines.join("\n")}`;
+			if (signature === lastPrintedProgress) return;
+			lastPrintedProgress = signature;
+			const [headline, ...rest] = update.lines;
+			console.error(`[guided-implementation:${summarizeImplementationStage(update.stage)}] ${headline ?? update.stage}`);
+			for (const line of rest) console.error(`  ${line}`);
+		};
+
+		if (ctx.hasUI) {
+			setImplementationProgress(ctx, "starting", implementationProgress, progressIntro);
 		}
-
-		if (mode === "direct" && !options?.skipConfirmation && ctx.hasUI) {
-			const summary = hasPlanFile
-				? `Latest approved plan saved to ${PLAN_FILE}.${researchSources.length > 0 ? ` External sources captured: ${researchSources.length}.` : ""}`
-				: `No ${PLAN_FILE} was detected yet. Implementation will rely on the conversation history.`;
-			const approved = await ctx.ui.confirm("Start implementing the plan directly?", summary);
-			if (!approved) return false;
-		}
-
-		if (enabled) disableDiscovery(ctx);
-
-		if (mode === "direct") {
-			pi.sendUserMessage(buildImplementationPrompt(request.extraInstructions));
-			return true;
-		}
-
-		if (ctx.hasUI) setImplementationProgress(ctx, "starting", [`Using ${PLAN_FILE} as the approved source of truth.`]);
 		try {
 			const result = await runGuidedDiscoveryImplementationWorkflow(pi, ctx, {
-				planPath,
-				extraInstructions: request.extraInstructions,
-				onUpdate: (update) => {
-					if (!ctx.hasUI) return;
-					setImplementationProgress(ctx, update.stage, update.lines);
-				},
+				planPath: options.planPath,
+				rawPrompt: options.rawPrompt,
+				extraInstructions: options.extraInstructions,
+				onUpdate: handleImplementationProgress,
 			});
 
 			if (ctx.hasUI) {
@@ -373,6 +417,51 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 		} finally {
 			if (ctx.hasUI) clearImplementationProgress(ctx);
 		}
+	}
+
+	async function startImplementation(
+		ctx: ExtensionContext,
+		rawArgs: string,
+		options?: { skipConfirmation?: boolean; mode?: ImplementationMode },
+	): Promise<boolean> {
+		const request = parseImplementationRequest(rawArgs);
+		const planPath = resolve(ctx.cwd, PLAN_FILE);
+		const hasPlanFile = await fileExists(planPath);
+		let mode = options?.mode ?? request.mode;
+
+		if (!mode && ctx.hasUI) {
+			mode = await chooseImplementationMode(ctx, hasPlanFile);
+			if (!mode) return false;
+			options = { ...options, skipConfirmation: true };
+		}
+		if (!mode) mode = "direct";
+
+		if (mode === "subagents" && !hasPlanFile) {
+			if (ctx.hasUI) {
+				ctx.ui.notify(`Sub-agent mode requires an approved ${PLAN_FILE}. Use /implement-subagents for raw-prompt runs.`, "warning");
+			}
+			return false;
+		}
+
+		if (mode === "direct" && !options?.skipConfirmation && ctx.hasUI) {
+			const summary = hasPlanFile
+				? `Latest approved plan saved to ${PLAN_FILE}.${researchSources.length > 0 ? ` External sources captured: ${researchSources.length}.` : ""}`
+				: `No ${PLAN_FILE} was detected yet. Implementation will rely on the conversation history.`;
+			const approved = await ctx.ui.confirm("Start implementing the plan directly?", summary);
+			if (!approved) return false;
+		}
+
+		if (enabled) disableDiscovery(ctx);
+
+		if (mode === "direct") {
+			pi.sendUserMessage(buildImplementationPrompt(request.extraInstructions));
+			return true;
+		}
+
+		return await runSubagentImplementation(ctx, {
+			planPath,
+			extraInstructions: request.extraInstructions,
+		});
 	}
 
 	async function promptForPlanApproval(ctx: ExtensionContext): Promise<void> {
@@ -451,6 +540,39 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 		},
 	});
 
+	pi.registerCommand("implement-subagents", {
+		description: "Run the standalone sub-agent implementation workflow from PLAN.md or a raw prompt",
+		handler: async (args, ctx) => {
+			if (!ctx.isIdle()) {
+				ctx.ui.notify("Wait until the agent is idle before starting sub-agent implementation", "warning");
+				return;
+			}
+
+			const rawPrompt = args.trim();
+			const planPath = resolve(ctx.cwd, PLAN_FILE);
+			const hasPlanFile = await fileExists(planPath);
+			if (enabled) disableDiscovery(ctx);
+
+			if (rawPrompt) {
+				await runSubagentImplementation(ctx, {
+					rawPrompt,
+					extraInstructions: "",
+				});
+				return;
+			}
+
+			if (!hasPlanFile) {
+				ctx.ui.notify(`No ${PLAN_FILE} found. Pass a raw prompt or create ${PLAN_FILE} first.`, "warning");
+				return;
+			}
+
+			await runSubagentImplementation(ctx, {
+				planPath,
+				extraInstructions: "",
+			});
+		},
+	});
+
 	pi.registerShortcut(Key.ctrlAlt("d"), {
 		description: "Toggle guided discovery mode",
 		handler: async (ctx) => {
@@ -477,7 +599,7 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 		if (event.toolName === "edit" || event.toolName === "write") {
 			return {
 				block: true,
-				reason: "Guided discovery mode is read-only. Use /discover-implement or /discover-off to start coding.",
+				reason: "Guided discovery mode is read-only. Use /discover-implement, /implement-subagents, or /discover-off to start coding.",
 			};
 		}
 
@@ -487,7 +609,7 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 				return {
 					block: true,
 					reason:
-						"Guided discovery mode only allows read-only bash commands. Use /discover-implement or /discover-off to start coding.",
+						"Guided discovery mode only allows read-only bash commands. Use /discover-implement, /implement-subagents, or /discover-off to start coding.",
 				};
 			}
 		}

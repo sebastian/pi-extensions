@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { computeExecutionBatches, parseGitDiffNameOnly, parseJjDiffSummary, pathsOverlap } from "../changes.ts";
+import { mkdtemp, mkdir } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { computeExecutionBatches, detectChangedFiles, parseGitDiffNameOnly, parseJjDiffSummary, pathsOverlap } from "../changes.ts";
 import type { DecompositionPhase } from "../structured-output.ts";
 
 test("parseJjDiffSummary handles adds, modifications, and renames", () => {
@@ -20,6 +23,24 @@ test("pathsOverlap is conservative for empty and broad scopes", () => {
 	assert.equal(pathsOverlap(["src/index.ts"], ["docs/README.md"]), false);
 });
 
+test("detectChangedFiles includes untracked git files", async () => {
+	const root = await mkdtemp(join(tmpdir(), "guided-discovery-changes-"));
+	await mkdir(join(root, ".git"));
+
+	const changed = await detectChangedFiles(root, async (command, args) => {
+		if (command !== "git") return { stdout: "", stderr: "", code: 1 };
+		if (args.join(" ") === "diff --name-only --relative") {
+			return { stdout: "src/index.ts\n", stderr: "", code: 0 };
+		}
+		if (args.join(" ") === "ls-files --others --exclude-standard") {
+			return { stdout: "src/new.ts\n", stderr: "", code: 0 };
+		}
+		return { stdout: "", stderr: "", code: 1 };
+	});
+
+	assert.deepEqual(changed, ["src/index.ts", "src/new.ts"]);
+});
+
 test("computeExecutionBatches keeps overlapping phases sequential and independent phases parallel", () => {
 	const phases: DecompositionPhase[] = [
 		{
@@ -30,6 +51,7 @@ test("computeExecutionBatches keeps overlapping phases sequential and independen
 			dependsOn: [],
 			touchedPaths: ["docs"],
 			parallelSafe: true,
+			designSensitive: false,
 		},
 		{
 			id: "phase-2",
@@ -39,6 +61,7 @@ test("computeExecutionBatches keeps overlapping phases sequential and independen
 			dependsOn: [],
 			touchedPaths: ["tests"],
 			parallelSafe: true,
+			designSensitive: false,
 		},
 		{
 			id: "phase-3",
@@ -48,6 +71,7 @@ test("computeExecutionBatches keeps overlapping phases sequential and independen
 			dependsOn: [],
 			touchedPaths: ["docs/README.md"],
 			parallelSafe: true,
+			designSensitive: false,
 		},
 	];
 

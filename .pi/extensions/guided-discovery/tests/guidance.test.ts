@@ -25,7 +25,31 @@ test("discoverRelevantGuidance walks changed-file ancestors up to repo root", as
 
 	const result = discoverRelevantGuidance(root, ["src/feature/index.ts"]);
 	assert.equal(result.documents.length, 2);
-	assert.deepEqual(result.fileToDocuments["src/feature/index.ts"], ["src/AGENTS.md", "AGENTS.md"]);
+	assert.deepEqual(
+		result.documents.map((document) => ({ path: document.relativePath, appliesTo: document.appliesTo })),
+		[
+			{ path: "AGENTS.md", appliesTo: ["src/feature/index.ts"] },
+			{ path: "src/AGENTS.md", appliesTo: ["src/feature/index.ts"] },
+		],
+	);
+});
+
+test("discoverRelevantGuidance also handles directory touched paths", async () => {
+	const root = await mkdtemp(join(tmpdir(), "guided-discovery-guidance-"));
+	await mkdir(join(root, ".jj"));
+	await mkdir(join(root, "src", "feature"), { recursive: true });
+	await writeFile(join(root, "AGENTS.md"), "root guidance", "utf8");
+	await writeFile(join(root, "src", "AGENTS.md"), "src guidance", "utf8");
+
+	const result = discoverRelevantGuidance(root, ["src"]);
+	assert.equal(result.documents.length, 2);
+	assert.deepEqual(
+		result.documents.map((document) => ({ path: document.relativePath, appliesTo: document.appliesTo })),
+		[
+			{ path: "AGENTS.md", appliesTo: ["src"] },
+			{ path: "src/AGENTS.md", appliesTo: ["src"] },
+		],
+	);
 });
 
 test("renderGuidanceSummary lists applicable AGENTS files", () => {
@@ -40,7 +64,6 @@ test("renderGuidanceSummary lists applicable AGENTS files", () => {
 					appliesTo: ["src/index.ts"],
 				},
 			],
-			fileToDocuments: { "src/index.ts": ["AGENTS.md"] },
 		},
 		"AGENTS.md",
 	);

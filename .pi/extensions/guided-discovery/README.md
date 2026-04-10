@@ -12,8 +12,13 @@ A Codex-style planning workflow for pi that lets you start from a loose feature 
 - approval UI with two implementation paths:
   - direct handoff to the main session
   - isolated sub-agent implementation workflow
-- bundled sub-agent roles for decomposition, implementation, checking, and validation
-- changed-area `AGENTS.md` discovery so checker and validator see the right repo instructions for touched files
+- standalone `/implement-subagents [prompt]` entrypoint for ad hoc sub-agent implementation outside discovery
+- raw-prompt sub-agent runs synthesize a lightweight ephemeral plan instead of requiring a repo-root `PLAN.md`
+- bundled sub-agent roles for decomposition, general implementation, design-specialist implementation, cleanup auditing, design review, checking, and validation
+- richer sub-agent progress UI in interactive sessions: a persistent tech-tree-style widget above the editor showing workflow stages, worker batches, active phases, cleanup/design/checker quality-suite loops, conditional design skips, and validator finish-pass re-entry
+- manual validator discrepancy selection with a checkbox-style TUI picker, plus an RPC/editor markdown-checklist fallback keyed by discrepancy ID
+- touched-path `AGENTS.md` discovery so worker, remediation, cleanup, design review, checker, and validator passes see the right repo instructions for touched files
+- conservative execution of explicit `AGENTS.md` check commands as part of the checker / final quality path
 - multi-model checking with a preferred stack of `gpt-5.4`, `gpt-5.3-codex`, and `GLM-5.1` when those models are available/configured
 - checker-model failures are recorded as errored reviews without aborting the whole workflow, as long as at least one checker succeeds
 - packaged as a reusable pi package, not just a project-local extension
@@ -27,6 +32,10 @@ A Codex-style planning workflow for pi that lets you start from a loose feature 
     - `/discover-implement`
     - `/discover-implement direct Start with tests.`
     - `/discover-implement subagents Keep changes minimal.`
+- `/implement-subagents [prompt]` — run sub-agents directly from the current `PLAN.md`, or from a raw prompt that gets a lightweight synthesized plan
+  - examples:
+    - `/implement-subagents`
+    - `/implement-subagents Add a standalone /sync command and keep the UI minimal.`
 - `Ctrl+Alt+D` — toggle discovery mode
 
 ## How discovery mode behaves
@@ -56,13 +65,17 @@ When the assistant produces a final plan, the extension:
 
 ## Sub-agent implementation mode
 
-Sub-agent mode keeps orchestration out of the main conversation and runs a fixed workflow in isolated `pi` subprocesses.
+Sub-agent mode keeps orchestration out of the main conversation and runs a fixed workflow in isolated `pi` subprocesses. The whole run happens in a temporary jj workspace (or git worktree fallback), and parallel-safe worker batches get their own child workspaces before their results are integrated back into the parent workspace. Design-sensitive work is routed to a dedicated design specialist worker, and every sub-agent implementation run goes through a reusable quality suite in this order: `cleanup -> design (when needed) -> checker`.
+
+In interactive TUI sessions, it also renders a persistent progress widget above the editor. The widget keeps the workflow spine visible, expands worker batches after decomposition, highlights the current active phase, and makes re-entrant loops like cleanup → design → checker → fix → cleanup and validator → finish → cleanup visibly obvious. When design review is not needed, the design stage is marked as skipped instead of being left pending. In RPC or non-interactive flows, the extension falls back to concise text progress instead.
 
 ### Stages
 
-1. **decomposer** — breaks `PLAN.md` into actionable phases with dependencies, touched paths, and conservative parallel-safety hints
-2. **worker** — implements phases, usually sequentially, only parallelizing batches when touched paths do not overlap and safety is explicit
-3. **checker** — runs review passes with multiple models when available and reviews the implementation for:
+1. **decomposer** — breaks `PLAN.md` into actionable phases with dependencies, touched paths, conservative parallel-safety hints, and a `designSensitive` flag for UI, interaction, discoverability, navigation, copy, and ambiguous product-behavior work
+2. **worker / design worker** — implements phases, usually sequentially, only parallelizing batches when touched paths do not overlap and safety is explicit. Parallel phases run in separate child workspaces and are then integrated back into the parent workspace. Design-sensitive phases use the dedicated design worker instead of the generic worker.
+3. **cleanup auditor** — always runs first after implementation. It audits the touched files first, then adjacent legacy or superseded code and other concrete do-now cleanup opportunities. It is intentionally constrained to actionable cleanup that should be completed now.
+4. **design reviewer** — runs when decomposed phase metadata or fallback heuristics indicate design-sensitive work. It reviews simplicity, discoverability, clarity, hierarchy, interaction friction, inclusivity/accessibility where relevant, and overall restraint/polish.
+5. **checker** — runs review passes with multiple models when available, executes explicit required checks extracted conservatively from relevant `AGENTS.md` files, and reviews the implementation for:
    - security
    - regression risk
    - UI consistency
@@ -70,38 +83,60 @@ Sub-agent mode keeps orchestration out of the main conversation and runs a fixed
    - dead code / loose ends
    - unnecessary complexity
    - relevant `AGENTS.md` guidance for touched areas
-4. **fix pass** — the worker applies concrete checker findings automatically
-5. **re-check** — the checker runs once more after the fix pass
-6. **validator** — compares the actual result against the approved plan and reports coverage plus discrepancies
+6. **quality-suite remediation loop** — cleanup, design review, and checker all reuse the existing `CheckerReport` structure. If any of them returns findings, the workflow applies fixes automatically, re-detects changed files, and restarts the full quality suite from cleanup on the latest code.
+7. **validator** — compares the actual result against the approved plan and reports coverage plus discrepancies
+8. **optional finish pass** — if the validator finds material discrepancies and you choose to continue, the workflow first auto-remediates worthwhile-now items, then lets you manually select any remaining actionable discrepancies item by item before implementing only the checked subset with the generic worker or design worker as appropriate
+9. **post-finish quality suite + final validator** — after any validator-driven finish pass, the exact same `cleanup -> design -> checker` suite reruns before the validator runs again
 
-If the validator finds material discrepancies, the extension asks whether to:
+Design review is a hard gate. If cleanup, design review, or checker findings still remain after the bounded retry limit for the quality suite, the workflow fails clearly instead of silently finishing with unresolved issues. The current limit is 3 quality-suite rounds.
 
-- implement the remaining items now
-- reformulate in discovery mode
-- accept the discrepancies and finish
+If the validator finds material discrepancies, the extension:
+
+- automatically implements worthwhile-now discrepancies first when the validator marks them safe and useful to do now
+- then asks whether to select specific remaining actionable items to implement now, reformulate in discovery mode, or accept the discrepancies and finish
+- in interactive TUI mode, uses a checkbox selector that shows each item's status, why-it-is-still-open note, worthwhile-now judgment, rationale, and suggested action
+- in RPC or other degraded UI contexts, falls back to `ctx.ui.editor()` with a markdown checklist keyed by discrepancy ID
+- keeps `superseded` discrepancies informational only, so they stay visible for context but are not selectable for remediation
+
+### Reports and summaries
+
+- the cleanup auditor, design reviewer, and checker all return the existing `CheckerReport` JSON shape instead of introducing separate report types
+- that shared structure means parsing, severity/category handling, finding summaries, and fix-context rendering are reused across all three quality gates
+- the final workflow summary reports changed files, how many cleanup audits ran, how many design reviews ran vs were skipped, how many quality remediation passes were needed, how many cleanup/design/checker findings were fixed, whether legacy code/files were removed, checker review totals, and the validator recommendation
+- if you accept unresolved validator discrepancies, the final summary keeps them visible under the remaining-discrepancies section instead of silently dropping them
+- cleanup reporting is concrete: it focuses on actionable cleanup appropriate to finish now, and the summary calls out when legacy or superseded code/files were actually removed
 
 ## `AGENTS.md` guidance behavior
 
-For every changed file, the sub-agent workflow walks ancestor directories up to repo root and collects relevant `AGENTS.md` files.
+For every changed file or touched path, the sub-agent workflow walks ancestor directories up to repo root and collects relevant `AGENTS.md` files.
 
-Those instructions are passed into the checker and validator so review stays aligned with repo-specific workflow rules and conventions, even when the changed files are outside the original working-directory ancestor chain.
+Those instructions are passed into worker, remediation, cleanup, design review, checker, and validator passes so implementation and review stay aligned with repo-specific workflow rules and conventions, even when the touched files are outside the original working-directory ancestor chain.
+
+When those `AGENTS.md` files contain explicit check commands in recognizable validation/check sections (for example `Run: npm test` or fenced command blocks under a Checks heading), the workflow executes them in the isolated workspace and treats failures as remediation-triggering findings instead of advisory notes.
 
 ## Direct vs sub-agent mode
 
 ### Direct mode
 
 - preserves today’s lightweight handoff behavior
+- remains unchanged by the new design-review and cleanup behavior
 - exits discovery mode
 - sends an implementation prompt back into the main session
 
 ### Sub-agent mode
 
-- requires a saved `PLAN.md`
-- runs implementation in isolated contexts with bundled prompts
+- works from either a saved `PLAN.md` or a raw prompt passed to `/implement-subagents`
+- synthesizes a lightweight ephemeral plan for raw-prompt runs
+- runs implementation in an isolated jj workspace or git worktree with bundled prompts
 - keeps orchestration chatter out of the main session
 - prefers `openai-codex/gpt-5.4` for decomposition, implementation, and validation when available
-- runs checker passes across multiple models when available (`gpt-5.4`, `gpt-5.3-codex`, `GLM-5.1`)
-- adds an automatic check / fix / re-check / validate pipeline
+- routes design-sensitive implementation, remediation, and validator finish work to the dedicated design worker when needed
+- always runs cleanup, conditionally runs design review, and runs checker passes across multiple models when available (`gpt-5.4`, `gpt-5.3-codex`, `GLM-5.1`)
+- treats design review as a hard gate, restarting remediation from cleanup whenever cleanup/design/checker findings appear
+- fails clearly if the bounded quality-suite retry limit is exhausted instead of silently accepting remaining findings
+- reruns the same quality suite after any validator-driven finish pass before the final validator
+- auto-remediates worthwhile validator discrepancies first, then lets you manually pick any remaining actionable discrepancies item by item
+- uses a checkbox TUI selector when available, with an editor-based markdown checklist fallback in RPC/degraded UI flows
 
 In non-UI contexts, `/discover-implement` still defaults to the direct path unless you explicitly request `subagents`.
 
