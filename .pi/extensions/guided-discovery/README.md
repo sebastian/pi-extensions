@@ -13,7 +13,9 @@ A Codex-style planning workflow for pi that lets you start from a loose feature 
   - direct handoff to the main session
   - isolated sub-agent implementation workflow
 - bundled sub-agent roles for decomposition, implementation, checking, and validation
-- `CHECKS.md` discovery for changed areas, with safe command filtering and automatic re-checking
+- changed-area `AGENTS.md` discovery so checker and validator see the right repo instructions for touched files
+- multi-model checking with a preferred stack of `gpt-5.4`, `gpt-5.3-codex`, and `GLM-5.1` when those models are available/configured
+- checker-model failures are recorded as errored reviews without aborting the whole workflow, as long as at least one checker succeeds
 - packaged as a reusable pi package, not just a project-local extension
 
 ## Commands
@@ -60,14 +62,14 @@ Sub-agent mode keeps orchestration out of the main conversation and runs a fixed
 
 1. **decomposer** — breaks `PLAN.md` into actionable phases with dependencies, touched paths, and conservative parallel-safety hints
 2. **worker** — implements phases, usually sequentially, only parallelizing batches when touched paths do not overlap and safety is explicit
-3. **checker** — reviews the implementation for:
+3. **checker** — runs review passes with multiple models when available and reviews the implementation for:
    - security
    - regression risk
    - UI consistency
    - performance regression risk
    - dead code / loose ends
    - unnecessary complexity
-   - relevant `CHECKS.md` guidance
+   - relevant `AGENTS.md` guidance for touched areas
 4. **fix pass** — the worker applies concrete checker findings automatically
 5. **re-check** — the checker runs once more after the fix pass
 6. **validator** — compares the actual result against the approved plan and reports coverage plus discrepancies
@@ -78,15 +80,11 @@ If the validator finds material discrepancies, the extension asks whether to:
 - reformulate in discovery mode
 - accept the discrepancies and finish
 
-## `CHECKS.md` behavior
+## `AGENTS.md` guidance behavior
 
-For every changed file, the sub-agent workflow walks ancestor directories up to repo root and collects relevant `CHECKS.md` files.
+For every changed file, the sub-agent workflow walks ancestor directories up to repo root and collects relevant `AGENTS.md` files.
 
-Command suggestions found in those files are treated as guidance, not trusted scripts:
-
-- common verification commands such as tests, lint, type checks, and builds may run automatically
-- destructive, installation, deployment, or otherwise risky commands are blocked
-- blocked commands are still surfaced to the checker so they are not silently ignored
+Those instructions are passed into the checker and validator so review stays aligned with repo-specific workflow rules and conventions, even when the changed files are outside the original working-directory ancestor chain.
 
 ## Direct vs sub-agent mode
 
@@ -101,6 +99,8 @@ Command suggestions found in those files are treated as guidance, not trusted sc
 - requires a saved `PLAN.md`
 - runs implementation in isolated contexts with bundled prompts
 - keeps orchestration chatter out of the main session
+- prefers `openai-codex/gpt-5.4` for decomposition, implementation, and validation when available
+- runs checker passes across multiple models when available (`gpt-5.4`, `gpt-5.3-codex`, `GLM-5.1`)
 - adds an automatic check / fix / re-check / validate pipeline
 
 In non-UI contexts, `/discover-implement` still defaults to the direct path unless you explicitly request `subagents`.

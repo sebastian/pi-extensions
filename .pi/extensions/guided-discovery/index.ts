@@ -112,6 +112,10 @@ async function fileExists(path: string): Promise<boolean> {
 	}
 }
 
+function isPrintModeProcess(): boolean {
+	return process.argv.includes("-p") || process.argv.includes("--print");
+}
+
 export default function guidedDiscovery(pi: ExtensionAPI): void {
 	registerQuestionnaire(pi);
 	registerWebResearch(pi);
@@ -326,14 +330,21 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 				},
 			});
 
-			pi.sendMessage(
-				{
-					customType: "guided-discovery-implementation",
-					content: result.summary,
-					display: true,
-				},
-				{ triggerTurn: false },
-			);
+			if (ctx.hasUI) {
+				pi.sendMessage(
+					{
+						customType: "guided-discovery-implementation",
+						content: result.summary,
+						display: true,
+					},
+					{ triggerTurn: false },
+				);
+			} else if (result.summary.trim()) {
+				console.log(result.summary.trim());
+				if (isPrintModeProcess()) {
+					setImmediate(() => process.exit(0));
+				}
+			}
 
 			if (result.decision === "reformulate" && result.reformulationPrompt) {
 				enableDiscovery(ctx);
@@ -342,15 +353,22 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 			return true;
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			if (ctx.hasUI) ctx.ui.notify(`Sub-agent implementation failed: ${message}`, "error");
-			pi.sendMessage(
-				{
-					customType: "guided-discovery-implementation-error",
-					content: `Sub-agent implementation failed: ${message}`,
-					display: true,
-				},
-				{ triggerTurn: false },
-			);
+			if (ctx.hasUI) {
+				ctx.ui.notify(`Sub-agent implementation failed: ${message}`, "error");
+				pi.sendMessage(
+					{
+						customType: "guided-discovery-implementation-error",
+						content: `Sub-agent implementation failed: ${message}`,
+						display: true,
+					},
+					{ triggerTurn: false },
+				);
+			} else {
+				console.error(`Sub-agent implementation failed: ${message}`);
+				if (isPrintModeProcess()) {
+					setImmediate(() => process.exit(1));
+				}
+			}
 			return false;
 		} finally {
 			if (ctx.hasUI) clearImplementationProgress(ctx);

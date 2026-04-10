@@ -52,7 +52,7 @@ test("parseCheckerReport validates findings and check runs", () => {
 				},
 			],
 			checksRun: [
-				{ command: "npm test", source: "CHECKS.md", status: "passed", summary: "all green" },
+				{ command: "model-review", source: "openai-codex/gpt-5.4", status: "passed", summary: "all green" },
 			],
 			unresolvedRisks: ["watch migrations"],
 			overallAssessment: "Looks mostly good",
@@ -62,6 +62,29 @@ test("parseCheckerReport validates findings and check runs", () => {
 	assert.equal(report.findings.length, 1);
 	assert.equal(report.checksRun[0].status, "passed");
 	assert.equal(report.unresolvedRisks[0], "watch migrations");
+});
+
+test("parseCheckerReport normalizes category and severity aliases", () => {
+	const report = parseCheckerReport(
+		JSON.stringify({
+			findings: [
+				{
+					category: "guidance",
+					severity: "critical",
+					summary: "Repo instruction missed",
+					details: "AGENTS guidance was ignored",
+					suggestedFix: "Follow AGENTS",
+					paths: ["src/app.ts"],
+				},
+			],
+			checksRun: [],
+			unresolvedRisks: [],
+			overallAssessment: "Needs a follow-up",
+		}),
+	);
+
+	assert.equal(report.findings[0].category, "guidance");
+	assert.equal(report.findings[0].severity, "high");
 });
 
 test("parseValidationReport and hasMaterialDiscrepancies reflect missing work", () => {

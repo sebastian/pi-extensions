@@ -5,7 +5,7 @@ export type CheckerFindingCategory =
 	| "performance"
 	| "loose_ends"
 	| "complexity"
-	| "checks";
+	| "guidance";
 
 export type FindingSeverity = "low" | "medium" | "high";
 export type CheckRunStatus = "passed" | "failed" | "blocked" | "error" | "not_run";
@@ -128,14 +128,37 @@ function normalizeCheckRun(value: unknown, index: number): CheckRunReport {
 	};
 }
 
+function normalizeFindingCategory(category: string): CheckerFindingCategory | null {
+	const normalized = category.trim().toLowerCase().replace(/[\s-]+/g, "_");
+	if ((["security", "regression", "ui", "performance", "loose_ends", "complexity", "guidance"] as const).includes(normalized as CheckerFindingCategory)) {
+		return normalized as CheckerFindingCategory;
+	}
+	if (["correctness", "breakage", "breaking_change", "regression_risk"].includes(normalized)) return "regression";
+	if (["ux", "consistency", "ui_consistency"].includes(normalized)) return "ui";
+	if (["perf", "efficiency", "performance_risk"].includes(normalized)) return "performance";
+	if (["cleanup", "dead_code", "looseends", "looseend", "maintainability"].includes(normalized)) return "loose_ends";
+	if (["simplicity", "overscoping", "overengineering", "architecture", "design"].includes(normalized)) return "complexity";
+	if (["agents", "agent", "instructions", "conventions", "policy", "process"].includes(normalized)) return "guidance";
+	return null;
+}
+
+function normalizeFindingSeverity(severity: string): FindingSeverity | null {
+	const normalized = severity.trim().toLowerCase();
+	if ((["low", "medium", "high"] as const).includes(normalized as FindingSeverity)) return normalized as FindingSeverity;
+	if (["minor", "small", "info", "informational"].includes(normalized)) return "low";
+	if (["moderate", "warning"].includes(normalized)) return "medium";
+	if (["critical", "severe", "major"].includes(normalized)) return "high";
+	return null;
+}
+
 function normalizeFinding(value: unknown, index: number): CheckerFinding {
 	if (!isObject(value)) throw new Error(`findings[${index}] must be an object`);
-	const category = stringValue(value.category) as CheckerFindingCategory;
-	if (!(["security", "regression", "ui", "performance", "loose_ends", "complexity", "checks"] as const).includes(category)) {
+	const category = normalizeFindingCategory(stringValue(value.category));
+	if (!category) {
 		throw new Error(`findings[${index}] has invalid category`);
 	}
-	const severity = stringValue(value.severity, value.level) as FindingSeverity;
-	if (!(["low", "medium", "high"] as const).includes(severity)) {
+	const severity = normalizeFindingSeverity(stringValue(value.severity, value.level));
+	if (!severity) {
 		throw new Error(`findings[${index}] has invalid severity`);
 	}
 	return {

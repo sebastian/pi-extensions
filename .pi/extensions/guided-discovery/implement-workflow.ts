@@ -1,18 +1,16 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { computeExecutionBatches, detectChangedFiles, type ExecLike } from "./changes.ts";
 import {
-	collectSuggestedCheckCommands,
-	discoverRelevantChecks,
+	discoverAncestorDocumentPaths,
+	discoverRelevantGuidance,
 	findRepoRoot,
-	renderChecksContext,
-	runSafeCheckCommands,
-	type CheckCommandResult,
-	type RelevantChecksResult,
-	type SuggestedCheckCommand,
-} from "./checks.ts";
+	renderGuidanceSummary,
+	type RelevantGuidanceResult,
+} from "./guidance.ts";
+import { resolveWorkflowModels } from "./models.ts";
 import { runSubagent } from "./subagent-runner.ts";
 import {
 	hasMaterialDiscrepancies,
@@ -27,6 +25,19 @@ import {
 
 const READ_ONLY_SUBAGENT_TOOLS = ["read", "grep", "find", "ls"];
 const WORKER_SUBAGENT_TOOLS = ["read", "edit", "write", "grep", "find", "ls"];
+
+type CheckRunSummary = {
+	command: string;
+	source: string;
+	status: "passed" | "failed" | "blocked" | "error";
+	summary: string;
+};
+
+interface CheckerModelRun {
+	model: string;
+	report: CheckerReport;
+	summary: CheckRunSummary;
+}
 
 type WorkflowDecision = "done" | "reformulate";
 
@@ -52,29 +63,12 @@ interface WorkflowSummary {
 	reformulationPrompt?: string;
 }
 
-function toModelRef(ctx: ExtensionContext): string | undefined {
-	return ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
-}
-
 function trimBlock(text: string): string {
 	return text.trim() ? `${text.trim()}\n` : "";
 }
 
 async function readBundledPrompt(name: string): Promise<string> {
 	return readFile(new URL(`./agents/${name}.md`, import.meta.url), "utf8");
-}
-
-function discoverAncestorFiles(start: string, stopAt: string, fileName: string): string[] {
-	const files: string[] = [];
-	let current = resolve(start);
-	while (true) {
-		files.push(join(current, fileName));
-		if (current === stopAt) break;
-		const parent = dirname(current);
-		if (parent === current) break;
-		current = parent;
-	}
-	return [...new Set(files)].reverse();
 }
 
 async function existingFiles(paths: string[]): Promise<string[]> {
@@ -144,22 +138,14 @@ function renderWorkerPhaseSummaries(results: WorkerPhaseResult[]): string {
 	return trimBlock(lines.join("\n"));
 }
 
-function renderRelevantChecksSummary(relevantChecks: RelevantChecksResult): string {
-	const lines = ["## Relevant CHECKS.md mapping", ""];
-	if (relevantChecks.documents.length === 0) {
-		lines.push("No CHECKS.md documents were discovered.");
-		return trimBlock(lines.join("\n"));
-	}
-	for (const document of relevantChecks.documents) {
-		lines.push(`- ${document.relativePath} -> ${document.appliesTo.join(", ")}`);
-	}
-	return trimBlock(lines.join("\n"));
+function renderRelevantGuidanceSummary(result: RelevantGuidanceResult): string {
+	return renderGuidanceSummary(result, "AGENTS.md");
 }
 
-function renderCheckResultsSummary(results: CheckCommandResult[]): string {
-	const lines = ["## Executed checks", ""];
+function renderCheckResultsSummary(results: CheckRunSummary[]): string {
+	const lines = ["## Checker model reviews", ""];
 	if (results.length === 0) {
-		lines.push("No safe commands were executed.");
+		lines.push("No checker reviews were recorded.");
 	} else {
 		for (const result of results) {
 			lines.push(`- ${result.command} (${result.source}) => ${result.status}: ${result.summary}`);
@@ -203,21 +189,92 @@ function renderValidationSummary(report: ValidationReport): string {
 	return trimBlock(lines.join("\n"));
 }
 
+function mergeUniqueText(parts: string[]): string {
+	const unique = [...new Set(parts.map((part) => part.trim()).filter(Boolean))];
+	return unique.join("\n\n");
+}
+
+function severityRank(severity: "low" | "medium" | "high"): number {
+	return severity === "high" ? 3 : severity === "medium" ? 2 : 1;
+}
+
+function combineCheckerReports(modelRuns: CheckerModelRun[]): CheckerReport {
+	const findingMap = new Map<
+		string,
+		CheckerReport["findings"][number] & {
+			reporters: Set<string>;
+			detailParts: string[];
+			fixParts: string[];
+		}
+	>();
+	const unresolvedRisks = new Set<string>();
+	const checksRun: CheckRunSummary[] = [];
+	const assessments: string[] = [];
+
+	for (const run of modelRuns) {
+		checksRun.push(run.summary);
+		if (run.report.overallAssessment) assessments.push(`${run.model}: ${run.report.overallAssessment}`);
+		for (const risk of run.report.unresolvedRisks) unresolvedRisks.add(risk);
+		for (const finding of run.report.findings) {
+			const key = [finding.category, finding.summary.trim().toLowerCase(), [...finding.paths].sort().join(",")].join("|");
+			const existing = findingMap.get(key);
+			const taggedDetails = finding.details ? `${run.model}: ${finding.details}` : "";
+			const taggedFix = finding.suggestedFix ? `${run.model}: ${finding.suggestedFix}` : "";
+			if (!existing) {
+				findingMap.set(key, {
+					...finding,
+					reporters: new Set([run.model]),
+					detailParts: taggedDetails ? [taggedDetails] : [],
+					fixParts: taggedFix ? [taggedFix] : [],
+				});
+				continue;
+			}
+
+			existing.reporters.add(run.model);
+			existing.paths = [...new Set([...existing.paths, ...finding.paths])].sort();
+			if (severityRank(finding.severity) > severityRank(existing.severity)) existing.severity = finding.severity;
+			if (taggedDetails) existing.detailParts.push(taggedDetails);
+			if (taggedFix) existing.fixParts.push(taggedFix);
+		}
+	}
+
+	const findings = Array.from(findingMap.values()).map((finding, index) => ({
+		id: finding.id || `finding-${index + 1}`,
+		category: finding.category,
+		severity: finding.severity,
+		summary: finding.summary,
+		details: mergeUniqueText([
+			`Reported by: ${Array.from(finding.reporters).join(", ")}`,
+			...finding.detailParts,
+		]),
+		suggestedFix: mergeUniqueText(finding.fixParts),
+		paths: finding.paths,
+	}));
+
+	return {
+		findings,
+		checksRun,
+		unresolvedRisks: Array.from(unresolvedRisks),
+		overallAssessment: assessments.join("\n"),
+	};
+}
+
 function buildSummary(
 	changedFiles: string[],
-	checks: CheckCommandResult[],
+	checks: CheckRunSummary[],
 	validation: ValidationReport,
 	checker: CheckerReport,
 ): string {
 	const passedChecks = checks.filter((check) => check.status === "passed").length;
 	const failedChecks = checks.filter((check) => check.status === "failed").length;
 	const blockedChecks = checks.filter((check) => check.status === "blocked").length;
+	const erroredChecks = checks.filter((check) => check.status === "error").length;
 	return trimBlock(
 		[
 			"Sub-agent implementation workflow finished.",
 			changedFiles.length > 0 ? `Changed files (${changedFiles.length}): ${changedFiles.join(", ")}` : "Changed files: none detected",
 			`Checker findings: ${checker.findings.length}`,
-			`Checks: ${passedChecks} passed, ${failedChecks} failed, ${blockedChecks} blocked`,
+			`Checker reviews: ${passedChecks} passed, ${failedChecks} flagged findings, ${blockedChecks} blocked, ${erroredChecks} errored`,
 			`Validator recommendation: ${validation.recommendation}`,
 			validation.summary || "",
 		].join("\n"),
@@ -397,7 +454,7 @@ async function runWorkerFixPass(options: {
 	return ensureSuccessfulSubagent(options.contextTitle, result);
 }
 
-async function runCheckerAndCommands(options: {
+async function runCheckerSuite(options: {
 	cwd: string;
 	tempDir: string;
 	planPath: string;
@@ -406,61 +463,79 @@ async function runCheckerAndCommands(options: {
 	decomposition: DecompositionPlan;
 	workerResults: WorkerPhaseResult[];
 	changedFiles: string[];
-	exec: ExecLike;
-	model?: string;
+	checkerModels: string[];
 	thinkingLevel?: string;
 	onUpdate?: (update: WorkflowStageUpdate) => void;
-}): Promise<{ report: CheckerReport; relevantChecks: RelevantChecksResult; commands: SuggestedCheckCommand[]; results: CheckCommandResult[] }> {
-	const relevantChecks = discoverRelevantChecks(options.cwd, options.changedFiles);
-	const commands = collectSuggestedCheckCommands(relevantChecks.documents);
-	options.onUpdate?.({
-		stage: "checks",
-		lines: [
-			`Discovered CHECKS.md files: ${relevantChecks.documents.length}`,
-			`Suggested commands: ${commands.length}`,
-		],
-	});
-	const results = await runSafeCheckCommands(options.exec, options.cwd, commands);
+}): Promise<{ report: CheckerReport; guidance: RelevantGuidanceResult; results: CheckRunSummary[]; modelRuns: CheckerModelRun[] }> {
+	const guidance = discoverRelevantGuidance(options.cwd, options.changedFiles, "AGENTS.md");
+	const guidancePaths = guidance.documents.map((document) => document.path);
 	const decompositionPath = await writeTempContextFile(options.tempDir, "decomposition.md", renderDecompositionSummary(options.decomposition));
 	const workerSummaryPath = await writeTempContextFile(options.tempDir, "worker-summaries.md", renderWorkerPhaseSummaries(options.workerResults));
 	const changedFilesPath = await writeTempContextFile(options.tempDir, "changed-files.md", renderChangedFilesSummary(options.changedFiles));
-	const checksMappingPath = await writeTempContextFile(options.tempDir, "checks-mapping.md", renderRelevantChecksSummary(relevantChecks));
-	const checksContextPath = await writeTempContextFile(
-		options.tempDir,
-		"checks-context.md",
-		renderChecksContext(relevantChecks, commands, results),
-	);
+	const guidancePath = await writeTempContextFile(options.tempDir, "agents-guidance.md", renderRelevantGuidanceSummary(guidance));
+	const files = [
+		options.planPath,
+		...options.agentFiles,
+		...guidancePaths,
+		decompositionPath,
+		workerSummaryPath,
+		changedFilesPath,
+		guidancePath,
+	];
 
-	const report = await runStructuredStage({
-		name: "checker",
-		systemPrompt: options.checkerPrompt,
-		prompt: "Review the implementation, the changed files, the worker summaries, and the executed check outputs. Return JSON only.",
-		files: [
-			options.planPath,
-			...options.agentFiles,
-			decompositionPath,
-			workerSummaryPath,
-			changedFilesPath,
-			checksMappingPath,
-			checksContextPath,
-		],
-		tools: READ_ONLY_SUBAGENT_TOOLS,
-		cwd: options.cwd,
-		model: options.model,
-		thinkingLevel: options.thinkingLevel,
-		tempDir: options.tempDir,
-		parse: parseCheckerReport,
-		onUpdate: options.onUpdate,
-	});
+	const modelRuns: CheckerModelRun[] = [];
+	const results: CheckRunSummary[] = [];
+	const reviewModels = options.checkerModels.length > 0 ? options.checkerModels : [undefined];
+	for (const model of reviewModels) {
+		options.onUpdate?.({
+			stage: "checks",
+			lines: [
+				`Running checker model ${model ?? "default"}`,
+				`Relevant AGENTS.md files: ${guidance.documents.length}`,
+			],
+		});
+		try {
+			const report = await runStructuredStage({
+				name: `checker-${model ?? "default"}`,
+				systemPrompt: options.checkerPrompt,
+				prompt: "Review the implementation, the changed files, the worker summaries, and the relevant AGENTS.md guidance. Return JSON only.",
+				files,
+				tools: READ_ONLY_SUBAGENT_TOOLS,
+				cwd: options.cwd,
+				model,
+				thinkingLevel: options.thinkingLevel,
+				tempDir: options.tempDir,
+				parse: parseCheckerReport,
+				onUpdate: options.onUpdate,
+			});
+			const summary: CheckRunSummary = {
+				command: "model-review",
+				source: model ?? "default",
+				status: report.findings.length > 0 ? "failed" : "passed",
+				summary: report.overallAssessment || `${report.findings.length} finding(s)`,
+			};
+			results.push(summary);
+			modelRuns.push({
+				model: model ?? "default",
+				report,
+				summary,
+			});
+		} catch (error) {
+			results.push({
+				command: "model-review",
+				source: model ?? "default",
+				status: "error",
+				summary: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
 
-	report.checksRun = results.map((result) => ({
-		command: result.command,
-		source: result.source,
-		status: result.status,
-		summary: result.summary,
-	}));
+	if (modelRuns.length === 0) {
+		throw new Error(results[0]?.summary || "All checker models failed");
+	}
 
-	return { report, relevantChecks, commands, results };
+	const report = combineCheckerReports(modelRuns);
+	return { report, guidance, results, modelRuns };
 }
 
 async function runValidator(options: {
@@ -473,16 +548,18 @@ async function runValidator(options: {
 	workerResults: WorkerPhaseResult[];
 	changedFiles: string[];
 	checkerReport: CheckerReport;
-	checkResults: CheckCommandResult[];
+	checkResults: CheckRunSummary[];
 	model?: string;
 	thinkingLevel?: string;
 	onUpdate?: (update: WorkflowStageUpdate) => void;
 }): Promise<ValidationReport> {
+	const guidance = discoverRelevantGuidance(options.cwd, options.changedFiles, "AGENTS.md");
 	const decompositionPath = await writeTempContextFile(options.tempDir, "validator-decomposition.md", renderDecompositionSummary(options.decomposition));
 	const workerSummaryPath = await writeTempContextFile(options.tempDir, "validator-worker-summaries.md", renderWorkerPhaseSummaries(options.workerResults));
 	const changedFilesPath = await writeTempContextFile(options.tempDir, "validator-changed-files.md", renderChangedFilesSummary(options.changedFiles));
 	const checkerPath = await writeTempContextFile(options.tempDir, "validator-checker.md", renderCheckerFindingsSummary(options.checkerReport));
 	const checkResultsPath = await writeTempContextFile(options.tempDir, "validator-check-results.md", renderCheckResultsSummary(options.checkResults));
+	const guidancePath = await writeTempContextFile(options.tempDir, "validator-agents-guidance.md", renderRelevantGuidanceSummary(guidance));
 
 	return await runStructuredStage({
 		name: "validator",
@@ -491,11 +568,13 @@ async function runValidator(options: {
 		files: [
 			options.planPath,
 			...options.agentFiles,
+			...guidance.documents.map((document) => document.path),
 			decompositionPath,
 			workerSummaryPath,
 			changedFilesPath,
 			checkerPath,
 			checkResultsPath,
+			guidancePath,
 		],
 		tools: READ_ONLY_SUBAGENT_TOOLS,
 		cwd: options.cwd,
@@ -516,7 +595,9 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 	const repoRoot = findRepoRoot(ctx.cwd);
 	const tempDir = await mkdtemp(join(tmpdir(), "guided-discovery-"));
 	const exec = makeExec(pi);
-	const model = toModelRef(ctx);
+	const workflowModels = resolveWorkflowModels(ctx);
+	const primaryModel = workflowModels.primary;
+	const checkerModels = workflowModels.checkers;
 	const thinkingLevel = pi.getThinkingLevel();
 
 	const update = (stage: string, lines: string[]) => options.onUpdate?.({ stage, lines });
@@ -528,7 +609,7 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 			readBundledPrompt("checker"),
 			readBundledPrompt("validator"),
 		]);
-		const agentFiles = await existingFiles(discoverAncestorFiles(ctx.cwd, repoRoot, "AGENTS.md"));
+		const agentFiles = await existingFiles(discoverAncestorDocumentPaths(ctx.cwd, repoRoot, "AGENTS.md"));
 		const planInfoPath = await writeTempContextFile(
 			tempDir,
 			"workflow-instructions.md",
@@ -543,7 +624,11 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 			].join("\n"),
 		);
 
-		update("decomposer", ["Breaking the approved plan into implementation phases..."]);
+		update("decomposer", [
+			"Breaking the approved plan into implementation phases...",
+			`Primary model: ${primaryModel ?? "default"}`,
+			`Checker models: ${checkerModels.length > 0 ? checkerModels.join(", ") : primaryModel ?? "default"}`,
+		]);
 		const decomposition = await runStructuredStage({
 			name: "decomposer",
 			systemPrompt: decomposerPrompt,
@@ -551,7 +636,7 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 			files: [planPath, ...agentFiles, planInfoPath],
 			tools: READ_ONLY_SUBAGENT_TOOLS,
 			cwd: ctx.cwd,
-			model,
+			model: primaryModel,
 			thinkingLevel,
 			tempDir,
 			parse: parseDecompositionPlan,
@@ -578,7 +663,7 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 									systemPrompt: workerPrompt,
 									phase,
 									extraInstructions: options.extraInstructions,
-									model,
+									model: primaryModel,
 									thinkingLevel,
 									onUpdate: options.onUpdate,
 								}),
@@ -593,7 +678,7 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 								systemPrompt: workerPrompt,
 								phase: batch[0],
 								extraInstructions: options.extraInstructions,
-								model,
+								model: primaryModel,
 								thinkingLevel,
 								onUpdate: options.onUpdate,
 							}),
@@ -602,7 +687,7 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 		}
 
 		let changedFiles = await detectChangedFiles(ctx.cwd, exec);
-		let checkPass = await runCheckerAndCommands({
+		let checkPass = await runCheckerSuite({
 			cwd: ctx.cwd,
 			tempDir,
 			planPath,
@@ -611,25 +696,30 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 			decomposition,
 			workerResults,
 			changedFiles,
-			exec,
-			model,
+			checkerModels: checkerModels.length > 0 ? checkerModels : primaryModel ? [primaryModel] : [],
 			thinkingLevel,
 			onUpdate: options.onUpdate,
 		});
 
 		if (checkPass.report.findings.length > 0) {
 			update("fix", [`Applying ${checkPass.report.findings.length} checker finding(s)...`]);
+			const fixAgentFiles = [
+				...new Set([
+					...agentFiles,
+					...discoverRelevantGuidance(ctx.cwd, changedFiles, "AGENTS.md").documents.map((document) => document.path),
+				]),
+			];
 			const fixSummary = await runWorkerFixPass({
 				cwd: ctx.cwd,
 				tempDir,
 				planPath,
-				agentFiles,
+				agentFiles: fixAgentFiles,
 				systemPrompt: workerPrompt,
 				contextTitle: "checker-fix-pass",
 				contextMarkdown: renderCheckerFindingsSummary(checkPass.report),
 				prompt:
 					"Apply the attached checker findings now. Fix concrete issues, keep the implementation simple, and then summarize what you changed.",
-				model,
+				model: primaryModel,
 				thinkingLevel,
 				onUpdate: options.onUpdate,
 			});
@@ -647,7 +737,7 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 			});
 
 			changedFiles = await detectChangedFiles(ctx.cwd, exec);
-			checkPass = await runCheckerAndCommands({
+			checkPass = await runCheckerSuite({
 				cwd: ctx.cwd,
 				tempDir,
 				planPath,
@@ -656,8 +746,7 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 				decomposition,
 				workerResults,
 				changedFiles,
-				exec,
-				model,
+				checkerModels: checkerModels.length > 0 ? checkerModels : primaryModel ? [primaryModel] : [],
 				thinkingLevel,
 				onUpdate: options.onUpdate,
 			});
@@ -674,7 +763,7 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 			changedFiles,
 			checkerReport: checkPass.report,
 			checkResults: checkPass.results,
-			model,
+			model: primaryModel,
 			thinkingLevel,
 			onUpdate: options.onUpdate,
 		});
@@ -708,17 +797,23 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 			}
 
 			if (choice === "Implement remaining items now") {
+				const finishAgentFiles = [
+					...new Set([
+						...agentFiles,
+						...discoverRelevantGuidance(ctx.cwd, changedFiles, "AGENTS.md").documents.map((document) => document.path),
+					]),
+				];
 				const finishSummary = await runWorkerFixPass({
 					cwd: ctx.cwd,
 					tempDir,
 					planPath,
-					agentFiles,
+					agentFiles: finishAgentFiles,
 					systemPrompt: workerPrompt,
 					contextTitle: "validator-finish-pass",
 					contextMarkdown: renderValidationSummary(validation),
 					prompt:
 						"Implement the remaining validator discrepancies now. Stay within PLAN.md, avoid extra scope, and then summarize what you finished.",
-					model,
+					model: primaryModel,
 					thinkingLevel,
 					onUpdate: options.onUpdate,
 				});
@@ -735,7 +830,7 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 					summary: finishSummary,
 				});
 				changedFiles = await detectChangedFiles(ctx.cwd, exec);
-				checkPass = await runCheckerAndCommands({
+				checkPass = await runCheckerSuite({
 					cwd: ctx.cwd,
 					tempDir,
 					planPath,
@@ -744,8 +839,7 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 					decomposition,
 					workerResults,
 					changedFiles,
-					exec,
-					model,
+					checkerModels: checkerModels.length > 0 ? checkerModels : primaryModel ? [primaryModel] : [],
 					thinkingLevel,
 					onUpdate: options.onUpdate,
 				});
@@ -760,7 +854,7 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 					changedFiles,
 					checkerReport: checkPass.report,
 					checkResults: checkPass.results,
-					model,
+					model: primaryModel,
 					thinkingLevel,
 					onUpdate: options.onUpdate,
 				});
