@@ -1,0 +1,32 @@
+{
+  "name": "guided-discovery-pi-package",
+  "version": "0.2.0",
+  "description": "Codex-style guided discovery workflow for pi with structured Q&A, web research, plan approval, and PLAN.md autosave.",
+  "type": "module",
+  "keywords": [
+    "pi-package"
+  ],
+  "files": [
+    "index.ts",
+    "questionnaire.ts",
+    "utils.ts",
+    "web-research.ts",
+    "README.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-agent-core": "*",
+    "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*",
+    "@sinclair/typebox": "*"
+  },
+  "scripts": {
+    "build": "echo 'No build step required'",
+    "check": "echo 'Load with pi or /reload to test'"
+  }
+}
