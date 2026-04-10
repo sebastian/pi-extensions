@@ -4,6 +4,7 @@ import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-age
 import { Key } from "@mariozechner/pi-tui";
 import { access, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { runGuidedDiscoveryImplementationWorkflow } from "./implement-workflow.ts";
 import registerQuestionnaire from "./questionnaire.ts";
 import {
 	type ResearchSource,
@@ -48,6 +49,8 @@ Your job in this mode:
     ## Risks / follow-ups
 13. If the user clearly wants to start coding, tell them to run /discover-implement or /discover-off first.
 `;
+
+type ImplementationMode = "direct" | "subagents";
 
 interface SavedState {
 	enabled?: boolean;
@@ -189,6 +192,52 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 		].join("\n");
 	}
 
+	function parseImplementationRequest(rawArgs: string): { mode?: ImplementationMode; extraInstructions: string } {
+		let text = rawArgs.trim();
+		let mode: ImplementationMode | undefined;
+
+		text = text.replace(/^--mode\s+(direct|subagents?|subagent)\b\s*/i, (_match, matchedMode: string) => {
+			mode = matchedMode.toLowerCase().startsWith("direct") ? "direct" : "subagents";
+			return "";
+		});
+
+		if (!mode) {
+			text = text.replace(/^(direct|subagents?|subagent)\b[:\s-]*/i, (_match, matchedMode: string) => {
+				mode = matchedMode.toLowerCase().startsWith("direct") ? "direct" : "subagents";
+				return "";
+			});
+		}
+
+		return { mode, extraInstructions: text.trim() };
+	}
+
+	function setImplementationProgress(ctx: ExtensionContext, stage: string, lines: string[]): void {
+		ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("accent", "🤖 implement"));
+		ctx.ui.setWidget(WIDGET_KEY, [
+			ctx.ui.theme.fg("accent", `Guided implementation • ${stage}`),
+			...lines.map((line) => ctx.ui.theme.fg("dim", line)),
+		]);
+	}
+
+	function clearImplementationProgress(ctx: ExtensionContext): void {
+		if (enabled) updateUi(ctx);
+		else {
+			ctx.ui.setStatus(STATUS_KEY, undefined);
+			ctx.ui.setWidget(WIDGET_KEY, undefined);
+		}
+	}
+
+	async function chooseImplementationMode(ctx: ExtensionContext, hasPlanFile: boolean): Promise<ImplementationMode | null> {
+		if (!ctx.hasUI) return null;
+		const summary = hasPlanFile
+			? `Latest approved plan saved to ${PLAN_FILE}. Choose an implementation mode.`
+			: `No ${PLAN_FILE} detected. Direct mode will rely on the conversation history.`;
+		const choice = await ctx.ui.select(summary, ["Implement directly", "Implement with sub-agents", "Cancel"]);
+		if (choice === "Implement directly") return "direct";
+		if (choice === "Implement with sub-agents") return "subagents";
+		return null;
+	}
+
 	function buildImplementationPrompt(extraInstructions: string): string {
 		const instructions = [
 			"Implement the approved plan from this session.",
@@ -229,36 +278,102 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 
 	async function startImplementation(
 		ctx: ExtensionContext,
-		extraInstructions: string,
-		options?: { skipConfirmation?: boolean },
+		rawArgs: string,
+		options?: { skipConfirmation?: boolean; mode?: ImplementationMode },
 	): Promise<boolean> {
+		const request = parseImplementationRequest(rawArgs);
 		const planPath = resolve(ctx.cwd, PLAN_FILE);
 		const hasPlanFile = await fileExists(planPath);
+		let mode = options?.mode ?? request.mode;
 
-		if (!options?.skipConfirmation && ctx.hasUI) {
+		if (!mode && ctx.hasUI) {
+			mode = await chooseImplementationMode(ctx, hasPlanFile);
+			if (!mode) return false;
+			options = { ...options, skipConfirmation: true };
+		}
+		if (!mode) mode = "direct";
+
+		if (mode === "subagents" && !hasPlanFile) {
+			if (ctx.hasUI) {
+				ctx.ui.notify(`Sub-agent mode requires an approved ${PLAN_FILE}.`, "warning");
+			}
+			return false;
+		}
+
+		if (mode === "direct" && !options?.skipConfirmation && ctx.hasUI) {
 			const summary = hasPlanFile
 				? `Latest approved plan saved to ${PLAN_FILE}.${researchSources.length > 0 ? ` External sources captured: ${researchSources.length}.` : ""}`
 				: `No ${PLAN_FILE} was detected yet. Implementation will rely on the conversation history.`;
-			const approved = await ctx.ui.confirm("Start implementing the plan?", summary);
+			const approved = await ctx.ui.confirm("Start implementing the plan directly?", summary);
 			if (!approved) return false;
 		}
 
 		if (enabled) disableDiscovery(ctx);
-		pi.sendUserMessage(buildImplementationPrompt(extraInstructions));
-		return true;
+
+		if (mode === "direct") {
+			pi.sendUserMessage(buildImplementationPrompt(request.extraInstructions));
+			return true;
+		}
+
+		if (ctx.hasUI) setImplementationProgress(ctx, "starting", [`Using ${PLAN_FILE} as the approved source of truth.`]);
+		try {
+			const result = await runGuidedDiscoveryImplementationWorkflow(pi, ctx, {
+				planPath,
+				extraInstructions: request.extraInstructions,
+				onUpdate: (update) => {
+					if (!ctx.hasUI) return;
+					setImplementationProgress(ctx, update.stage, update.lines);
+				},
+			});
+
+			pi.sendMessage(
+				{
+					customType: "guided-discovery-implementation",
+					content: result.summary,
+					display: true,
+				},
+				{ triggerTurn: false },
+			);
+
+			if (result.decision === "reformulate" && result.reformulationPrompt) {
+				enableDiscovery(ctx);
+				pi.sendUserMessage(result.reformulationPrompt);
+			}
+			return true;
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			if (ctx.hasUI) ctx.ui.notify(`Sub-agent implementation failed: ${message}`, "error");
+			pi.sendMessage(
+				{
+					customType: "guided-discovery-implementation-error",
+					content: `Sub-agent implementation failed: ${message}`,
+					display: true,
+				},
+				{ triggerTurn: false },
+			);
+			return false;
+		} finally {
+			if (ctx.hasUI) clearImplementationProgress(ctx);
+		}
 	}
 
 	async function promptForPlanApproval(ctx: ExtensionContext): Promise<void> {
 		if (!ctx.hasUI) return;
 
 		const choice = await ctx.ui.select("Final plan saved to PLAN.md. What next?", [
-			"Approve and implement now",
+			"Implement directly",
+			"Implement with sub-agents",
 			"Keep refining in discovery mode",
 			"Leave discovery mode with plan only",
 		]);
 
-		if (choice === "Approve and implement now") {
-			await startImplementation(ctx, "", { skipConfirmation: true });
+		if (choice === "Implement directly") {
+			await startImplementation(ctx, "", { skipConfirmation: true, mode: "direct" });
+			return;
+		}
+
+		if (choice === "Implement with sub-agents") {
+			await startImplementation(ctx, "", { skipConfirmation: true, mode: "subagents" });
 			return;
 		}
 

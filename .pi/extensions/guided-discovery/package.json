@@ -1,14 +1,20 @@
 {
   "name": "guided-discovery-pi-package",
-  "version": "0.2.0",
-  "description": "Codex-style guided discovery workflow for pi with structured Q&A, web research, plan approval, and PLAN.md autosave.",
+  "version": "0.3.0",
+  "description": "Codex-style guided discovery workflow for pi with structured Q&A, web research, plan approval, PLAN.md autosave, and optional sub-agent implementation mode.",
   "type": "module",
   "keywords": [
     "pi-package"
   ],
   "files": [
+    "agents",
+    "changes.ts",
+    "checks.ts",
+    "implement-workflow.ts",
     "index.ts",
     "questionnaire.ts",
+    "structured-output.ts",
+    "subagent-runner.ts",
     "utils.ts",
     "web-research.ts",
     "README.md"
@@ -27,6 +33,7 @@
   },
   "scripts": {
     "build": "echo 'No build step required'",
-    "check": "echo 'Load with pi or /reload to test'"
+    "check": "node --test ./tests/*.test.ts",
+    "test": "node --test ./tests/*.test.ts"
   }
 }

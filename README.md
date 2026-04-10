@@ -12,7 +12,7 @@ I maintain this repo for my own workflows and experiments.
 
 ## Current contents
 
-- `.pi/extensions/guided-discovery/` — a Codex-style guided discovery / planning workflow for pi
+- `.pi/extensions/guided-discovery/` — a Codex-style guided discovery / planning workflow for pi with optional isolated sub-agent implementation mode
 
 ## License
 
