@@ -1,9 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { discoverAncestorDocumentPaths, discoverRelevantGuidance, renderGuidanceSummary } from "../guidance.ts";
+import {
+	collectRelevantGuidancePaths,
+	discoverAncestorDocumentPaths,
+	discoverRelevantGuidance,
+	renderGuidanceSummary,
+} from "../guidance.ts";
 
 test("discoverAncestorDocumentPaths returns existing AGENTS files from root to leaf", async () => {
 	const root = await mkdtemp(join(tmpdir(), "guided-discovery-guidance-"));
@@ -50,6 +55,42 @@ test("discoverRelevantGuidance also handles directory touched paths", async () =
 			{ path: "src/AGENTS.md", appliesTo: ["src"] },
 		],
 	);
+});
+
+test("collectRelevantGuidancePaths deduplicates shared AGENTS files across touched paths", async () => {
+	const root = await mkdtemp(join(tmpdir(), "guided-discovery-guidance-"));
+	await mkdir(join(root, ".jj"));
+	await mkdir(join(root, "src", "feature"), { recursive: true });
+	await mkdir(join(root, "tests"), { recursive: true });
+	await writeFile(join(root, "AGENTS.md"), "root guidance", "utf8");
+	await writeFile(join(root, "src", "AGENTS.md"), "src guidance", "utf8");
+
+	const paths = collectRelevantGuidancePaths(root, ["src/feature/index.ts", "tests/feature.test.ts"]);
+	assert.deepEqual(paths, [await realpath(join(root, "AGENTS.md")), await realpath(join(root, "src", "AGENTS.md"))]);
+});
+
+test("discoverRelevantGuidance ignores absolute and escaping touched paths", async () => {
+	const root = await mkdtemp(join(tmpdir(), "guided-discovery-guidance-"));
+	await mkdir(join(root, ".jj"));
+	await mkdir(join(root, "src", "feature"), { recursive: true });
+	await writeFile(join(root, "AGENTS.md"), "root guidance", "utf8");
+	await writeFile(join(root, "src", "AGENTS.md"), "src guidance", "utf8");
+
+	const result = discoverRelevantGuidance(root, ["../../outside", "/tmp/outside", "src/feature/index.ts"]);
+	assert.deepEqual(result.documents.map((document) => document.relativePath), ["AGENTS.md", "src/AGENTS.md"]);
+	assert.deepEqual(result.documents.map((document) => document.appliesTo), [["src/feature/index.ts"], ["src/feature/index.ts"]]);
+});
+
+test("discoverRelevantGuidance ignores touched paths that escape through repo-local symlinks", async () => {
+	const root = await mkdtemp(join(tmpdir(), "guided-discovery-guidance-"));
+	const outside = await mkdtemp(join(tmpdir(), "guided-discovery-guidance-outside-"));
+	await mkdir(join(root, ".jj"));
+	await writeFile(join(root, "AGENTS.md"), "root guidance", "utf8");
+	await writeFile(join(outside, "AGENTS.md"), "outside guidance", "utf8");
+	await symlink(outside, join(root, "linked"), "dir");
+
+	const result = discoverRelevantGuidance(root, ["linked/file.ts"]);
+	assert.deepEqual(result.documents.map((document) => document.relativePath), []);
 });
 
 test("renderGuidanceSummary lists applicable AGENTS files", () => {

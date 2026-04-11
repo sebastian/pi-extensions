@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
 	parseSelectedDiscrepancyIdsFromMarkdown,
 	renderDiscrepancySelectionEditorMarkdown,
+	selectRemainingActionableDiscrepancies,
 } from "../discrepancy-selector.ts";
 import type { ValidationDiscrepancy } from "../structured-output.ts";
 
@@ -87,4 +88,73 @@ test("parseSelectedDiscrepancyIdsFromMarkdown accepts plain ids and ignores dupl
 	);
 
 	assert.deepEqual(selectedIds, ["D1", "D2"]);
+});
+
+test("renderDiscrepancySelectionEditorMarkdown preserves initial selections across repeated cycles", () => {
+	const markdown = renderDiscrepancySelectionEditorMarkdown({
+		title: "Select validator discrepancies to implement",
+		actionableDiscrepancies: [
+			discrepancy({ id: "D1", item: "Add validator tests" }),
+			discrepancy({ id: "D2", item: "Update README", status: "partial" }),
+		],
+		initialSelectedIds: ["D2"],
+	});
+
+	assert.match(markdown, /- \[ \] `D1` — missing: Add validator tests/);
+	assert.match(markdown, /- \[x\] `D2` — partial: Update README/);
+});
+
+test("custom selector returns back when Enter is pressed with no discrepancies selected", async () => {
+	const result = await selectRemainingActionableDiscrepancies(
+		{
+			hasUI: true,
+			ui: {
+				custom: async (factory: any) => {
+					let doneResult: unknown;
+					const component = factory(
+						{ requestRender: () => undefined },
+						{ fg: (_key: string, text: string) => text, bg: (_key: string, text: string) => text, bold: (text: string) => text },
+						undefined,
+						(value: unknown) => {
+							doneResult = value;
+						},
+					);
+					component.handleInput("\t");
+					component.handleInput("\r");
+					return doneResult;
+				},
+			},
+		} as any,
+		{
+			title: "Select validator discrepancies to implement",
+			actionableDiscrepancies: [discrepancy({ id: "D1", item: "Add validator tests" })],
+		},
+	);
+
+	assert.equal(result, undefined);
+});
+
+test("selector markdown uses stable fallback ids when discrepancies arrive without explicit ids", () => {
+	const actionable: ValidationDiscrepancy[] = [
+		discrepancy({ id: "", item: "Add validator tests" }),
+		discrepancy({ id: "", item: "Update README", status: "partial" }),
+	];
+	const markdown = renderDiscrepancySelectionEditorMarkdown({
+		title: "Select validator discrepancies to implement",
+		actionableDiscrepancies: actionable,
+		initialSelectedIds: ["discrepancy-update-readme"],
+	});
+
+	assert.match(markdown, /- \[ \] `discrepancy-add-validator-tests` — missing: Add validator tests/);
+	assert.match(markdown, /- \[x\] `discrepancy-update-readme` — partial: Update README/);
+	assert.deepEqual(
+		parseSelectedDiscrepancyIdsFromMarkdown(
+			[
+				"- [x] `discrepancy-update-readme` — partial: Update README",
+				"- [x] `discrepancy-add-validator-tests` — missing: Add validator tests",
+			].join("\n"),
+			actionable,
+		),
+		["discrepancy-add-validator-tests", "discrepancy-update-readme"],
+	);
 });

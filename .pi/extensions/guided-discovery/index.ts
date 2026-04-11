@@ -4,7 +4,12 @@ import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-age
 import { Key } from "@mariozechner/pi-tui";
 import { access, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { runGuidedDiscoveryImplementationWorkflow } from "./implement-workflow.ts";
+import {
+	parseImplementationRequest,
+	resolveStandaloneSubagentRequest,
+	runGuidedDiscoveryImplementationWorkflow,
+	type ImplementationMode,
+} from "./implement-workflow.ts";
 import {
 	createImplementationProgressState,
 	reduceImplementationProgress,
@@ -56,8 +61,6 @@ Your job in this mode:
     ## Risks / follow-ups
 13. If the user clearly wants to start coding, tell them to run /discover-implement, /implement-subagents, or /discover-off first.
 `;
-
-type ImplementationMode = "direct" | "subagents";
 
 interface SavedState {
 	enabled?: boolean;
@@ -203,25 +206,6 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 		].join("\n");
 	}
 
-	function parseImplementationRequest(rawArgs: string): { mode?: ImplementationMode; extraInstructions: string } {
-		let text = rawArgs.trim();
-		let mode: ImplementationMode | undefined;
-
-		text = text.replace(/^--mode\s+(direct|subagents?|subagent)\b\s*/i, (_match, matchedMode: string) => {
-			mode = matchedMode.toLowerCase().startsWith("direct") ? "direct" : "subagents";
-			return "";
-		});
-
-		if (!mode) {
-			text = text.replace(/^(direct|subagents?|subagent)\b[:\s-]*/i, (_match, matchedMode: string) => {
-				mode = matchedMode.toLowerCase().startsWith("direct") ? "direct" : "subagents";
-				return "";
-			});
-		}
-
-		return { mode, extraInstructions: text.trim() };
-	}
-
 	function supportsStructuredImplementationWidget(ctx: ExtensionContext): boolean {
 		return ctx.hasUI;
 	}
@@ -286,19 +270,29 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 
 	async function chooseImplementationMode(ctx: ExtensionContext, hasPlanFile: boolean): Promise<ImplementationMode | null> {
 		if (!ctx.hasUI) return null;
-		const summary = hasPlanFile
-			? `Latest approved plan saved to ${PLAN_FILE}. Choose an implementation mode.`
-			: `No ${PLAN_FILE} detected. Direct mode will rely on the conversation history.`;
-		const choice = await ctx.ui.select(summary, ["Implement directly", "Implement with sub-agents", "Cancel"]);
+		if (!hasPlanFile) {
+			const choice = await ctx.ui.select(
+				`No ${PLAN_FILE} detected. Direct mode will rely on the conversation history. Use /implement-subagents with a raw prompt if you want the isolated sub-agent workflow instead.`,
+				["Implement directly", "Cancel"],
+			);
+			return choice === "Implement directly" ? "direct" : null;
+		}
+		const choice = await ctx.ui.select(`Latest approved plan saved to ${PLAN_FILE}. Choose an implementation mode.`, [
+			"Implement directly",
+			"Implement with sub-agents",
+			"Cancel",
+		]);
 		if (choice === "Implement directly") return "direct";
 		if (choice === "Implement with sub-agents") return "subagents";
 		return null;
 	}
 
-	function buildImplementationPrompt(extraInstructions: string): string {
+	function buildImplementationPrompt(extraInstructions: string, hasPlanFile: boolean): string {
 		const instructions = [
 			"Implement the approved plan from this session.",
-			`Use ${PLAN_FILE} as the source of truth for the latest approved plan.`,
+			hasPlanFile
+				? `Use ${PLAN_FILE} as the source of truth for the latest approved plan.`
+				: "Use the approved conversation context from this session as the source of truth; no PLAN.md file is available yet.",
 			"Follow the decision log and recommended approach established during discovery.",
 			"If anything still feels ambiguous and high-risk, ask before making the change.",
 		];
@@ -306,6 +300,22 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 			instructions.push(`Additional instructions: ${extraInstructions.trim()}`);
 		}
 		return instructions.join(" ");
+	}
+
+	function surfaceWorkflowWarning(ctx: ExtensionContext, message: string): void {
+		if (ctx.hasUI) {
+			ctx.ui.notify(message, "warning");
+			pi.sendMessage(
+				{
+					customType: "guided-discovery-warning",
+					content: message,
+					display: true,
+				},
+				{ triggerTurn: false },
+			);
+			return;
+		}
+		console.error(message);
 	}
 
 	async function maybeSaveFinalPlan(planText: string, ctx: ExtensionContext): Promise<boolean> {
@@ -437,9 +447,10 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 		if (!mode) mode = "direct";
 
 		if (mode === "subagents" && !hasPlanFile) {
-			if (ctx.hasUI) {
-				ctx.ui.notify(`Sub-agent mode requires an approved ${PLAN_FILE}. Use /implement-subagents for raw-prompt runs.`, "warning");
-			}
+			surfaceWorkflowWarning(
+				ctx,
+				`Sub-agent mode requires an approved ${PLAN_FILE}. Use /implement-subagents with a raw prompt, or create PLAN.md first.`,
+			);
 			return false;
 		}
 
@@ -454,7 +465,7 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 		if (enabled) disableDiscovery(ctx);
 
 		if (mode === "direct") {
-			pi.sendUserMessage(buildImplementationPrompt(request.extraInstructions));
+			pi.sendUserMessage(buildImplementationPrompt(request.extraInstructions, hasPlanFile));
 			return true;
 		}
 
@@ -548,27 +559,22 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 				return;
 			}
 
-			const rawPrompt = args.trim();
 			const planPath = resolve(ctx.cwd, PLAN_FILE);
-			const hasPlanFile = await fileExists(planPath);
+			const request = resolveStandaloneSubagentRequest({
+				rawArgs: args,
+				planPath,
+				hasPlanFile: await fileExists(planPath),
+			});
+
+			if (request.kind === "missing-plan") {
+				surfaceWorkflowWarning(ctx, request.message);
+				return;
+			}
 			if (enabled) disableDiscovery(ctx);
 
-			if (rawPrompt) {
-				await runSubagentImplementation(ctx, {
-					rawPrompt,
-					extraInstructions: "",
-				});
-				return;
-			}
-
-			if (!hasPlanFile) {
-				ctx.ui.notify(`No ${PLAN_FILE} found. Pass a raw prompt or create ${PLAN_FILE} first.`, "warning");
-				return;
-			}
-
 			await runSubagentImplementation(ctx, {
-				planPath,
 				extraInstructions: "",
+				...(request.kind === "raw-prompt" ? { rawPrompt: request.rawPrompt } : { planPath: request.planPath }),
 			});
 		},
 	});

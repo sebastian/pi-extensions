@@ -6,6 +6,7 @@ import {
 	parseCheckerReport,
 	parseDecompositionPlan,
 	parseValidationReport,
+	resolveValidationDiscrepancyId,
 } from "../structured-output.ts";
 
 test("extractJsonValue tolerates fenced JSON", () => {
@@ -169,6 +170,39 @@ test("parseCheckerReport normalizes design-review and cleanup aliases", () => {
 	);
 });
 
+
+test("parseCheckerReport recognizes usability and workflow aliases as ui and guidance", () => {
+	const report = parseCheckerReport(
+		JSON.stringify({
+			findings: [
+				{
+					category: "usability",
+					severity: "warning",
+					summary: "The primary action is easy to miss",
+					details: "Wayfinding is still weak",
+					suggestedFix: "Clarify the primary action",
+					paths: ["src/ui/home.tsx"],
+				},
+				{
+					category: "workflow_violation",
+					severity: "critical",
+					summary: "Required repository process was skipped",
+					details: "A required repository-authored check was ignored",
+					suggestedFix: "Follow the documented workflow",
+					paths: ["AGENTS.md"],
+				},
+			],
+			checksRun: [],
+			unresolvedRisks: [],
+			overallAssessment: "Needs a follow-up",
+		}),
+	);
+
+	assert.equal(report.findings[0].category, "ui");
+	assert.equal(report.findings[1].category, "guidance");
+	assert.equal(report.findings[1].severity, "high");
+});
+
 test("parseValidationReport keeps explicit discrepancy ids and worthiness metadata", () => {
 	const report = parseValidationReport(
 		JSON.stringify({
@@ -195,6 +229,12 @@ test("parseValidationReport keeps explicit discrepancy ids and worthiness metada
 	assert.equal(report.discrepancies[0].worthImplementingNow, true);
 	assert.equal(report.discrepancies[0].worthwhileRationale, "Small, direct follow-up that closes the requested scope.");
 	assert.equal(hasMaterialDiscrepancies(report), true);
+});
+
+test("resolveValidationDiscrepancyId uses explicit ids first and stable fallbacks otherwise", () => {
+	assert.equal(resolveValidationDiscrepancyId({ id: "D-tests", item: "Tests" }, 0), "D-tests");
+	assert.equal(resolveValidationDiscrepancyId({ id: "", item: "Tests" }, 0), "discrepancy-tests");
+	assert.equal(resolveValidationDiscrepancyId({ item: "" }, 2), "discrepancy-3");
 });
 
 test("parseValidationReport normalizes discrepancy aliases and defaults", () => {

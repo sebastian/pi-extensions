@@ -1,16 +1,34 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createWorkspaceSnapshot, detectWorkspaceRepoKind, planWorkspaceIntegration } from "../workspaces.ts";
+import {
+	captureWorkspaceRevision,
+	createChildWorkspace,
+	createManagedWorkspace,
+	createWorkspaceSnapshot,
+	detectWorkspaceRepoKind,
+	integrateWorkspaceChanges,
+	planWorkspaceIntegration,
+} from "../workspaces.ts";
 import type { ExecLike } from "../changes.ts";
 
-async function createRepoRoot(prefix: string): Promise<string> {
+async function createRepoRoot(prefix: string, kind: "jj" | "git" = "jj"): Promise<string> {
 	const root = await mkdtemp(join(tmpdir(), prefix));
-	await mkdir(join(root, ".jj"));
 	await mkdir(join(root, "src"), { recursive: true });
+	if (kind === "jj") await mkdir(join(root, ".jj"));
+	else await writeFile(join(root, ".git"), "gitdir: /fake/worktree\n", "utf8");
 	return root;
+}
+
+async function pathExists(path: string): Promise<boolean> {
+	try {
+		await stat(path);
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 test("detectWorkspaceRepoKind prefers jj repositories", async () => {
@@ -18,20 +36,260 @@ test("detectWorkspaceRepoKind prefers jj repositories", async () => {
 	assert.equal(detectWorkspaceRepoKind(root), "jj");
 });
 
-test("createWorkspaceSnapshot can capture the full working tree without VCS metadata", async () => {
+test("detectWorkspaceRepoKind falls back to git repositories", async () => {
+	const root = await createRepoRoot("guided-discovery-workspaces-", "git");
+	assert.equal(detectWorkspaceRepoKind(root), "git");
+});
+
+test("createManagedWorkspace seeds source checkout changes into a jj workspace and cleans it up", async () => {
+	const root = await createRepoRoot("guided-discovery-jj-workspace-");
+	const sourceCwd = join(root, "src");
+	await writeFile(join(root, "src", "changed.ts"), "source-change\n", "utf8");
+
+	const calls: Array<{ command: string; args: string[]; cwd?: string }> = [];
+	const exec: ExecLike = async (command, args, options) => {
+		calls.push({ command, args, cwd: options?.cwd });
+		if (command === "jj" && args[0] === "workspace" && args[1] === "add") {
+			const workspacePath = args[2];
+			await mkdir(join(workspacePath, ".jj"), { recursive: true });
+			await mkdir(join(workspacePath, "src"), { recursive: true });
+			await writeFile(join(workspacePath, "src", "changed.ts"), "baseline\n", "utf8");
+			await writeFile(join(workspacePath, "src", "deleted.ts"), "delete-me\n", "utf8");
+			return { stdout: "", stderr: "", code: 0 };
+		}
+		if (command === "jj" && args[0] === "new") {
+			return { stdout: "", stderr: "", code: 0 };
+		}
+		if (command === "jj" && args[0] === "diff" && args[1] === "--summary" && options?.cwd === root) {
+			return {
+				stdout: ["M src/changed.ts", "D src/deleted.ts"].join("\n"),
+				stderr: "",
+				code: 0,
+			};
+		}
+		if (command === "jj" && args[0] === "workspace" && args[1] === "update-stale") {
+			return { stdout: "Working copy is not stale.\n", stderr: "", code: 0 };
+		}
+		if (command === "jj" && args[0] === "workspace" && args[1] === "forget") {
+			return { stdout: "", stderr: "", code: 0 };
+		}
+		return { stdout: "", stderr: "", code: 0 };
+	};
+
+	const { workspace, seededChangedFiles } = await createManagedWorkspace({
+		exec,
+		sourceCwd,
+		label: "run",
+	});
+
+	assert.equal(workspace.kind, "jj");
+	assert.equal(workspace.repoRoot, workspace.cwd);
+	assert.equal(workspace.sourceRepoRoot, root);
+	assert.equal(workspace.sourceCwd, sourceCwd);
+	assert.equal(workspace.sourceRelativeCwd, "src");
+	assert.deepEqual(seededChangedFiles, ["src/changed.ts", "src/deleted.ts"]);
+	assert.deepEqual(workspace.seededChangedFiles, seededChangedFiles);
+	assert.equal(await readFile(join(workspace.cwd, "src", "changed.ts"), "utf8"), "source-change\n");
+	assert.equal(await pathExists(join(workspace.cwd, "src", "deleted.ts")), false);
+
+	await workspace.refresh();
+	assert.ok(
+		calls.some(
+			(call) =>
+				call.command === "jj" && call.args[0] === "workspace" && call.args[1] === "update-stale" && call.cwd === workspace.cwd,
+		),
+	);
+
+	const cleanupRoot = workspace.cleanupRoot;
+	await workspace.cleanup();
+	assert.ok(
+		calls.some(
+			(call) => call.command === "jj" && call.args[0] === "workspace" && call.args[1] === "forget" && call.cwd === root,
+		),
+	);
+	assert.equal(await pathExists(cleanupRoot), false);
+});
+
+test("createManagedWorkspace seeds source checkout changes into a git worktree and cleans it up", async () => {
+	const root = await createRepoRoot("guided-discovery-git-workspace-", "git");
+	await writeFile(join(root, "src", "changed.ts"), "source-change\n", "utf8");
+	await writeFile(join(root, "src", "new.ts"), "new-file\n", "utf8");
+
+	const calls: Array<{ command: string; args: string[]; cwd?: string }> = [];
+	const exec: ExecLike = async (command, args, options) => {
+		calls.push({ command, args, cwd: options?.cwd });
+		if (command === "git" && args[0] === "worktree" && args[1] === "add") {
+			const workspacePath = args[3];
+			await mkdir(join(workspacePath, "src"), { recursive: true });
+			await writeFile(join(workspacePath, ".git"), "gitdir: /fake/worktree\n", "utf8");
+			await writeFile(join(workspacePath, "src", "changed.ts"), "baseline\n", "utf8");
+			await writeFile(join(workspacePath, "src", "deleted.ts"), "delete-me\n", "utf8");
+			return { stdout: "", stderr: "", code: 0 };
+		}
+		if (command === "git" && args[0] === "diff" && args[1] === "--name-only" && options?.cwd === root) {
+			return {
+				stdout: ["src/changed.ts", "src/deleted.ts"].join("\n"),
+				stderr: "",
+				code: 0,
+			};
+		}
+		if (command === "git" && args[0] === "ls-files" && options?.cwd === root) {
+			return {
+				stdout: "src/new.ts\n",
+				stderr: "",
+				code: 0,
+			};
+		}
+		if (command === "git" && args[0] === "worktree" && args[1] === "remove") {
+			return { stdout: "", stderr: "", code: 0 };
+		}
+		return { stdout: "", stderr: "", code: 0 };
+	};
+
+	const { workspace, seededChangedFiles } = await createManagedWorkspace({
+		exec,
+		sourceCwd: root,
+		label: "run",
+	});
+
+	assert.equal(workspace.kind, "git");
+	assert.equal(workspace.repoRoot, workspace.cwd);
+	assert.equal(workspace.sourceRepoRoot, root);
+	assert.equal(workspace.sourceRelativeCwd, ".");
+	assert.deepEqual(seededChangedFiles, ["src/changed.ts", "src/deleted.ts", "src/new.ts"]);
+	assert.equal(await readFile(join(workspace.cwd, "src", "changed.ts"), "utf8"), "source-change\n");
+	assert.equal(await readFile(join(workspace.cwd, "src", "new.ts"), "utf8"), "new-file\n");
+	assert.equal(await pathExists(join(workspace.cwd, "src", "deleted.ts")), false);
+
+	const cleanupRoot = workspace.cleanupRoot;
+	await workspace.cleanup();
+	assert.ok(
+		calls.some(
+			(call) => call.command === "git" && call.args[0] === "worktree" && call.args[1] === "remove" && call.cwd === root,
+		),
+	);
+	assert.equal(await pathExists(cleanupRoot), false);
+});
+
+test("child workspace edits stay isolated until integration", async () => {
+	const root = await createRepoRoot("guided-discovery-child-isolation-");
+	await writeFile(join(root, "src", "isolated.ts"), "source-change\n", "utf8");
+
+	const exec: ExecLike = async (command, args, options) => {
+		if (command === "jj" && args[0] === "workspace" && args[1] === "add") {
+			const workspacePath = args[2];
+			await mkdir(join(workspacePath, ".jj"), { recursive: true });
+			await mkdir(join(workspacePath, "src"), { recursive: true });
+			await writeFile(join(workspacePath, "src", "isolated.ts"), "baseline\n", "utf8");
+			return { stdout: "", stderr: "", code: 0 };
+		}
+		if (command === "jj" && args[0] === "new") return { stdout: "", stderr: "", code: 0 };
+		if (command === "jj" && args[0] === "diff" && args[1] === "--summary" && options?.cwd === root) {
+			return { stdout: "M src/isolated.ts\n", stderr: "", code: 0 };
+		}
+		if (command === "jj" && args[0] === "workspace" && args[1] === "forget") {
+			return { stdout: "", stderr: "", code: 0 };
+		}
+		return { stdout: "", stderr: "", code: 0 };
+	};
+
+	const child = await createChildWorkspace({
+		exec,
+		parentCwd: root,
+		label: "phase-1",
+		touchedPaths: ["src/isolated.ts"],
+	});
+
+	await writeFile(join(child.workspace.cwd, "src", "isolated.ts"), "child-only\n", "utf8");
+	assert.equal(await readFile(join(root, "src", "isolated.ts"), "utf8"), "source-change\n");
+
+	await child.workspace.cleanup();
+});
+
+test("createChildWorkspace baseline includes seeded changes outside the touched paths", async () => {
+	const root = await createRepoRoot("guided-discovery-child-workspace-");
+	await writeFile(join(root, "package.json"), '{"name":"changed"}\n', "utf8");
+
+	const exec: ExecLike = async (command, args, options) => {
+		if (command === "jj" && args[0] === "workspace" && args[1] === "add") {
+			const workspacePath = args[2];
+			await mkdir(join(workspacePath, ".jj"), { recursive: true });
+			await mkdir(join(workspacePath, "src"), { recursive: true });
+			await writeFile(join(workspacePath, "package.json"), '{"name":"baseline"}\n', "utf8");
+			return { stdout: "", stderr: "", code: 0 };
+		}
+		if (command === "jj" && args[0] === "new") return { stdout: "", stderr: "", code: 0 };
+		if (command === "jj" && args[0] === "diff" && args[1] === "--summary" && options?.cwd === root) {
+			return { stdout: "M package.json\n", stderr: "", code: 0 };
+		}
+		if (command === "jj" && args[0] === "workspace" && args[1] === "forget") {
+			return { stdout: "", stderr: "", code: 0 };
+		}
+		return { stdout: "", stderr: "", code: 0 };
+	};
+
+	const child = await createChildWorkspace({
+		exec,
+		parentCwd: root,
+		label: "phase-1",
+		touchedPaths: ["src"],
+	});
+
+	assert.deepEqual(child.seededChangedFiles, ["package.json"]);
+	assert.deepEqual(Object.keys(child.baseline.files), ["package.json"]);
+	assert.equal(await readFile(join(child.workspace.cwd, "package.json"), "utf8"), '{"name":"changed"}\n');
+
+	await child.workspace.cleanup();
+});
+
+test("createWorkspaceSnapshot ignores escaping touched paths", async () => {
 	const root = await createRepoRoot("guided-discovery-workspaces-");
-	await mkdir(join(root, ".git"));
 	await writeFile(join(root, "src", "tracked.ts"), "tracked\n", "utf8");
-	await writeFile(join(root, ".git", "HEAD"), "ref: refs/heads/main\n", "utf8");
 
 	const snapshot = await createWorkspaceSnapshot({
 		cwd: root,
-		touchedPaths: [],
+		touchedPaths: ["../../outside", "/tmp/outside"],
 		seededChangedFiles: [],
-		includeAllFiles: true,
 	});
 
-	assert.deepEqual(Object.keys(snapshot.files), ["src/tracked.ts"]);
+	assert.deepEqual(Object.keys(snapshot.files), []);
+});
+
+test("createWorkspaceSnapshot skips symlinked directories that point outside the workspace", async () => {
+	const root = await createRepoRoot("guided-discovery-workspaces-");
+	const outside = await mkdtemp(join(tmpdir(), "guided-discovery-outside-"));
+	await writeFile(join(outside, "outside.ts"), "outside\n", "utf8");
+	await symlink(outside, join(root, "linked"), "dir");
+
+	const snapshot = await createWorkspaceSnapshot({
+		cwd: root,
+		touchedPaths: ["linked"],
+		seededChangedFiles: [],
+	});
+
+	assert.deepEqual(Object.keys(snapshot.files), []);
+});
+
+test("captureWorkspaceRevision reads the active git or jj revision", async () => {
+	const jjRoot = await createRepoRoot("guided-discovery-workspaces-");
+	const gitRoot = await createRepoRoot("guided-discovery-workspaces-", "git");
+	const calls: Array<{ command: string; args: string[]; cwd?: string }> = [];
+	const exec: ExecLike = async (command, args, options) => {
+		calls.push({ command, args, cwd: options?.cwd });
+		if (command === "jj") return { stdout: "jj-commit\n", stderr: "", code: 0 };
+		if (command === "git") return { stdout: "git-head\n", stderr: "", code: 0 };
+		return { stdout: "", stderr: "", code: 1 };
+	};
+
+	assert.deepEqual(await captureWorkspaceRevision(jjRoot, exec), { kind: "jj", revision: "jj-commit" });
+	assert.deepEqual(await captureWorkspaceRevision(gitRoot, exec), { kind: "git", revision: "git-head" });
+	assert.deepEqual(
+		calls.map((call) => ({ command: call.command, args: call.args })),
+		[
+			{ command: "jj", args: ["log", "-r", "@", "--no-graph", "-T", "commit_id"] },
+			{ command: "git", args: ["rev-parse", "HEAD"] },
+		],
+	);
 });
 
 test("planWorkspaceIntegration separates non-conflicting and conflicting child changes", async () => {
@@ -63,6 +321,13 @@ test("planWorkspaceIntegration separates non-conflicting and conflicting child c
 				code: 0,
 			};
 		}
+		if (options?.cwd?.startsWith(parentRoot)) {
+			return {
+				stdout: "M src/same.ts\n",
+				stderr: "",
+				code: 0,
+			};
+		}
 		return { stdout: "", stderr: "", code: 0 };
 	};
 
@@ -76,6 +341,131 @@ test("planWorkspaceIntegration separates non-conflicting and conflicting child c
 	assert.deepEqual(plan.changedFiles, ["src/new.ts", "src/safe.ts", "src/same.ts"]);
 	assert.deepEqual(plan.nonConflictingFiles, ["src/new.ts", "src/safe.ts"]);
 	assert.deepEqual(plan.conflictingFiles, ["src/same.ts"]);
+});
+
+test("planWorkspaceIntegration allows child edits to initially-clean parent files without a full-tree baseline", async () => {
+	const parentRoot = await createRepoRoot("guided-discovery-parent-");
+	const childRoot = await createRepoRoot("guided-discovery-child-");
+
+	await writeFile(join(parentRoot, "src", "fresh.ts"), "baseline\n", "utf8");
+	await writeFile(join(childRoot, "src", "fresh.ts"), "baseline\n", "utf8");
+	const baseline = await createWorkspaceSnapshot({
+		cwd: childRoot,
+		touchedPaths: [],
+		seededChangedFiles: [],
+	});
+	await writeFile(join(childRoot, "src", "fresh.ts"), "child-new\n", "utf8");
+
+	const exec: ExecLike = async (_command, _args, options) => {
+		if (options?.cwd?.startsWith(childRoot)) {
+			return { stdout: "M src/fresh.ts\n", stderr: "", code: 0 };
+		}
+		if (options?.cwd?.startsWith(parentRoot)) {
+			return { stdout: "", stderr: "", code: 0 };
+		}
+		return { stdout: "", stderr: "", code: 0 };
+	};
+
+	const plan = await planWorkspaceIntegration({
+		childCwd: childRoot,
+		parentCwd: parentRoot,
+		baseline,
+		exec,
+	});
+
+	assert.deepEqual(plan.changedFiles, ["src/fresh.ts"]);
+	assert.deepEqual(plan.nonConflictingFiles, ["src/fresh.ts"]);
+	assert.deepEqual(plan.conflictingFiles, []);
+});
+
+test("integrateWorkspaceChanges syncs only non-conflicting child files", async () => {
+	const parentRoot = await createRepoRoot("guided-discovery-parent-");
+	const childRoot = await createRepoRoot("guided-discovery-child-");
+
+	await writeFile(join(parentRoot, "src", "same.ts"), "baseline-same\n", "utf8");
+	await writeFile(join(parentRoot, "src", "safe.ts"), "baseline-safe\n", "utf8");
+	await writeFile(join(childRoot, "src", "same.ts"), "baseline-same\n", "utf8");
+	await writeFile(join(childRoot, "src", "safe.ts"), "baseline-safe\n", "utf8");
+
+	const baseline = await createWorkspaceSnapshot({
+		cwd: childRoot,
+		touchedPaths: ["src"],
+		seededChangedFiles: [],
+	});
+
+	await writeFile(join(parentRoot, "src", "same.ts"), "parent-new\n", "utf8");
+	await writeFile(join(childRoot, "src", "same.ts"), "child-new\n", "utf8");
+	await writeFile(join(childRoot, "src", "safe.ts"), "child-safe\n", "utf8");
+	await writeFile(join(childRoot, "src", "new.ts"), "brand new\n", "utf8");
+	baseline.files["src/new.ts"] = null;
+
+	const exec: ExecLike = async (_command, _args, options) => {
+		if (options?.cwd?.startsWith(childRoot)) {
+			return {
+				stdout: ["M src/same.ts", "M src/safe.ts", "A src/new.ts"].join("\n"),
+				stderr: "",
+				code: 0,
+			};
+		}
+		return { stdout: "", stderr: "", code: 0 };
+	};
+
+	const plan = await integrateWorkspaceChanges({
+		childCwd: childRoot,
+		parentCwd: parentRoot,
+		baseline,
+		exec,
+	});
+
+	assert.deepEqual(plan.nonConflictingFiles, ["src/new.ts", "src/safe.ts"]);
+	assert.deepEqual(plan.conflictingFiles, ["src/same.ts"]);
+	assert.equal(await readFile(join(parentRoot, "src", "safe.ts"), "utf8"), "child-safe\n");
+	assert.equal(await readFile(join(parentRoot, "src", "new.ts"), "utf8"), "brand new\n");
+	assert.equal(await readFile(join(parentRoot, "src", "same.ts"), "utf8"), "parent-new\n");
+});
+
+test("integrateWorkspaceChanges can withhold syncing when conflicts remain", async () => {
+	const parentRoot = await createRepoRoot("guided-discovery-parent-");
+	const childRoot = await createRepoRoot("guided-discovery-child-");
+
+	await writeFile(join(parentRoot, "src", "same.ts"), "baseline-same\n", "utf8");
+	await writeFile(join(parentRoot, "src", "safe.ts"), "baseline-safe\n", "utf8");
+	await writeFile(join(childRoot, "src", "same.ts"), "baseline-same\n", "utf8");
+	await writeFile(join(childRoot, "src", "safe.ts"), "baseline-safe\n", "utf8");
+
+	const baseline = await createWorkspaceSnapshot({
+		cwd: childRoot,
+		touchedPaths: ["src"],
+		seededChangedFiles: [],
+	});
+
+	await writeFile(join(parentRoot, "src", "same.ts"), "parent-new\n", "utf8");
+	await writeFile(join(childRoot, "src", "same.ts"), "child-new\n", "utf8");
+	await writeFile(join(childRoot, "src", "safe.ts"), "child-safe\n", "utf8");
+
+	const exec: ExecLike = async (_command, _args, options) => {
+		if (options?.cwd?.startsWith(childRoot)) {
+			return {
+				stdout: ["M src/same.ts", "M src/safe.ts"].join("\n"),
+				stderr: "",
+				code: 0,
+			};
+		}
+		return { stdout: "", stderr: "", code: 0 };
+	};
+
+	const plan = await integrateWorkspaceChanges({
+		childCwd: childRoot,
+		parentCwd: parentRoot,
+		baseline,
+		exec,
+		allowPartialIntegration: false,
+	});
+
+	assert.deepEqual(plan.nonConflictingFiles, ["src/safe.ts"]);
+	assert.deepEqual(plan.conflictingFiles, ["src/same.ts"]);
+	assert.equal(await readFile(join(parentRoot, "src", "safe.ts"), "utf8"), "baseline-safe\n");
+	assert.equal(await readFile(join(parentRoot, "src", "same.ts"), "utf8"), "parent-new\n");
 });
 
 test("planWorkspaceIntegration treats unexpected edits to existing parent files as conflicts", async () => {

@@ -61,7 +61,7 @@ test("decomposer-completed plus batches-computed expands the implementation plac
 	assert.deepEqual(state.detailLines, ["Decomposition complete"]);
 });
 
-test("quality suite activity tracks cleanup, design, checker, and restart loops without duplicating nodes", () => {
+test("targeted follow-through and final checker reruns reuse the same nodes without duplicating the workflow graph", () => {
 	const phases = [
 		phase("phase-1", "Docs", ["docs"]),
 		phase("phase-2", "Tests", ["tests"]),
@@ -95,9 +95,7 @@ test("quality suite activity tracks cleanup, design, checker, and restart loops 
 	state = reduceImplementationProgress(state, { type: "cleanup-started" });
 	state = reduceImplementationProgress(state, { type: "cleanup-completed" });
 	state = reduceImplementationProgress(state, { type: "design-skipped" });
-	state = reduceImplementationProgress(state, { type: "checker-started" });
-	state = reduceImplementationProgress(state, { type: "checker-completed" });
-	state = reduceImplementationProgress(state, { type: "loop-traversed", edge: "checker->fix" });
+	state = reduceImplementationProgress(state, { type: "loop-traversed", edge: "cleanup->fix" });
 	state = reduceImplementationProgress(state, { type: "fix-started" });
 	state = reduceImplementationProgress(state, { type: "fix-completed" });
 	state = reduceImplementationProgress(state, { type: "loop-traversed", edge: "fix->cleanup" });
@@ -105,6 +103,12 @@ test("quality suite activity tracks cleanup, design, checker, and restart loops 
 	state = reduceImplementationProgress(state, { type: "cleanup-completed" });
 	state = reduceImplementationProgress(state, { type: "design-started" });
 	state = reduceImplementationProgress(state, { type: "design-completed" });
+	state = reduceImplementationProgress(state, { type: "checker-started" });
+	state = reduceImplementationProgress(state, { type: "checker-completed" });
+	state = reduceImplementationProgress(state, { type: "loop-traversed", edge: "checker->fix" });
+	state = reduceImplementationProgress(state, { type: "fix-started" });
+	state = reduceImplementationProgress(state, { type: "fix-completed" });
+	state = reduceImplementationProgress(state, { type: "loop-traversed", edge: "fix->checker" });
 	state = reduceImplementationProgress(state, { type: "checker-started" });
 
 	assert.equal(state.nodes.implementation.status, "done");
@@ -114,10 +118,12 @@ test("quality suite activity tracks cleanup, design, checker, and restart loops 
 	assert.equal(state.nodes.design.visits, 1);
 	assert.equal(state.nodes.checker.status, "active");
 	assert.equal(state.nodes.checker.visits, 2);
-	assert.equal(state.nodes.fix.visits, 1);
+	assert.equal(state.nodes.fix.visits, 2);
 	assert.deepEqual(state.activeLocations, [{ nodeId: "checker" }]);
-	assert.equal(state.edgeTraversalCounts["checker->fix"], 1);
+	assert.equal(state.edgeTraversalCounts["cleanup->fix"], 1);
 	assert.equal(state.edgeTraversalCounts["fix->cleanup"], 1);
+	assert.equal(state.edgeTraversalCounts["checker->fix"], 1);
+	assert.equal(state.edgeTraversalCounts["fix->checker"], 1);
 });
 
 test("design-skipped marks the design node explicitly instead of leaving it pending", () => {
@@ -135,7 +141,7 @@ test("design-skipped marks the design node explicitly instead of leaving it pend
 	assert.equal(state.nodes.design.visits, 1);
 });
 
-test("finish pass re-enters cleanup for the post-finish quality suite", () => {
+test("finish pass re-enters cleanup for post-finish merged-result verification", () => {
 	let state = createImplementationProgressState();
 	state = reduceImplementationProgress(state, { type: "validator-started" });
 	state = reduceImplementationProgress(state, { type: "validator-completed" });

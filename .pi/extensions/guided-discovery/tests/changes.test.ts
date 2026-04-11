@@ -3,7 +3,14 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { computeExecutionBatches, detectChangedFiles, parseGitDiffNameOnly, parseJjDiffSummary, pathsOverlap } from "../changes.ts";
+import {
+	computeExecutionBatches,
+	detectChangedFiles,
+	normalizeRepoRelativePath,
+	parseGitDiffNameOnly,
+	parseJjDiffSummary,
+	pathsOverlap,
+} from "../changes.ts";
 import type { DecompositionPhase } from "../structured-output.ts";
 
 test("parseJjDiffSummary handles adds, modifications, and renames", () => {
@@ -14,6 +21,13 @@ test("parseJjDiffSummary handles adds, modifications, and renames", () => {
 test("parseGitDiffNameOnly normalizes and deduplicates paths", () => {
 	const output = ["./src/index.ts", "src/index.ts", "docs/README.md"].join("\n");
 	assert.deepEqual(parseGitDiffNameOnly(output), ["docs/README.md", "src/index.ts"]);
+});
+
+test("normalizeRepoRelativePath rejects absolute and escaping paths", () => {
+	assert.equal(normalizeRepoRelativePath("/tmp/outside"), null);
+	assert.equal(normalizeRepoRelativePath("../outside"), null);
+	assert.equal(normalizeRepoRelativePath("src/../../outside"), null);
+	assert.equal(normalizeRepoRelativePath("./src/index.ts"), "src/index.ts");
 });
 
 test("pathsOverlap is conservative for empty and broad scopes", () => {

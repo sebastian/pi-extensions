@@ -15,11 +15,11 @@ A Codex-style planning workflow for pi that lets you start from a loose feature 
 - standalone `/implement-subagents [prompt]` entrypoint for ad hoc sub-agent implementation outside discovery
 - raw-prompt sub-agent runs synthesize a lightweight ephemeral plan instead of requiring a repo-root `PLAN.md`
 - bundled sub-agent roles for decomposition, general implementation, design-specialist implementation, cleanup auditing, design review, checking, and validation
-- richer sub-agent progress UI in interactive sessions: a persistent tech-tree-style widget above the editor showing workflow stages, worker batches, active phases, cleanup/design/checker quality-suite loops, conditional design skips, and validator finish-pass re-entry
+- richer sub-agent progress UI in interactive sessions: a persistent tech-tree-style widget above the editor showing workflow stages, worker batches, active phases, targeted follow-through activity, final checker reruns, conditional design skips, and validator finish-pass re-entry
 - manual validator discrepancy selection with a checkbox-style TUI picker, plus an RPC/editor markdown-checklist fallback keyed by discrepancy ID
-- touched-path `AGENTS.md` discovery so worker, remediation, cleanup, design review, checker, and validator passes see the right repo instructions for touched files
+- touched-path `AGENTS.md` discovery so worker, remediation, cleanup, design review, checker, and validator passes see the right repo-local guidance for touched files
 - conservative execution of explicit `AGENTS.md` check commands as part of the checker / final quality path
-- multi-model checking with a preferred stack of `gpt-5.4`, `gpt-5.3-codex`, and `GLM-5.1` when those models are available/configured
+- multi-model checking with `gpt-5.4` plus at most one companion checker model: prefer `gpt-5.3-codex`, else `GLM-5.1`
 - checker-model failures are recorded as errored reviews without aborting the whole workflow, as long as at least one checker succeeds
 - packaged as a reusable pi package, not just a project-local extension
 
@@ -65,30 +65,33 @@ When the assistant produces a final plan, the extension:
 
 ## Sub-agent implementation mode
 
-Sub-agent mode keeps orchestration out of the main conversation and runs a fixed workflow in isolated `pi` subprocesses. The whole run happens in a temporary jj workspace (or git worktree fallback), and parallel-safe worker batches get their own child workspaces before their results are integrated back into the parent workspace. Design-sensitive work is routed to a dedicated design specialist worker, and every sub-agent implementation run goes through a reusable quality suite in this order: `cleanup -> design (when needed) -> checker`.
+Sub-agent mode keeps orchestration out of the main conversation and runs a fixed workflow in isolated `pi` subprocesses. The whole run happens in a temporary jj workspace (or git worktree fallback), and parallel-safe worker batches get their own child workspaces before their results are integrated back into the parent workspace. Design-sensitive work is routed to a dedicated design specialist worker.
 
-In interactive TUI sessions, it also renders a persistent progress widget above the editor. The widget keeps the workflow spine visible, expands worker batches after decomposition, highlights the current active phase, and makes re-entrant loops like cleanup → design → checker → fix → cleanup and validator → finish → cleanup visibly obvious. When design review is not needed, the design stage is marked as skipped instead of being left pending. In RPC or non-interactive flows, the extension falls back to concise text progress instead.
+The workflow is now split into three quality behaviors instead of one heavy endgame loop:
+
+1. **phase-local follow-through** — after each implementation phase, run targeted cleanup and, when needed, targeted design review inside that phase’s scope
+2. **final holistic review** — one final cleanup pass and one conditional design pass for glaring feature-level issues only
+3. **final checker loop** — the only looping end-stage reviewer, bounded to 2 passes, focused on logic, regressions, side effects, security, and guidance
+
+In interactive TUI sessions, it also renders a persistent progress widget above the editor. The widget keeps the workflow spine visible, expands worker batches after decomposition, highlights the current active phase, and shows targeted follow-through plus final checker reruns without making the old global cleanup/design/checker loop look like the default backbone. When design review is not needed, the design stage is marked as skipped instead of being left pending. In RPC or non-interactive flows, the extension falls back to concise text progress instead.
 
 ### Stages
 
 1. **decomposer** — breaks `PLAN.md` into actionable phases with dependencies, touched paths, conservative parallel-safety hints, and a `designSensitive` flag for UI, interaction, discoverability, navigation, copy, and ambiguous product-behavior work
 2. **worker / design worker** — implements phases, usually sequentially, only parallelizing batches when touched paths do not overlap and safety is explicit. Parallel phases run in separate child workspaces and are then integrated back into the parent workspace. Design-sensitive phases use the dedicated design worker instead of the generic worker.
-3. **cleanup auditor** — always runs first after implementation. It audits the touched files first, then adjacent legacy or superseded code and other concrete do-now cleanup opportunities. It is intentionally constrained to actionable cleanup that should be completed now.
-4. **design reviewer** — runs when decomposed phase metadata or fallback heuristics indicate design-sensitive work. It reviews simplicity, discoverability, clarity, hierarchy, interaction friction, inclusivity/accessibility where relevant, and overall restraint/polish.
-5. **checker** — runs review passes with multiple models when available, executes explicit required checks extracted conservatively from relevant `AGENTS.md` files, and reviews the implementation for:
-   - security
-   - regression risk
-   - UI consistency
-   - performance regression risk
-   - dead code / loose ends
-   - unnecessary complexity
+3. **targeted phase follow-through** — after each phase, run targeted cleanup on that phase’s changed files and touched paths. If the phase is design-sensitive or visibly user-facing, also run targeted design review. This loop is small, local, and bounded.
+4. **final cleanup auditor** — after the implementation is merged, run one holistic cleanup pass for glaring feature-level cleanup mistakes only.
+5. **final design reviewer** — after the implementation is merged, run one holistic design pass when the feature is design-sensitive or visibly user-facing.
+6. **checker** — runs review passes with the primary checker model plus at most one companion model (`gpt-5.3-codex`, else `GLM-5.1`), executes explicit required checks extracted conservatively from relevant `AGENTS.md` files, and focuses on:
+   - logic bugs and correctness
+   - unintended regressions or side effects
+   - security issues
+   - performance regression risk when materially relevant
    - relevant `AGENTS.md` guidance for touched areas
-6. **quality-suite remediation loop** — cleanup, design review, and checker all reuse the existing `CheckerReport` structure. If any of them returns findings, the workflow applies fixes automatically, re-detects changed files, and restarts the full quality suite from cleanup on the latest code.
-7. **validator** — compares the actual result against the approved plan and reports coverage plus discrepancies
-8. **optional finish pass** — if the validator finds material discrepancies and you choose to continue, the workflow first auto-remediates worthwhile-now items, then lets you manually select any remaining actionable discrepancies item by item before implementing only the checked subset with the generic worker or design worker as appropriate
-9. **post-finish quality suite + final validator** — after any validator-driven finish pass, the exact same `cleanup -> design -> checker` suite reruns before the validator runs again
-
-Design review is a hard gate. If cleanup, design review, or checker findings still remain after the bounded retry limit for the quality suite, the workflow fails clearly instead of silently finishing with unresolved issues. The current limit is 3 quality-suite rounds.
+7. **checker remediation loop** — if the checker returns findings, the workflow applies fixes automatically and reruns only the checker. After 2 checker passes, remaining non-critical findings are non-blocking.
+8. **validator** — compares the actual result against the approved plan and reports coverage plus discrepancies
+9. **optional finish pass** — if the validator finds material discrepancies and you choose to continue, the workflow first auto-remediates worthwhile-now items, then lets you manually select any remaining actionable discrepancies item by item before implementing only the checked subset with the generic worker or design worker as appropriate
+10. **post-finish verification** — validator-driven finish work reuses the same targeted follow-through behavior, then reruns the single final cleanup pass, the single final design pass when needed, and the bounded final checker loop before the validator runs again
 
 If the validator finds material discrepancies, the extension:
 
@@ -102,7 +105,7 @@ If the validator finds material discrepancies, the extension:
 
 - the cleanup auditor, design reviewer, and checker all return the existing `CheckerReport` JSON shape instead of introducing separate report types
 - that shared structure means parsing, severity/category handling, finding summaries, and fix-context rendering are reused across all three quality gates
-- the final workflow summary reports changed files, how many cleanup audits ran, how many design reviews ran vs were skipped, how many quality remediation passes were needed, how many cleanup/design/checker findings were fixed, whether legacy code/files were removed, checker review totals, and the validator recommendation
+- the final workflow summary reports changed files, how many cleanup audits ran, how many design reviews ran vs were skipped, how many quality remediation passes were needed, how many cleanup/design/checker findings were fixed, whether any residual soft findings were accepted, whether any blocking hard issues remain, how many merged-result verification passes ran, whether legacy code/files were removed, checker review totals, and the validator recommendation
 - if you accept unresolved validator discrepancies, the final summary keeps them visible under the remaining-discrepancies section instead of silently dropping them
 - cleanup reporting is concrete: it focuses on actionable cleanup appropriate to finish now, and the summary calls out when legacy or superseded code/files were actually removed
 
@@ -110,9 +113,11 @@ If the validator finds material discrepancies, the extension:
 
 For every changed file or touched path, the sub-agent workflow walks ancestor directories up to repo root and collects relevant `AGENTS.md` files.
 
-Those instructions are passed into worker, remediation, cleanup, design review, checker, and validator passes so implementation and review stay aligned with repo-specific workflow rules and conventions, even when the touched files are outside the original working-directory ancestor chain.
+Those instructions are passed into worker, remediation, cleanup, design review, checker, and validator passes so implementation and review stay aligned with repo-local coding guidance and explicit checks, even when the touched files are outside the original working-directory ancestor chain.
 
-When those `AGENTS.md` files contain explicit check commands in recognizable validation/check sections (for example `Run: npm test` or fenced command blocks under a Checks heading), the workflow executes them in the isolated workspace and treats failures as remediation-triggering findings instead of advisory notes.
+When those `AGENTS.md` files contain explicit check commands in recognizable validation/check sections (for example `Run: npm test` or fenced command blocks under a Checks heading), the workflow executes them in the isolated workspace and treats failures or blocked required checks as hard remediation-triggering findings instead of advisory notes.
+
+Free-form repository workflow instructions that require higher-level orchestration steps (for example `jj new`, `jj describe`, `jj commit`, or `jj push`) are still guidance for the caller/orchestrator around the workflow; this extension currently enforces explicit runnable checks, not every prose workflow rule in `AGENTS.md`.
 
 ## Direct vs sub-agent mode
 
@@ -131,10 +136,12 @@ When those `AGENTS.md` files contain explicit check commands in recognizable val
 - keeps orchestration chatter out of the main session
 - prefers `openai-codex/gpt-5.4` for decomposition, implementation, and validation when available
 - routes design-sensitive implementation, remediation, and validator finish work to the dedicated design worker when needed
-- always runs cleanup, conditionally runs design review, and runs checker passes across multiple models when available (`gpt-5.4`, `gpt-5.3-codex`, `GLM-5.1`)
-- treats design review as a hard gate, restarting remediation from cleanup whenever cleanup/design/checker findings appear
-- fails clearly if the bounded quality-suite retry limit is exhausted instead of silently accepting remaining findings
-- reruns the same quality suite after any validator-driven finish pass before the final validator
+- runs targeted per-phase cleanup after every implementation phase and targeted design review only for design-sensitive/user-visible work
+- runs one final holistic cleanup pass and one final holistic design pass for glaring feature-level issues only
+- runs the checker with the primary model plus at most one companion (`gpt-5.3-codex`, else `GLM-5.1`)
+- makes the checker the only looping end-stage reviewer, capped at 2 passes
+- treats severe design/accessibility/discoverability issues, security/correctness regressions, AGENTS-required check failures, and process violations as blocking problems, while letting non-critical residual findings stop blocking after the second checker pass
+- reruns the same targeted-follow-through + final-verification pattern after any validator-driven finish pass, treating those reruns as merged-result verification rather than trusting pre-merge child-workspace reviews
 - auto-remediates worthwhile validator discrepancies first, then lets you manually pick any remaining actionable discrepancies item by item
 - uses a checkbox TUI selector when available, with an editor-based markdown checklist fallback in RPC/degraded UI flows
 

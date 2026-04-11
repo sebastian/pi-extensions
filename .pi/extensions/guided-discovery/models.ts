@@ -29,21 +29,14 @@ export function resolveWorkflowModelsFromRefs(availableRefs: string[], currentMo
 		(currentModelRef && pickFirstAvailable(available, [currentModelRef])) ??
 		available[0];
 
-	const checkerPreferences = [
-		primary,
-		"openai-codex/gpt-5.4",
-		"openai-codex/gpt-5.3-codex",
-		"huggingface/zai-org/GLM-5.1",
-		"zai/zai-org/GLM-5.1",
-		currentModelRef,
-	].filter((value): value is string => Boolean(value));
-
 	const checkers: string[] = [];
-	for (const candidate of checkerPreferences) {
-		const resolved = pickFirstAvailable(available, [candidate]);
-		if (!resolved) continue;
-		if (!checkers.includes(resolved)) checkers.push(resolved);
-	}
+	if (primary) checkers.push(primary);
+
+	const companion = pickFirstAvailable(
+		available.filter((ref) => normalizeRef(ref) !== normalizeRef(primary ?? "")),
+		["openai-codex/gpt-5.3-codex", "huggingface/zai-org/GLM-5.1", "zai/zai-org/GLM-5.1"],
+	);
+	if (companion && !checkers.includes(companion)) checkers.push(companion);
 
 	if (checkers.length === 0 && primary) checkers.push(primary);
 	return { primary, checkers };

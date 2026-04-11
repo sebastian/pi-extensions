@@ -1,5 +1,5 @@
-import { existsSync } from "node:fs";
-import { dirname, join, normalize } from "node:path";
+import { detectRepoKind, findRepoRoot } from "./repo.ts";
+import { isAbsolute, normalize } from "node:path";
 import type { DecompositionPhase } from "./structured-output.ts";
 
 export interface ExecResultLike {
@@ -20,9 +20,10 @@ function dedupePaths(paths: string[]): string[] {
 
 export function normalizeRepoRelativePath(input: string): string | null {
 	const trimmed = input.trim();
-	if (!trimmed) return null;
+	if (!trimmed || isAbsolute(trimmed) || /^[A-Za-z]:[\\/]/.test(trimmed)) return null;
 	const normalized = normalize(trimmed.replace(/^\.\//, "").replace(/^@/, "")).replace(/\\/g, "/");
-	if (!normalized || normalized === ".") return null;
+	if (!normalized || normalized === "." || normalized === "..") return null;
+	if (normalized.startsWith("../") || normalized.includes("/../")) return null;
 	return normalized.replace(/^\.\//, "").replace(/\/$/, "");
 }
 
@@ -125,38 +126,16 @@ export function computeExecutionBatches(phases: DecompositionPhase[]): Decomposi
 	return batches;
 }
 
-function findRepoMarker(start: string, marker: string): string | null {
-	let current = start;
-	while (true) {
-		const candidate = join(current, marker);
-		if (existsSync(candidate)) return current;
-		const parent = dirname(current);
-		if (parent === current) return null;
-		current = parent;
-	}
-}
-
-function findRepoRoot(cwd: string): string | null {
-	return findRepoMarker(cwd, ".jj") ?? findRepoMarker(cwd, ".git");
-}
-
-function isJjRepo(cwd: string): boolean {
-	return findRepoMarker(cwd, ".jj") !== null;
-}
-
-function isGitRepo(cwd: string): boolean {
-	return findRepoMarker(cwd, ".git") !== null;
-}
-
 export async function detectChangedFiles(cwd: string, exec: ExecLike): Promise<string[]> {
 	const repoRoot = findRepoRoot(cwd) ?? cwd;
+	const repoKind = detectRepoKind(cwd);
 
-	if (isJjRepo(cwd)) {
+	if (repoKind === "jj") {
 		const result = await exec("jj", ["diff", "--summary"], { cwd: repoRoot, timeout: 30_000 });
 		if (result.code === 0) return parseJjDiffSummary(result.stdout);
 	}
 
-	if (isGitRepo(cwd)) {
+	if (repoKind === "git") {
 		const trackedResult = await exec("git", ["diff", "--name-only", "--relative"], { cwd: repoRoot, timeout: 30_000 });
 		const untrackedResult = await exec("git", ["ls-files", "--others", "--exclude-standard"], {
 			cwd: repoRoot,

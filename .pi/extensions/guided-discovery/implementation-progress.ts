@@ -21,6 +21,7 @@ export const WORKFLOW_EDGE_ORDER = [
 	"design->fix",
 	"checker->fix",
 	"fix->cleanup",
+	"fix->checker",
 	"checker->validator",
 	"validator->finish",
 	"finish->cleanup",
@@ -88,6 +89,12 @@ export const WORKFLOW_EDGE_META: Record<
 		to: "cleanup",
 		label: "Fix → Cleanup",
 		shortLabel: "F→Cl",
+	},
+	"fix->checker": {
+		from: "fix",
+		to: "checker",
+		label: "Fix → Checker",
+		shortLabel: "F→C",
 	},
 	"checker->validator": {
 		from: "checker",

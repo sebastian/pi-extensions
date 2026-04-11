@@ -1,12 +1,13 @@
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { Key, matchesKey, truncateToWidth } from "@mariozechner/pi-tui";
-import type { ValidationDiscrepancy } from "./structured-output.ts";
+import { Key, matchesKey, truncateToWidth } from "./tui-compat.ts";
+import { resolveValidationDiscrepancyId, type ValidationDiscrepancy } from "./structured-output.ts";
 
 export interface DiscrepancySelectorOptions {
 	title: string;
 	actionableDiscrepancies: ValidationDiscrepancy[];
 	informationalDiscrepancies?: ValidationDiscrepancy[];
 	introLines?: string[];
+	initialSelectedIds?: string[];
 }
 
 interface DiscrepancySelectorSubmitResult {
@@ -14,8 +15,8 @@ interface DiscrepancySelectorSubmitResult {
 	selectedIds: string[];
 }
 
-interface DiscrepancySelectorCancelResult {
-	kind: "cancel";
+interface DiscrepancySelectorBackResult {
+	kind: "back";
 }
 
 const CHECKED_BACKTICK_ID_PATTERN = /^\s*(?:[-*+]\s+|\d+\.\s+)\[(?:x|X)\]\s+`([^`]+)`/;
@@ -30,7 +31,7 @@ function isActionableDiscrepancy(discrepancy: ValidationDiscrepancy): boolean {
 }
 
 function discrepancyId(discrepancy: ValidationDiscrepancy, index: number): string {
-	return discrepancy.id?.trim() || `discrepancy-${index + 1}`;
+	return resolveValidationDiscrepancyId(discrepancy, index);
 }
 
 function discrepancyHeading(discrepancy: ValidationDiscrepancy, index: number): string {
@@ -57,6 +58,7 @@ function normalizeSelectorOptions(options: DiscrepancySelectorOptions): Required
 		actionableDiscrepancies,
 		informationalDiscrepancies,
 		introLines: options.introLines?.map((line) => line.trim()).filter(Boolean) ?? [],
+		initialSelectedIds: (options.initialSelectedIds ?? []).map((id) => id.trim()).filter((id) => actionableIds.has(id)),
 	};
 }
 
@@ -70,6 +72,7 @@ function selectedDiscrepanciesFromIds(
 
 export function renderDiscrepancySelectionEditorMarkdown(options: DiscrepancySelectorOptions): string {
 	const normalized = normalizeSelectorOptions(options);
+	const initialSelectedIds = new Set(normalized.initialSelectedIds);
 	const lines = [
 		`# ${normalized.title}`,
 		"",
@@ -85,7 +88,8 @@ export function renderDiscrepancySelectionEditorMarkdown(options: DiscrepancySel
 		lines.push("No actionable discrepancies remain.");
 	} else {
 		normalized.actionableDiscrepancies.forEach((discrepancy, index) => {
-			lines.push(`- [ ] \`${discrepancyId(discrepancy, index)}\` — ${discrepancy.status}: ${discrepancy.item}`);
+			const id = discrepancyId(discrepancy, index);
+			lines.push(`- [${initialSelectedIds.has(id) ? "x" : " "}] \`${id}\` — ${discrepancy.status}: ${discrepancy.item}`);
 			for (const detail of discrepancyDetailLines(discrepancy)) {
 				lines.push(`  - ${detail}`);
 			}
@@ -142,17 +146,17 @@ export function parseSelectedDiscrepancyIdsFromMarkdown(
 async function selectActionableDiscrepanciesWithCustomUI(
 	ctx: ExtensionContext,
 	options: Required<DiscrepancySelectorOptions>,
-): Promise<DiscrepancySelectorSubmitResult | DiscrepancySelectorCancelResult | undefined> {
+): Promise<DiscrepancySelectorSubmitResult | DiscrepancySelectorBackResult | undefined> {
 	if (options.actionableDiscrepancies.length === 0) {
 		return { kind: "submit", selectedIds: [] };
 	}
-	return await ctx.ui.custom<DiscrepancySelectorSubmitResult | DiscrepancySelectorCancelResult>(
+	return await ctx.ui.custom<DiscrepancySelectorSubmitResult | DiscrepancySelectorBackResult>(
 		(tui, theme, _kb, done) => {
 			let focus: "items" | "actions" = "items";
 			let itemIndex = 0;
 			let actionIndex = 0;
 			let cachedLines: string[] | undefined;
-			const selectedIds = new Set<string>();
+			const selectedIds = new Set<string>(options.initialSelectedIds);
 
 			const refresh = (): void => {
 				cachedLines = undefined;
@@ -160,7 +164,7 @@ async function selectActionableDiscrepanciesWithCustomUI(
 			};
 
 			const continueLabel = (): string =>
-				selectedIds.size > 0 ? ` Continue with ${selectedIds.size} selected ` : " Back without selecting ";
+				selectedIds.size > 0 ? ` Continue with ${selectedIds.size} selected ` : " Back ";
 
 			const renderActionChip = (label: string, active: boolean, enabled = true): string => {
 				if (active) {
@@ -187,9 +191,17 @@ async function selectActionableDiscrepanciesWithCustomUI(
 				});
 			};
 
+			const submitOrGoBack = (): void => {
+				if (selectedIds.size === 0) {
+					done({ kind: "back" });
+					return;
+				}
+				submit();
+			};
+
 			const handleInput = (data: string): void => {
 				if (matchesKey(data, Key.escape)) {
-					done({ kind: "cancel" });
+					done({ kind: "back" });
 					return;
 				}
 
@@ -227,17 +239,11 @@ async function selectActionableDiscrepanciesWithCustomUI(
 					refresh();
 					return;
 				}
-				if (matchesKey(data, Key.right) || matchesKey(data, Key.down) || matchesKey(data, Key.tab)) {
-					actionIndex = actionIndex === 0 ? 1 : 0;
-					refresh();
-					return;
-				}
 				if (matchesKey(data, Key.enter)) {
 					if (actionIndex === 0) {
-						submit();
+						submitOrGoBack();
 						return;
 					}
-					done({ kind: "cancel" });
 				}
 			};
 
@@ -291,10 +297,9 @@ async function selectActionableDiscrepanciesWithCustomUI(
 				}
 
 				lines.push("");
-				const actions = [
-					renderActionChip(continueLabel(), focus === "actions" && actionIndex === 0),
-					renderActionChip(" Cancel ", focus === "actions" && actionIndex === 1),
-				].join(theme.fg("dim", "   "));
+				const actions = [renderActionChip(continueLabel(), focus === "actions" && actionIndex === 0)].join(
+					theme.fg("dim", "   "),
+				);
 				add(actions);
 				add(
 					theme.fg(
@@ -305,7 +310,7 @@ async function selectActionableDiscrepanciesWithCustomUI(
 					),
 				);
 				lines.push("");
-				add(theme.fg("dim", " ↑↓ navigate • Space/Enter toggle • Tab switch to actions • Esc cancel"));
+				add(theme.fg("dim", " ↑↓ navigate • Space/Enter toggle • Tab switch to actions • Esc back"));
 				add(theme.fg("accent", "─".repeat(width)));
 
 				cachedLines = lines;
@@ -347,6 +352,6 @@ export async function selectRemainingActionableDiscrepancies(
 	if (customResult?.kind === "submit") {
 		return selectedDiscrepanciesFromIds(normalized.actionableDiscrepancies, customResult.selectedIds);
 	}
-	if (customResult?.kind === "cancel") return undefined;
+	if (customResult?.kind === "back") return undefined;
 	return await selectActionableDiscrepanciesWithEditor(ctx, normalized);
 }

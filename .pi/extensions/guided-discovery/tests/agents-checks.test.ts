@@ -54,6 +54,34 @@ test("extractAgentsCheckCommands ignores inline backticks and non-shell fences",
 	assert.deepEqual(commands, []);
 });
 
+
+test("extractAgentsCheckCommands stays conservative about explicit prose and fence comments", () => {
+	const commands = extractAgentsCheckCommands(
+		[
+			"# AGENTS",
+			"",
+			"## Checks",
+			"",
+			"- Verify: the code still looks clean",
+			"- Check: scripts/verify.sh --quick",
+			"",
+			"## Before finishing",
+			"",
+			"```sh",
+			"# run the fast sanity check",
+			"./tools/check-workspace.sh",
+			"review the output carefully",
+			"```",
+		].join("\n"),
+		"AGENTS.md",
+	);
+
+	assert.deepEqual(commands, [
+		{ command: "scripts/verify.sh --quick", source: "AGENTS.md" },
+		{ command: "./tools/check-workspace.sh", source: "AGENTS.md" },
+	]);
+});
+
 test("collectAgentsCheckCommands deduplicates repeated commands across documents and preserves provenance", () => {
 	const documents: RelevantGuidanceDocument[] = [
 		{
@@ -120,7 +148,7 @@ test("runAgentsCheckCommands executes simple argv commands without invoking a sh
 	assert.equal(report.checksRun.length, 2);
 });
 
-test("runAgentsCheckCommands blocks unapproved commands and surfaces them as unresolved risks", async () => {
+test("runAgentsCheckCommands turns blocked required checks into hard guidance findings", async () => {
 	const runs = await runAgentsCheckCommands({
 		cwd: "/repo",
 		exec: async () => {
@@ -147,7 +175,10 @@ test("runAgentsCheckCommands blocks unapproved commands and surfaces them as unr
 		runs,
 	);
 
-	assert.equal(report.findings.length, 0);
+	assert.equal(report.findings.length, 1);
+	assert.equal(report.findings[0]?.category, "guidance");
+	assert.equal(report.findings[0]?.severity, "high");
+	assert.match(report.findings[0]?.summary ?? "", /Required AGENTS\.md check was blocked/);
 	assert.equal(report.unresolvedRisks.length, 1);
 	assert.match(report.unresolvedRisks[0] ?? "", /not executed/);
 });
@@ -168,4 +199,33 @@ test("runAgentsCheckCommands blocks shell-style commands even after approval", a
 			summary: "Only simple argv-style commands are allowed. Remove shell operators or environment assignments from AGENTS.md.",
 		},
 	]);
+});
+
+
+test("appendAgentsChecksToCheckerReport turns execution errors into hard guidance findings", async () => {
+	const runs = await runAgentsCheckCommands({
+		cwd: "/repo",
+		exec: async () => {
+			throw new Error("spawn pnpm ENOENT");
+		},
+		commands: [{ command: "pnpm test", source: "AGENTS.md" }],
+		policy: { allowed: true },
+	});
+
+	const report = appendAgentsChecksToCheckerReport(
+		{
+			findings: [],
+			checksRun: [],
+			unresolvedRisks: [],
+			overallAssessment: "Looks good",
+		},
+		runs,
+	);
+
+	assert.equal(report.findings.length, 1);
+	assert.equal(report.findings[0]?.category, "guidance");
+	assert.equal(report.findings[0]?.severity, "high");
+	assert.match(report.findings[0]?.summary ?? "", /Required AGENTS\.md check errored/);
+	assert.match(report.findings[0]?.details ?? "", /spawn pnpm ENOENT/);
+	assert.deepEqual(report.checksRun.map((check) => check.status), ["error"]);
 });

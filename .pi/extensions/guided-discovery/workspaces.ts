@@ -1,10 +1,9 @@
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
-import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
+import { copyFile, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { detectChangedFiles, normalizeRepoRelativePath, type ExecLike } from "./changes.ts";
-import { findRepoRoot } from "./guidance.ts";
+import { detectRepoKind, findRepoRootOrSelf } from "./repo.ts";
 
 export type WorkspaceRepoKind = "jj" | "git";
 
@@ -12,7 +11,12 @@ export interface ManagedWorkspace {
 	kind: WorkspaceRepoKind;
 	cwd: string;
 	repoRoot: string;
+	sourceRepoRoot: string;
+	sourceCwd: string;
+	sourceRelativeCwd: string;
 	cleanupRoot: string;
+	seededChangedFiles: string[];
+	refresh(): Promise<void>;
 	cleanup(): Promise<void>;
 }
 
@@ -27,21 +31,55 @@ export interface WorkspaceIntegrationPlan {
 	conflictingFiles: string[];
 }
 
+export interface WorkspaceRevision {
+	kind: WorkspaceRepoKind;
+	revision: string;
+}
+
 function normalizeFiles(paths: Iterable<string>): string[] {
 	return [...new Set(Array.from(paths).map((path) => normalizeRepoRelativePath(path)).filter((path): path is string => Boolean(path)))].sort();
 }
 
 async function pathExists(path: string): Promise<boolean> {
 	try {
-		await stat(path);
+		await lstat(path);
 		return true;
 	} catch {
 		return false;
 	}
 }
 
+function sanitizeWorkspaceLabel(label: string): string {
+	const sanitized = label.replace(/[^a-z0-9]+/gi, "-").toLowerCase().replace(/^-+|-+$/g, "");
+	return sanitized || "workspace";
+}
+
+function normalizeWorkspaceRelativeDirectory(repoRoot: string, cwd: string): string {
+	const relativePath = relative(repoRoot, resolve(cwd)).replace(/\\/g, "/");
+	return relativePath || ".";
+}
+
+async function resolveWorkspaceRelativePath(root: string, relativePath: string): Promise<string | null> {
+	const normalizedPath = normalizeRepoRelativePath(relativePath);
+	if (!normalizedPath) return null;
+	let currentPath = await realpath(root).catch(() => resolve(root));
+	for (const segment of normalizedPath.split("/").filter(Boolean)) {
+		currentPath = join(currentPath, segment);
+		try {
+			const metadata = await lstat(currentPath);
+			if (metadata.isSymbolicLink()) return null;
+		} catch {
+			// Once the remaining path does not exist, there is no symlink left to follow.
+		}
+	}
+	return currentPath;
+}
+
 async function hashWorkspaceFile(cwd: string, relativePath: string): Promise<string | null> {
-	const absolutePath = resolve(cwd, relativePath);
+	const absolutePath = await resolveWorkspaceRelativePath(cwd, relativePath);
+	if (!absolutePath) {
+		throw new Error(`Refusing to read workspace path outside the workspace root: ${relativePath}`);
+	}
 	try {
 		const file = await readFile(absolutePath);
 		return createHash("sha256").update(file).digest("hex");
@@ -56,10 +94,11 @@ function shouldSkipSnapshotEntry(name: string): boolean {
 
 async function collectFilesRecursively(root: string, absolutePath: string, collector: Set<string>): Promise<void> {
 	if (!(await pathExists(absolutePath))) return;
-	const metadata = await stat(absolutePath);
+	const metadata = await lstat(absolutePath);
+	if (metadata.isSymbolicLink()) return;
 	if (metadata.isDirectory()) {
 		for (const entry of await readdir(absolutePath, { withFileTypes: true })) {
-			if (shouldSkipSnapshotEntry(entry.name)) continue;
+			if (shouldSkipSnapshotEntry(entry.name) || entry.isSymbolicLink()) continue;
 			await collectFilesRecursively(root, join(absolutePath, entry.name), collector);
 		}
 		return;
@@ -72,17 +111,17 @@ async function collectSnapshotCandidates(options: {
 	cwd: string;
 	touchedPaths: string[];
 	seededChangedFiles: string[];
-	includeAllFiles?: boolean;
 }): Promise<string[]> {
+	const root = await realpath(options.cwd).catch(() => resolve(options.cwd));
 	const files = new Set<string>(normalizeFiles(options.seededChangedFiles));
-	if (options.includeAllFiles) {
-		await collectFilesRecursively(options.cwd, options.cwd, files);
+	if (options.touchedPaths.length === 0) {
+		await collectFilesRecursively(root, root, files);
 		return [...files].sort();
 	}
 	for (const touchedPath of options.touchedPaths) {
-		const normalized = normalizeRepoRelativePath(touchedPath);
-		if (!normalized) continue;
-		await collectFilesRecursively(options.cwd, resolve(options.cwd, normalized), files);
+		const absolutePath = await resolveWorkspaceRelativePath(root, touchedPath);
+		if (!absolutePath) continue;
+		await collectFilesRecursively(root, absolutePath, files);
 	}
 	return [...files].sort();
 }
@@ -91,7 +130,6 @@ export async function createWorkspaceSnapshot(options: {
 	cwd: string;
 	touchedPaths: string[];
 	seededChangedFiles: string[];
-	includeAllFiles?: boolean;
 }): Promise<WorkspaceSnapshot> {
 	const files = await collectSnapshotCandidates(options);
 	return {
@@ -101,8 +139,11 @@ export async function createWorkspaceSnapshot(options: {
 }
 
 async function syncSingleWorkspaceFile(sourceCwd: string, targetCwd: string, relativePath: string): Promise<void> {
-	const sourcePath = resolve(sourceCwd, relativePath);
-	const targetPath = resolve(targetCwd, relativePath);
+	const sourcePath = await resolveWorkspaceRelativePath(sourceCwd, relativePath);
+	const targetPath = await resolveWorkspaceRelativePath(targetCwd, relativePath);
+	if (!sourcePath || !targetPath) {
+		throw new Error(`Refusing to sync workspace path outside the workspace root: ${relativePath}`);
+	}
 	if (await pathExists(sourcePath)) {
 		await mkdir(dirname(targetPath), { recursive: true });
 		await copyFile(sourcePath, targetPath);
@@ -122,10 +163,33 @@ export async function syncWorkspaceFiles(options: {
 }
 
 export function detectWorkspaceRepoKind(cwd: string): WorkspaceRepoKind {
-	const repoRoot = findRepoRoot(cwd);
-	if (existsSync(join(repoRoot, ".jj"))) return "jj";
-	if (existsSync(join(repoRoot, ".git"))) return "git";
+	const kind = detectRepoKind(cwd);
+	if (kind) return kind;
 	throw new Error(`No jj or git repository detected from ${cwd}`);
+}
+
+export async function captureWorkspaceRevision(cwd: string, exec: ExecLike): Promise<WorkspaceRevision> {
+	const repoRoot = findRepoRootOrSelf(cwd);
+	const kind = detectWorkspaceRepoKind(repoRoot);
+	if (kind === "git") {
+		const result = await exec("git", ["rev-parse", "HEAD"], { cwd: repoRoot, timeout: 30_000 });
+		if (result.code !== 0) {
+			throw new Error(result.stderr || result.stdout || `Failed to resolve git HEAD at ${repoRoot}`);
+		}
+		return { kind, revision: result.stdout.trim() };
+	}
+	const result = await exec("jj", ["log", "-r", "@", "--no-graph", "-T", "commit_id"], {
+		cwd: repoRoot,
+		timeout: 30_000,
+	});
+	if (result.code !== 0) {
+		throw new Error(result.stderr || result.stdout || `Failed to resolve jj workspace revision at ${repoRoot}`);
+	}
+	return { kind, revision: result.stdout.trim() };
+}
+
+export function workspaceRevisionChanged(expected: WorkspaceRevision, actual: WorkspaceRevision): boolean {
+	return expected.kind !== actual.kind || expected.revision !== actual.revision;
 }
 
 async function createJjWorkspace(exec: ExecLike, repoRoot: string, workspacePath: string): Promise<void> {
@@ -149,6 +213,30 @@ async function createGitWorkspace(exec: ExecLike, repoRoot: string, workspacePat
 	}
 }
 
+function staleWorkspaceAlreadyCurrent(detail: string): boolean {
+	const normalized = detail.toLowerCase();
+	return (
+		normalized.includes("not stale") ||
+		normalized.includes("nothing to update") ||
+		normalized.includes("already up to date") ||
+		normalized.includes("working copy is not stale")
+	);
+}
+
+async function refreshJjWorkspace(exec: ExecLike, workspacePath: string): Promise<void> {
+	const result = await exec("jj", ["workspace", "update-stale"], { cwd: workspacePath, timeout: 60_000 });
+	if (result.code === 0) return;
+	const detail = [result.stderr, result.stdout].filter(Boolean).join("\n").trim();
+	if (detail && staleWorkspaceAlreadyCurrent(detail)) return;
+	throw new Error(detail || `Failed to refresh stale jj workspace at ${workspacePath}`);
+}
+
+export async function refreshManagedWorkspace(workspace: Pick<ManagedWorkspace, "kind" | "repoRoot">, exec: ExecLike): Promise<void> {
+	if (workspace.kind === "jj") {
+		await refreshJjWorkspace(exec, workspace.repoRoot);
+	}
+}
+
 async function cleanupJjWorkspace(exec: ExecLike, repoRoot: string, workspacePath: string): Promise<void> {
 	try {
 		await exec("jj", ["workspace", "forget", workspacePath], { cwd: repoRoot, timeout: 60_000 });
@@ -167,10 +255,10 @@ async function cleanupGitWorkspace(exec: ExecLike, repoRoot: string, workspacePa
 	await rm(workspacePath, { recursive: true, force: true });
 }
 
-async function seedWorkspaceFromSource(exec: ExecLike, sourceCwd: string, targetCwd: string): Promise<string[]> {
-	const sourceRoot = findRepoRoot(sourceCwd);
+async function seedWorkspaceFromSource(exec: ExecLike, sourceCwd: string, targetRepoRoot: string): Promise<string[]> {
+	const sourceRepoRoot = findRepoRootOrSelf(sourceCwd);
 	const changedFiles = await detectChangedFiles(sourceCwd, exec);
-	await syncWorkspaceFiles({ sourceCwd: sourceRoot, targetCwd, files: changedFiles });
+	await syncWorkspaceFiles({ sourceCwd: sourceRepoRoot, targetCwd: targetRepoRoot, files: changedFiles });
 	return changedFiles;
 }
 
@@ -179,27 +267,34 @@ export async function createManagedWorkspace(options: {
 	sourceCwd: string;
 	label: string;
 }): Promise<{ workspace: ManagedWorkspace; seededChangedFiles: string[] }> {
-	const repoRoot = findRepoRoot(options.sourceCwd);
-	const kind = detectWorkspaceRepoKind(options.sourceCwd);
-	const cleanupRoot = await mkdtemp(join(tmpdir(), `guided-discovery-${options.label.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}-`));
+	const sourceCwd = resolve(options.sourceCwd);
+	const sourceRepoRoot = findRepoRootOrSelf(sourceCwd);
+	const kind = detectWorkspaceRepoKind(sourceCwd);
+	const cleanupRoot = await mkdtemp(join(tmpdir(), `guided-discovery-${sanitizeWorkspaceLabel(options.label)}-`));
 	const workspacePath = join(cleanupRoot, "workspace");
-	if (kind === "jj") await createJjWorkspace(options.exec, repoRoot, workspacePath);
-	else await createGitWorkspace(options.exec, repoRoot, workspacePath);
-	const seededChangedFiles = await seedWorkspaceFromSource(options.exec, options.sourceCwd, workspacePath);
-	return {
-		workspace: {
-			kind,
-			cwd: workspacePath,
-			repoRoot,
-			cleanupRoot,
-			cleanup: async () => {
-				if (kind === "jj") await cleanupJjWorkspace(options.exec, repoRoot, workspacePath);
-				else await cleanupGitWorkspace(options.exec, repoRoot, workspacePath);
-				await rm(cleanupRoot, { recursive: true, force: true });
-			},
+	if (kind === "jj") await createJjWorkspace(options.exec, sourceRepoRoot, workspacePath);
+	else await createGitWorkspace(options.exec, sourceRepoRoot, workspacePath);
+	const repoRoot = findRepoRootOrSelf(workspacePath);
+	const seededChangedFiles = await seedWorkspaceFromSource(options.exec, sourceCwd, repoRoot);
+	const workspace: ManagedWorkspace = {
+		kind,
+		cwd: workspacePath,
+		repoRoot,
+		sourceRepoRoot,
+		sourceCwd,
+		sourceRelativeCwd: normalizeWorkspaceRelativeDirectory(sourceRepoRoot, sourceCwd),
+		cleanupRoot,
+		seededChangedFiles: [...seededChangedFiles],
+		refresh: async () => {
+			await refreshManagedWorkspace({ kind, repoRoot }, options.exec);
 		},
-		seededChangedFiles,
+		cleanup: async () => {
+			if (kind === "jj") await cleanupJjWorkspace(options.exec, sourceRepoRoot, workspacePath);
+			else await cleanupGitWorkspace(options.exec, sourceRepoRoot, workspacePath);
+			await rm(cleanupRoot, { recursive: true, force: true });
+		},
 	};
+	return { workspace, seededChangedFiles };
 }
 
 export async function createChildWorkspace(options: {
@@ -214,7 +309,7 @@ export async function createChildWorkspace(options: {
 		label: options.label,
 	});
 	const baseline = await createWorkspaceSnapshot({
-		cwd: workspace.cwd,
+		cwd: workspace.repoRoot,
 		touchedPaths: options.touchedPaths,
 		seededChangedFiles,
 	});
@@ -254,4 +349,23 @@ export async function planWorkspaceIntegration(options: {
 		nonConflictingFiles,
 		conflictingFiles,
 	};
+}
+
+export async function integrateWorkspaceChanges(options: {
+	childCwd: string;
+	parentCwd: string;
+	baseline: WorkspaceSnapshot;
+	exec: ExecLike;
+	allowPartialIntegration?: boolean;
+}): Promise<WorkspaceIntegrationPlan> {
+	const integration = await planWorkspaceIntegration(options);
+	if (options.allowPartialIntegration === false && integration.conflictingFiles.length > 0) return integration;
+	if (integration.nonConflictingFiles.length > 0) {
+		await syncWorkspaceFiles({
+			sourceCwd: options.childCwd,
+			targetCwd: options.parentCwd,
+			files: integration.nonConflictingFiles,
+		});
+	}
+	return integration;
 }

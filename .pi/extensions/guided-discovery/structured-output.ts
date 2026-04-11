@@ -115,11 +115,24 @@ function slugifyIdentifier(value: string): string {
 		.replace(/^-+|-+$/g, "");
 }
 
+export function createValidationDiscrepancyId(item: string, index: number): string {
+	const itemSlug = slugifyIdentifier(item);
+	return itemSlug ? `discrepancy-${itemSlug}` : `discrepancy-${index + 1}`;
+}
+
+export function resolveValidationDiscrepancyId(
+	discrepancy: Pick<ValidationDiscrepancy, "id" | "item">,
+	index: number,
+): string {
+	const explicitId = stringValue(discrepancy.id);
+	if (explicitId) return explicitId;
+	return createValidationDiscrepancyId(discrepancy.item, index);
+}
+
 function normalizeDiscrepancyId(value: unknown, item: string, index: number): string {
 	const explicitId = stringValue(value);
 	if (explicitId) return explicitId;
-	const itemSlug = slugifyIdentifier(item);
-	return itemSlug ? `discrepancy-${itemSlug}` : `discrepancy-${index + 1}`;
+	return createValidationDiscrepancyId(item, index);
 }
 
 function defaultWorthwhileRationale(worthImplementingNow: boolean): string {
@@ -131,7 +144,7 @@ function defaultWorthwhileRationale(worthImplementingNow: boolean): string {
 function ensureUniqueDiscrepancyIds(discrepancies: ValidationDiscrepancy[]): ValidationDiscrepancy[] {
 	const seen = new Map<string, number>();
 	return discrepancies.map((discrepancy, index) => {
-		const baseId = stringValue(discrepancy.id, normalizeDiscrepancyId("", discrepancy.item, index));
+		const baseId = resolveValidationDiscrepancyId(discrepancy, index);
 		const count = seen.get(baseId) ?? 0;
 		seen.set(baseId, count + 1);
 		if (count === 0) return { ...discrepancy, id: baseId };
@@ -201,6 +214,8 @@ function normalizeFindingCategory(category: string): CheckerFindingCategory | nu
 			"polish",
 			"affordance",
 			"friction",
+			"usability",
+			"wayfinding",
 		].includes(normalized)
 	)
 		return "ui";
@@ -233,7 +248,7 @@ function normalizeFindingCategory(category: string): CheckerFindingCategory | nu
 	if (["simplicity", "overscoping", "overengineering", "architecture", "design", "cognitive_load", "overload", "duplicate_plumbing"].includes(normalized)) {
 		return "complexity";
 	}
-	if (["agents", "agent", "instructions", "conventions", "policy", "process"].includes(normalized)) return "guidance";
+	if (["agents", "agent", "instructions", "conventions", "policy", "process", "process_violation", "workflow", "workflow_violation"].includes(normalized)) return "guidance";
 	return null;
 }
 

@@ -1,7 +1,8 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { realpathSync } from "node:fs";
 import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { dirname, join, relative, resolve } from "node:path";
-import { computeExecutionBatches, detectChangedFiles, type ExecLike } from "./changes.ts";
+import { dirname, join, resolve } from "node:path";
+import { computeExecutionBatches, detectChangedFiles, pathsOverlap, type ExecLike } from "./changes.ts";
 import {
 	appendAgentsChecksToCheckerReport,
 	collectAgentsCheckCommands,
@@ -11,6 +12,7 @@ import {
 } from "./agents-checks.ts";
 import { selectRemainingActionableDiscrepancies } from "./discrepancy-selector.ts";
 import {
+	collectRelevantGuidancePaths,
 	discoverAncestorDocumentPaths,
 	discoverRelevantGuidance,
 	findRepoRoot,
@@ -20,11 +22,12 @@ import {
 import { resolveWorkflowModels } from "./models.ts";
 import { runSubagent } from "./subagent-runner.ts";
 import {
+	captureWorkspaceRevision,
 	createChildWorkspace,
 	createManagedWorkspace,
 	createWorkspaceSnapshot,
-	planWorkspaceIntegration,
-	syncWorkspaceFiles,
+	integrateWorkspaceChanges,
+	workspaceRevisionChanged,
 	type ManagedWorkspace,
 	type WorkspaceSnapshot,
 } from "./workspaces.ts";
@@ -32,9 +35,12 @@ import {
 	parseCheckerReport,
 	parseDecompositionPlan,
 	parseValidationReport,
+	resolveValidationDiscrepancyId,
+	type CheckerFindingCategory,
 	type CheckerReport,
 	type DecompositionPhase,
 	type DecompositionPlan,
+	type FindingSeverity,
 	type ValidationDiscrepancy,
 	type ValidationReport,
 } from "./structured-output.ts";
@@ -48,6 +54,10 @@ import type {
 const READ_ONLY_SUBAGENT_TOOLS = ["read", "grep", "find", "ls"];
 const WORKER_SUBAGENT_TOOLS = ["read", "edit", "write", "grep", "find", "ls"];
 export const QUALITY_SUITE_MAX_ROUNDS = 3;
+export const QUALITY_SUITE_MAX_EXTRA_ROUNDS = 2;
+export const TARGETED_FOLLOW_THROUGH_MAX_ROUNDS = 2;
+export const FINAL_CHECKER_MAX_PASSES = 2;
+const QUALITY_SUITE_STAGNATION_LIMIT = 2;
 
 const DESIGN_PATH_PATTERN =
 	/(^|[\/_.-])(ui|ux|screen|screens|view|views|page|pages|component|components|widget|widgets|layout|layouts|style|styles|theme|themes|navigation|nav|menu|toolbar|modal|dialog|sheet|panel|form|copy|content|onboarding|tui)([\/_.-]|$)/i;
@@ -62,7 +72,7 @@ const QUALITY_STAGE_FIX_EDGE: Record<QualityStageId, WorkflowEdgeId> = {
 	checker: "checker->fix",
 };
 
-type CheckRunSummary = {
+export type CheckRunSummary = {
 	command: string;
 	source: string;
 	status: "passed" | "failed" | "blocked" | "error";
@@ -79,12 +89,24 @@ interface CheckerSuiteResult {
 	report: CheckerReport;
 	guidance: RelevantGuidanceResult;
 	results: CheckRunSummary[];
+	agentsCheckResults: CheckRunSummary[];
 	modelRuns: CheckerModelRun[];
 }
 
 type WorkflowDecision = "done" | "reformulate";
+export type ImplementationMode = "direct" | "subagents";
 export type WorkerPromptKind = "worker" | "design-worker";
 export type QualityStageId = "cleanup" | "design" | "checker";
+
+export interface ParsedImplementationRequest {
+	mode?: ImplementationMode;
+	extraInstructions: string;
+}
+
+export type StandaloneSubagentRequest =
+	| { kind: "plan"; planPath: string }
+	| { kind: "raw-prompt"; rawPrompt: string }
+	| { kind: "missing-plan"; message: string };
 
 interface WorkflowOptions {
 	planPath?: string;
@@ -131,16 +153,54 @@ interface SpecialistReviewRun {
 	summary: CheckRunSummary;
 }
 
+export type QualityGateClassification = "hard" | "soft";
+export type QualitySuiteSoftGateChoice =
+	| "Accept remaining soft findings and continue"
+	| "Continue remediation anyway"
+	| "Reformulate in discovery mode";
+
+export interface QualityGateFindingSummary {
+	stage: QualityStageId;
+	category: CheckerFindingCategory;
+	severity: FindingSeverity;
+	summary: string;
+	paths: string[];
+	classification: QualityGateClassification;
+}
+
+export interface QualitySuiteRoundSnapshot {
+	round: number;
+	hardFindingCount: number;
+	softFindingCount: number;
+	totalFindingCount: number;
+	weightedScore: number;
+}
+
 export interface QualitySuiteRoundDecision {
-	action: "pass" | "remediate" | "fail";
+	action: "pass" | "remediate" | "prompt" | "fail";
 	designReviewStatus: "ran" | "skipped";
 	triggerStages: QualityStageId[];
 	findingCounts: Record<QualityStageId, number>;
+	hardFindingCounts: Record<QualityStageId, number>;
+	softFindingCounts: Record<QualityStageId, number>;
+	hardGateFindings: QualityGateFindingSummary[];
+	softGateFindings: QualityGateFindingSummary[];
+	materialProgress: boolean;
+	stagnationCount: number;
+	roundBudget: {
+		base: number;
+		extra: number;
+		total: number;
+	};
+	snapshot: QualitySuiteRoundSnapshot;
 	restartStage?: "cleanup";
 	message?: string;
 }
 
 interface QualitySuiteResult {
+	outcome: "pass" | "accepted-soft";
+	acceptedResidualSoftFindings: QualityGateFindingSummary[];
+	blockingHardFindings: QualityGateFindingSummary[];
 	changedFiles: string[];
 	cleanupRun: SpecialistReviewRun;
 	designRun: SpecialistReviewRun | null;
@@ -155,21 +215,39 @@ interface WorkflowQualityStats {
 	checkerRuns: number;
 	remediationPasses: number;
 	fixedFindingSignatures: Record<QualityStageId, Set<string>>;
+	agentsCheckResults: CheckRunSummary[];
 	pendingLegacyCleanupFindingSignatures: Set<string>;
 	legacyCodeOrFilesRemoved: boolean;
+	mergedResultVerificationRuns: number;
+	mergedResultVerificationReasons: Set<string>;
 }
 
-interface WorkflowQualitySummary {
+export interface AgentsCheckHistorySummary {
+	trackedCommands: number;
+	finalPassed: number;
+	finalFailed: number;
+	finalBlocked: number;
+	finalErrored: number;
+	failedAtLeastOnce: number;
+	blockedAtLeastOnce: number;
+	erroredAtLeastOnce: number;
+	failedThenFixed: number;
+}
+
+export interface WorkflowQualitySummary {
 	cleanupRuns: number;
 	designReviewRuns: number;
 	designReviewSkips: number;
 	checkerRuns: number;
 	remediationPasses: number;
 	fixedFindings: Record<QualityStageId, number> & { total: number };
+	agentsChecks: AgentsCheckHistorySummary;
 	legacyCodeOrFilesRemoved: boolean;
+	mergedResultVerificationRuns: number;
+	mergedResultVerificationReasons: string[];
 }
 
-interface ValidationResolutionSummary {
+export interface ValidationResolutionSummary {
 	autoRemediationPasses: number;
 	autoRemediatedDiscrepancyIds: string[];
 	manualRemediationPasses: number;
@@ -179,6 +257,39 @@ interface ValidationResolutionSummary {
 
 function trimBlock(text: string): string {
 	return text.trim() ? `${text.trim()}\n` : "";
+}
+
+export function parseImplementationRequest(rawArgs: string): ParsedImplementationRequest {
+	let text = rawArgs.trim();
+	let mode: ImplementationMode | undefined;
+
+	text = text.replace(/^--mode\s+(direct|subagents?|subagent)\b\s*/i, (_match, matchedMode: string) => {
+		mode = matchedMode.toLowerCase().startsWith("direct") ? "direct" : "subagents";
+		return "";
+	});
+
+	if (!mode) {
+		text = text.replace(/^(direct|subagents?|subagent)\b[:\s-]*/i, (_match, matchedMode: string) => {
+			mode = matchedMode.toLowerCase().startsWith("direct") ? "direct" : "subagents";
+			return "";
+		});
+	}
+
+	return { mode, extraInstructions: text.trim() };
+}
+
+export function resolveStandaloneSubagentRequest(options: {
+	rawArgs: string;
+	planPath: string;
+	hasPlanFile: boolean;
+}): StandaloneSubagentRequest {
+	const rawPrompt = options.rawArgs.trim();
+	if (rawPrompt) return { kind: "raw-prompt", rawPrompt };
+	if (options.hasPlanFile) return { kind: "plan", planPath: options.planPath };
+	return {
+		kind: "missing-plan",
+		message: "No PLAN.md found. Pass a raw prompt or create PLAN.md first.",
+	};
 }
 
 async function readBundledPrompt(name: string): Promise<string> {
@@ -208,14 +319,125 @@ function uniquePaths(paths: string[]): string[] {
 	return [...new Set(paths.map((path) => path.trim()).filter(Boolean))];
 }
 
-function collectWorkerAgentFiles(baseAgentFiles: string[], cwd: string, touchedPaths: string[]): string[] {
-	return uniquePaths([
-		...baseAgentFiles,
-		...discoverRelevantGuidance(cwd, touchedPaths, "AGENTS.md").documents.map((document) => document.path),
-	]);
+function filterChangedFilesToScope(changedFiles: string[], touchedPaths: string[]): string[] {
+	if (touchedPaths.length === 0) return uniquePaths(changedFiles);
+	return uniquePaths(changedFiles.filter((file) => pathsOverlap([file], touchedPaths)));
 }
 
-async function synthesizeImplementationPlan(options: {
+function buildTargetedReviewFiles(options: {
+	changedFiles: string[];
+	touchedPaths: string[];
+	extraPaths?: string[];
+}): string[] {
+	const scopedChangedFiles = filterChangedFilesToScope(options.changedFiles, options.touchedPaths);
+	return uniquePaths([...scopedChangedFiles, ...options.touchedPaths, ...(options.extraPaths ?? [])]);
+}
+
+function renderTargetedFollowThroughScopeContext(options: {
+	phase: DecompositionPhase;
+	round: number;
+	changedFiles: string[];
+	touchedPaths: string[];
+	discrepancyContextText?: string;
+}): string {
+	return trimBlock(
+		[
+			"## Review scope",
+			"",
+			"mode: targeted phase follow-through",
+			`round: ${options.round}/${TARGETED_FOLLOW_THROUGH_MAX_ROUNDS}`,
+			`phase: ${options.phase.id} — ${options.phase.title}`,
+			`goal: ${options.phase.goal}`,
+			`changed files in scope: ${options.changedFiles.length > 0 ? options.changedFiles.join(", ") : "none detected"}`,
+			`declared touched paths: ${options.touchedPaths.length > 0 ? options.touchedPaths.join(", ") : "none provided"}`,
+			"",
+			"Scope rules:",
+			"- Focus only on this phase's changed files and declared touched paths.",
+			"- You may inspect immediate surrounding code, nearby callsites, importers, tests, and config only when directly relevant to this phase.",
+			"- Do not roam into unrelated repo-wide cleanup or redesign opportunities.",
+			"- Prefer no finding over speculative polish.",
+			...(options.discrepancyContextText?.trim() ? ["", "## Additional targeted context", "", options.discrepancyContextText.trim()] : []),
+		].join("\n"),
+	);
+}
+
+function renderFinalHolisticScopeContext(options: {
+	changedFiles: string[];
+	workerResults: WorkerPhaseResult[];
+	discrepancyContextText?: string;
+}): string {
+	return trimBlock(
+		[
+			"## Review scope",
+			"",
+			"mode: final holistic feature review",
+			`changed files in scope: ${options.changedFiles.length > 0 ? options.changedFiles.join(", ") : "none detected"}`,
+			`implemented phases: ${options.workerResults.length}`,
+			"",
+			"Scope rules:",
+			"- Review the whole changed feature once, but only for glaring feature-level issues.",
+			"- Do not generate a wishlist or a broad refactor backlog.",
+			"- Non-critical polish should be reported sparingly and is not a blocking loop trigger here.",
+			...(options.discrepancyContextText?.trim() ? ["", "## Additional validation context", "", options.discrepancyContextText.trim()] : []),
+		].join("\n"),
+	);
+}
+
+function renderFinalCheckerScopeContext(options: {
+	round: number;
+	changedFiles: string[];
+	softFindings: QualityGateFindingSummary[];
+}): string {
+	return trimBlock(
+		[
+			"## Review scope",
+			"",
+			"mode: final checker loop",
+			`checker pass: ${options.round}/${FINAL_CHECKER_MAX_PASSES}`,
+			`changed files in scope: ${options.changedFiles.length > 0 ? options.changedFiles.join(", ") : "none detected"}`,
+			"",
+			"Checker focus:",
+			"- logic bugs and correctness issues",
+			"- regressions and unintended side effects",
+			"- security, guidance, and important behavioral gaps",
+			"- avoid spending attention on cleanup or polish unless it creates a concrete bug or regression risk",
+			...(options.softFindings.length > 0
+				? [
+					"",
+					"## Non-blocking holistic cleanup/design notes already reported",
+					"",
+					...options.softFindings.map(
+						(finding) =>
+							`- ${finding.stage}/${finding.category} [${finding.severity}]: ${finding.summary}${finding.paths.length > 0 ? ` (${finding.paths.join(", ")})` : ""}`,
+					),
+				]
+				: []),
+		].join("\n"),
+	);
+}
+
+function normalizeAgentFilePath(path: string): string {
+	const trimmed = path.trim();
+	if (!trimmed) return trimmed;
+	try {
+		return realpathSync(trimmed);
+	} catch {
+		return trimmed;
+	}
+}
+
+export function collectWorkerAgentFiles(
+	baseAgentFiles: string[],
+	cwd: string,
+	touchedPaths: string[],
+	extraFiles: string[] = [],
+): string[] {
+	return uniquePaths(
+		[...baseAgentFiles, ...collectRelevantGuidancePaths(cwd, touchedPaths, "AGENTS.md"), ...extraFiles].map(normalizeAgentFilePath),
+	);
+}
+
+export async function synthesizeImplementationPlan(options: {
 	cwd: string;
 	tempDir: string;
 	agentFiles: string[];
@@ -224,6 +446,7 @@ async function synthesizeImplementationPlan(options: {
 	extraInstructions: string;
 	model?: string;
 	thinkingLevel?: string;
+	runSubagentFn?: typeof runSubagent;
 }): Promise<string> {
 	const requestPath = await writeTempContextFile(
 		options.tempDir,
@@ -237,7 +460,8 @@ async function synthesizeImplementationPlan(options: {
 				: []),
 		].join("\n"),
 	);
-	const result = await runSubagent({
+	const runSubagentFn = options.runSubagentFn ?? runSubagent;
+	const result = await runSubagentFn({
 		cwd: options.cwd,
 		systemPrompt: options.plannerPrompt,
 		prompt: "Create a lightweight implementation plan for the attached request. Output markdown only.",
@@ -252,7 +476,7 @@ async function synthesizeImplementationPlan(options: {
 	return planPath;
 }
 
-async function materializeWorkflowPlan(options: {
+export async function materializeWorkflowPlan(options: {
 	cwd: string;
 	tempDir: string;
 	agentFiles: string[];
@@ -262,6 +486,7 @@ async function materializeWorkflowPlan(options: {
 	extraInstructions: string;
 	model?: string;
 	thinkingLevel?: string;
+	runSubagentFn?: typeof runSubagent;
 }): Promise<{ planPath: string; label: string }> {
 	if (options.rawPrompt?.trim()) {
 		return {
@@ -274,15 +499,17 @@ async function materializeWorkflowPlan(options: {
 				extraInstructions: options.extraInstructions,
 				model: options.model,
 				thinkingLevel: options.thinkingLevel,
+				runSubagentFn: options.runSubagentFn,
 			}),
 			label: "the synthesized lightweight plan",
 		};
 	}
 	if (!options.planPath) throw new Error("Sub-agent implementation requires either planPath or rawPrompt.");
-	const planText = await readFile(resolve(options.planPath), "utf8");
+	const sourcePlanPath = resolve(options.cwd, options.planPath);
+	const planText = await readFile(sourcePlanPath, "utf8");
 	const workflowPlanPath = join(options.tempDir, "PLAN.md");
-	await writeFile(workflowPlanPath, planText, "utf8");
-	return { planPath: workflowPlanPath, label: options.planPath };
+	await writeFile(workflowPlanPath, trimBlock(planText), "utf8");
+	return { planPath: workflowPlanPath, label: sourcePlanPath };
 }
 
 function makeExec(pi: ExtensionAPI): ExecLike {
@@ -356,8 +583,63 @@ function renderCheckResultsSummary(results: CheckRunSummary[]): string {
 	return trimBlock(lines.join("\n"));
 }
 
+function isAgentsCheckResult(result: Pick<CheckRunSummary, "source">): boolean {
+	return /(?:^|,\s*)[^,]*AGENTS\.md(?:$|,)/.test(result.source);
+}
+
+function agentsCheckHistoryKey(result: Pick<CheckRunSummary, "command" | "source">): string {
+	return `${result.command}\u0000${result.source}`;
+}
+
+export function summarizeAgentsCheckHistory(results: CheckRunSummary[]): AgentsCheckHistorySummary {
+	const history = new Map<string, CheckRunSummary["status"][]>();
+	for (const result of results) {
+		if (!isAgentsCheckResult(result)) continue;
+		const key = agentsCheckHistoryKey(result);
+		const statuses = history.get(key) ?? [];
+		statuses.push(result.status);
+		history.set(key, statuses);
+	}
+
+	const summary: AgentsCheckHistorySummary = {
+		trackedCommands: history.size,
+		finalPassed: 0,
+		finalFailed: 0,
+		finalBlocked: 0,
+		finalErrored: 0,
+		failedAtLeastOnce: 0,
+		blockedAtLeastOnce: 0,
+		erroredAtLeastOnce: 0,
+		failedThenFixed: 0,
+	};
+
+	for (const statuses of history.values()) {
+		const finalStatus = statuses[statuses.length - 1];
+		const sawFailed = statuses.includes("failed");
+		const sawBlocked = statuses.includes("blocked");
+		const sawErrored = statuses.includes("error");
+		if (sawFailed) summary.failedAtLeastOnce += 1;
+		if (sawBlocked) summary.blockedAtLeastOnce += 1;
+		if (sawErrored) summary.erroredAtLeastOnce += 1;
+		if ((sawFailed || sawErrored) && finalStatus === "passed") summary.failedThenFixed += 1;
+		if (finalStatus === "passed") summary.finalPassed += 1;
+		else if (finalStatus === "failed") summary.finalFailed += 1;
+		else if (finalStatus === "blocked") summary.finalBlocked += 1;
+		else if (finalStatus === "error") summary.finalErrored += 1;
+	}
+
+	return summary;
+}
+
 function summarizeAgentsCheckCommands(commands: AgentsCheckCommand[], maxItems = 5): string[] {
 	return commands.slice(0, maxItems).map((command) => `${command.command} (${command.source})`);
+}
+
+function agentsCheckCommandSetKey(commands: AgentsCheckCommand[]): string {
+	return [...commands]
+		.map((command) => `${command.command}\u0000${command.source}`)
+		.sort()
+		.join("\u0001");
 }
 
 async function requestAgentsCheckExecutionPolicy(
@@ -367,8 +649,8 @@ async function requestAgentsCheckExecutionPolicy(
 	if (commands.length === 0) return { allowed: true };
 	if (!ctx.hasUI) {
 		return {
-			allowed: false,
-			reason: "Explicit approval is required before AGENTS.md commands can run in non-interactive mode.",
+			allowed: true,
+			reason: "Non-interactive sub-agent mode runs only sanitized argv-style AGENTS.md checks inside the isolated workspace.",
 		};
 	}
 	const approved = await ctx.ui.confirm(
@@ -524,6 +806,23 @@ function createValidationResolutionSummary(): ValidationResolutionSummary {
 	};
 }
 
+function recordDiscrepancyIds(target: string[], discrepancies: ValidationDiscrepancy[]): void {
+	for (const [index, discrepancy] of discrepancies.entries()) {
+		const id = resolveValidationDiscrepancyId(discrepancy, index);
+		if (!target.includes(id)) target.push(id);
+	}
+}
+
+function discrepancyIdsInOrder(
+	discrepancies: ValidationDiscrepancy[],
+	allDiscrepancies: ValidationDiscrepancy[],
+): string[] {
+	return discrepancies.map((discrepancy, index) => {
+		const allIndex = allDiscrepancies.indexOf(discrepancy);
+		return resolveValidationDiscrepancyId(discrepancy, allIndex >= 0 ? allIndex : index);
+	});
+}
+
 export function discrepancyAttemptSignature(discrepancy: ValidationDiscrepancy): string {
 	const normalize = (value: string): string =>
 		value
@@ -639,13 +938,35 @@ export function renderTargetedDiscrepancyContext(options: {
 	);
 }
 
-function buildSummary(
+function renderQualityGateFindingsSection(
+	title: string,
+	findings: QualityGateFindingSummary[],
+	emptyMessage: string,
+): string {
+	const lines = [`## ${title}`, ""];
+	if (findings.length === 0) {
+		lines.push(emptyMessage);
+	} else {
+		for (const finding of findings) {
+			lines.push(
+				`- [${finding.severity}] ${finding.stage}/${finding.category}: ${finding.summary}${finding.paths.length > 0 ? ` (${finding.paths.join(", ")})` : ""}`,
+			);
+		}
+	}
+	return trimBlock(lines.join("\n"));
+}
+
+export function buildSummary(
 	changedFiles: string[],
 	checks: CheckRunSummary[],
 	validation: ValidationReport,
 	checker: CheckerReport,
 	quality: WorkflowQualitySummary,
 	validationResolution: ValidationResolutionSummary,
+	qualityOutcome: {
+		acceptedResidualSoftFindings: QualityGateFindingSummary[];
+		blockingHardFindings: QualityGateFindingSummary[];
+	},
 ): string {
 	const passedChecks = checks.filter((check) => check.status === "passed").length;
 	const failedChecks = checks.filter((check) => check.status === "failed").length;
@@ -660,9 +981,15 @@ function buildSummary(
 				`Design reviews: ${quality.designReviewRuns} run, ${quality.designReviewSkips} skipped`,
 				`Quality remediation passes: ${quality.remediationPasses}`,
 				`Fixed quality findings: cleanup ${quality.fixedFindings.cleanup}, design ${quality.fixedFindings.design}, checker ${quality.fixedFindings.checker}, total ${quality.fixedFindings.total}`,
+				`Accepted residual soft quality issues: ${qualityOutcome.acceptedResidualSoftFindings.length}`,
+				`Blocking hard quality issues: ${qualityOutcome.blockingHardFindings.length}`,
+				`Merged-result verification passes: ${quality.mergedResultVerificationRuns}${quality.mergedResultVerificationReasons.length > 0 ? ` (${quality.mergedResultVerificationReasons.join("; ")})` : ""}`,
 				`Legacy code/files removed (verified): ${quality.legacyCodeOrFilesRemoved ? "yes" : "no"}`,
-				`Checker findings: ${checker.findings.length}`,
-				`Checks run: ${passedChecks} passed, ${failedChecks} flagged findings, ${blockedChecks} blocked, ${erroredChecks} errored`,
+				`Final checker findings: ${checker.findings.length}`,
+				`Checks run in final verification: ${passedChecks} passed, ${failedChecks} flagged findings, ${blockedChecks} blocked, ${erroredChecks} errored`,
+				quality.agentsChecks.trackedCommands > 0
+					? `AGENTS-required checks across verification passes: ${quality.agentsChecks.trackedCommands} tracked, ${quality.agentsChecks.finalPassed} passing in the final pass, ${quality.agentsChecks.failedThenFixed} failed then fixed, ${quality.agentsChecks.finalFailed} still failing, ${quality.agentsChecks.finalBlocked} blocked, ${quality.agentsChecks.finalErrored} errored`
+					: "AGENTS-required checks across verification passes: none discovered",
 				`Validator recommendation: ${validation.recommendation}`,
 				`Validator auto-remediation passes: ${validationResolution.autoRemediationPasses}`,
 				`Auto-targeted validator discrepancies: ${validationResolution.autoRemediatedDiscrepancyIds.length}`,
@@ -671,7 +998,71 @@ function buildSummary(
 				`Remaining discrepancies accepted: ${validationResolution.acceptedRemainingDiscrepancies ? "yes" : "no"}`,
 				validation.summary || "",
 			].join("\n"),
+			renderQualityGateFindingsSection(
+				"Accepted residual soft quality issues",
+				qualityOutcome.acceptedResidualSoftFindings,
+				"No accepted residual soft quality issues.",
+			),
+			renderQualityGateFindingsSection(
+				"Blocking hard quality issues",
+				qualityOutcome.blockingHardFindings,
+				"No blocking hard quality issues remain.",
+			),
 			renderUnresolvedDiscrepancySummary(validation.discrepancies),
+		].join("\n\n"),
+	);
+}
+
+function buildQualityReformulationPrompt(findings: QualityGateFindingSummary[]): string {
+	return trimBlock(
+		[
+			"Please reformulate the approved plan based on the merged-result quality issues below.",
+			"Keep already-good work, but simplify or reshape the plan where the quality suite shows the implementation is not converging cleanly.",
+			"Use PLAN.md as the source of truth and produce a fresh final plan when ready.",
+			"",
+			renderQualityGateFindingsSection(
+				"Merged-result quality issues to address in a reformulated plan",
+				findings,
+				"No remaining quality issues were recorded.",
+			),
+		].join("\n"),
+	).trim();
+}
+
+function buildQualityReformulationSummary(options: {
+	changedFiles: string[];
+	checks: CheckRunSummary[];
+	checker: CheckerReport;
+	quality: WorkflowQualitySummary;
+	softFindings: QualityGateFindingSummary[];
+	hardFindings: QualityGateFindingSummary[];
+}): string {
+	const passedChecks = options.checks.filter((check) => check.status === "passed").length;
+	const failedChecks = options.checks.filter((check) => check.status === "failed").length;
+	const blockedChecks = options.checks.filter((check) => check.status === "blocked").length;
+	const erroredChecks = options.checks.filter((check) => check.status === "error").length;
+	return trimBlock(
+		[
+			[
+				"Sub-agent implementation workflow paused for discovery reformulation before validator completion.",
+				options.changedFiles.length > 0
+					? `Changed files (${options.changedFiles.length}): ${options.changedFiles.join(", ")}`
+					: "Changed files: none detected",
+				`Fixed quality findings: cleanup ${options.quality.fixedFindings.cleanup}, design ${options.quality.fixedFindings.design}, checker ${options.quality.fixedFindings.checker}, total ${options.quality.fixedFindings.total}`,
+				`Merged-result verification passes: ${options.quality.mergedResultVerificationRuns}${options.quality.mergedResultVerificationReasons.length > 0 ? ` (${options.quality.mergedResultVerificationReasons.join("; ")})` : ""}`,
+				`Final checker findings before reformulation: ${options.checker.findings.length}`,
+				`Checks run in final merged-result verification: ${passedChecks} passed, ${failedChecks} flagged findings, ${blockedChecks} blocked, ${erroredChecks} errored`,
+			].join("\n"),
+			renderQualityGateFindingsSection(
+				"Accepted or remaining soft quality issues",
+				options.softFindings,
+				"No soft quality issues were recorded.",
+			),
+			renderQualityGateFindingsSection(
+				"Blocking hard quality issues",
+				options.hardFindings,
+				"No blocking hard quality issues were recorded.",
+			),
 		].join("\n\n"),
 	);
 }
@@ -744,10 +1135,125 @@ export function decideValidatorDiscrepancyHandling(options: {
 	};
 }
 
-type ValidatorDiscrepancyChoice =
+export type ValidatorDiscrepancyChoice =
 	| "Select items to implement now"
 	| "Reformulate in discovery mode"
 	| "Accept the discrepancies and finish";
+
+export interface ValidatorDiscrepancyLoopStep {
+	validation: ValidationReport;
+	handling: ValidatorDiscrepancyHandlingDecision;
+	stage: "initial" | "post-remediation";
+	lastSelectedActionableIds: string[];
+}
+
+export interface ValidatorDiscrepancyLoopResult {
+	decision: "continue" | "reformulate";
+	validation: ValidationReport;
+}
+
+export async function runValidatorDiscrepancyLoop(options: {
+	initialValidation: ValidationReport;
+	hasUI: boolean;
+	validationResolution: ValidationResolutionSummary;
+	attemptedAutoSignatures?: Set<string>;
+	promptForChoice: (step: ValidatorDiscrepancyLoopStep) => Promise<ValidatorDiscrepancyChoice>;
+	selectDiscrepancies: (
+		step: ValidatorDiscrepancyLoopStep & { initialSelectedIds: string[] },
+	) => Promise<ValidationDiscrepancy[] | undefined>;
+	runRemediation: (options: {
+		kind: "auto" | "manual";
+		discrepancies: ValidationDiscrepancy[];
+		passNumber: number;
+		step: ValidatorDiscrepancyLoopStep;
+	}) => Promise<ValidationReport>;
+	onAutoRemediationPlanned?: (step: ValidatorDiscrepancyLoopStep & { passNumber: number }) => Promise<void> | void;
+	onPromptRequired?: (step: ValidatorDiscrepancyLoopStep) => Promise<void> | void;
+	onSelectionCancelled?: (step: ValidatorDiscrepancyLoopStep) => Promise<void> | void;
+	onSelectionEmpty?: (step: ValidatorDiscrepancyLoopStep) => Promise<void> | void;
+}): Promise<ValidatorDiscrepancyLoopResult> {
+	let validation = options.initialValidation;
+	let hasRemediated =
+		options.validationResolution.autoRemediationPasses > 0 || options.validationResolution.manualRemediationPasses > 0;
+	let lastSelectedActionableIds: string[] = [];
+	const attemptedAutoSignatures = options.attemptedAutoSignatures ?? new Set<string>();
+
+	while (true) {
+		const stage = hasRemediated ? "post-remediation" : "initial";
+		const handling = decideValidatorDiscrepancyHandling({
+			validation,
+			hasUI: options.hasUI,
+			discrepanciesAccepted: options.validationResolution.acceptedRemainingDiscrepancies,
+			attemptedAutoSignatures,
+			stage,
+		});
+		const step: ValidatorDiscrepancyLoopStep = {
+			validation,
+			handling,
+			stage,
+			lastSelectedActionableIds: [...lastSelectedActionableIds],
+		};
+
+		if (handling.action === "continue") return { decision: "continue", validation };
+		if (handling.action === "fail") {
+			throw new Error(handling.message || "Validator reported unresolved actionable discrepancies.");
+		}
+		if (handling.action === "auto-remediate") {
+			const passNumber = options.validationResolution.autoRemediationPasses + 1;
+			for (const discrepancy of handling.autoDiscrepancies) {
+				attemptedAutoSignatures.add(discrepancyAttemptSignature(discrepancy));
+			}
+			await options.onAutoRemediationPlanned?.({ ...step, passNumber });
+			validation = await options.runRemediation({
+				kind: "auto",
+				discrepancies: handling.autoDiscrepancies,
+				passNumber,
+				step,
+			});
+			hasRemediated = true;
+			options.validationResolution.autoRemediationPasses += 1;
+			recordDiscrepancyIds(options.validationResolution.autoRemediatedDiscrepancyIds, handling.autoDiscrepancies);
+			continue;
+		}
+
+		await options.onPromptRequired?.(step);
+		const choice = await options.promptForChoice(step);
+		if (choice === "Reformulate in discovery mode") return { decision: "reformulate", validation };
+		if (choice === "Accept the discrepancies and finish") {
+			options.validationResolution.acceptedRemainingDiscrepancies = true;
+			return { decision: "continue", validation };
+		}
+
+		const remainingActionableIds = new Set(
+			discrepancyIdsInOrder(handling.remainingActionableDiscrepancies, validation.discrepancies),
+		);
+		const initialSelectedIds = lastSelectedActionableIds.filter((id) => remainingActionableIds.has(id));
+		const selectedManualDiscrepancies = await options.selectDiscrepancies({
+			...step,
+			initialSelectedIds,
+		});
+		if (selectedManualDiscrepancies === undefined) {
+			await options.onSelectionCancelled?.(step);
+			continue;
+		}
+		if (selectedManualDiscrepancies.length === 0) {
+			await options.onSelectionEmpty?.(step);
+			continue;
+		}
+
+		const passNumber = options.validationResolution.manualRemediationPasses + 1;
+		lastSelectedActionableIds = discrepancyIdsInOrder(selectedManualDiscrepancies, validation.discrepancies);
+		validation = await options.runRemediation({
+			kind: "manual",
+			discrepancies: selectedManualDiscrepancies,
+			passNumber,
+			step,
+		});
+		hasRemediated = true;
+		options.validationResolution.manualRemediationPasses += 1;
+		recordDiscrepancyIds(options.validationResolution.manuallyTargetedDiscrepancyIds, selectedManualDiscrepancies);
+	}
+}
 
 async function promptForValidatorDiscrepancyChoice(
 	ctx: ExtensionContext,
@@ -777,6 +1283,46 @@ async function promptForValidatorDiscrepancyChoice(
 			"Accept the discrepancies and finish",
 		],
 	)) as ValidatorDiscrepancyChoice;
+}
+
+class QualitySuiteReformulateError extends Error {
+	summary: string;
+	reformulationPrompt: string;
+
+	constructor(options: { summary: string; reformulationPrompt: string }) {
+		super("Quality suite requested discovery reformulation.");
+		this.name = "QualitySuiteReformulateError";
+		this.summary = options.summary;
+		this.reformulationPrompt = options.reformulationPrompt;
+	}
+}
+
+async function promptForQualitySuiteSoftGateChoice(
+	ctx: ExtensionContext,
+	decision: QualitySuiteRoundDecision,
+): Promise<QualitySuiteSoftGateChoice> {
+	if (decision.hardGateFindings.length > 0) {
+		throw new Error("Soft-gate prompt received hard blockers unexpectedly.");
+	}
+	const softFindingSummary = decision.softGateFindings
+		.slice(0, 5)
+		.map((finding) => `- [${finding.severity}] ${finding.stage}/${finding.category}: ${finding.summary}`)
+		.join("\n");
+	return (await ctx.ui.select(
+		[
+			decision.message || "Only soft quality findings remain.",
+			`${decision.softGateFindings.length} residual soft finding(s) remain. No hard blockers remain.`,
+			decision.materialProgress
+				? `The latest round improved materially, but the bounded retry budget is now ${decision.roundBudget.total} round(s).`
+				: `The latest round did not materially improve. Stagnation count: ${decision.stagnationCount}.`,
+			softFindingSummary,
+		].filter(Boolean).join("\n\n"),
+		[
+			"Accept remaining soft findings and continue",
+			"Continue remediation anyway",
+			"Reformulate in discovery mode",
+		],
+	)) as QualitySuiteSoftGateChoice;
 }
 
 function emitWorkflowUpdate(onUpdate: WorkflowOptions["onUpdate"], update: WorkflowProgressUpdate): void {
@@ -911,6 +1457,7 @@ async function resolveWorkspaceIntegrationConflicts(options: {
 		tempDir: options.tempDir,
 		planPath: options.planPath,
 		agentFiles: uniquePaths([...options.agentFiles, ...childReferenceFiles]),
+		touchedPaths: options.conflictingFiles,
 		systemPrompt: promptSelection.systemPrompt,
 		contextTitle: `${options.phase.id}-workspace-conflicts`,
 		contextMarkdown,
@@ -1099,14 +1646,114 @@ export function pickRemediationPrompt(options: {
 	return makePromptSelection("worker", options.workerPrompt, false, "remediation is code-focused without design-sensitive signals");
 }
 
+function classifyQualityGateFinding(
+	stage: QualityStageId,
+	finding: CheckerReport["findings"][number],
+): QualityGateClassification {
+	if (finding.category === "security" || finding.category === "regression" || finding.category === "guidance") {
+		return "hard";
+	}
+	if (stage === "design" && finding.severity === "high") return "hard";
+	if (finding.severity === "high") return "hard";
+	return "soft";
+}
+
+function summarizeQualityGateFinding(
+	stage: QualityStageId,
+	finding: CheckerReport["findings"][number],
+): QualityGateFindingSummary {
+	return {
+		stage,
+		category: finding.category,
+		severity: finding.severity,
+		summary: finding.summary,
+		paths: [...finding.paths],
+		classification: classifyQualityGateFinding(stage, finding),
+	};
+}
+
+function partitionQualityGateFindings(
+	stage: QualityStageId,
+	findings: CheckerReport["findings"],
+): { hard: QualityGateFindingSummary[]; soft: QualityGateFindingSummary[] } {
+	const hard: QualityGateFindingSummary[] = [];
+	const soft: QualityGateFindingSummary[] = [];
+	for (const finding of findings) {
+		const summary = summarizeQualityGateFinding(stage, finding);
+		if (summary.classification === "hard") hard.push(summary);
+		else soft.push(summary);
+	}
+	return { hard, soft };
+}
+
+function buildQualityRoundSnapshot(options: {
+	round: number;
+	hardGateFindings: QualityGateFindingSummary[];
+	softGateFindings: QualityGateFindingSummary[];
+}): QualitySuiteRoundSnapshot {
+	const weightedScore =
+		options.hardGateFindings.reduce((sum, finding) => sum + 20 + severityRank(finding.severity), 0) +
+		options.softGateFindings.reduce((sum, finding) => sum + severityRank(finding.severity), 0);
+	return {
+		round: options.round,
+		hardFindingCount: options.hardGateFindings.length,
+		softFindingCount: options.softGateFindings.length,
+		totalFindingCount: options.hardGateFindings.length + options.softGateFindings.length,
+		weightedScore,
+	};
+}
+
+function isMaterialQualityProgress(previous: QualitySuiteRoundSnapshot, current: QualitySuiteRoundSnapshot): boolean {
+	if (current.hardFindingCount < previous.hardFindingCount) return true;
+	if (current.weightedScore < previous.weightedScore && current.hardFindingCount <= previous.hardFindingCount) {
+		return true;
+	}
+	if (current.totalFindingCount < previous.totalFindingCount && current.hardFindingCount <= previous.hardFindingCount) {
+		return true;
+	}
+	return false;
+}
+
+function countConsecutiveQualityStagnation(
+	history: QualitySuiteRoundSnapshot[],
+	current: QualitySuiteRoundSnapshot,
+): number {
+	const snapshots = [...history, current];
+	let count = 0;
+	for (let index = snapshots.length - 1; index > 0; index--) {
+		if (isMaterialQualityProgress(snapshots[index - 1]!, snapshots[index]!)) break;
+		count += 1;
+	}
+	return count;
+}
+
+function renderQualityGateCountsSummary(findings: QualityGateFindingSummary[]): string {
+	if (findings.length === 0) return "none";
+	const byStage = new Map<QualityStageId, number>();
+	for (const finding of findings) {
+		byStage.set(finding.stage, (byStage.get(finding.stage) ?? 0) + 1);
+	}
+	return Array.from(byStage.entries())
+		.map(([stage, count]) => `${stage} ${count}`)
+		.join(", ");
+}
+
 export function decideQualitySuiteRound(options: {
 	round: number;
 	maxRounds: number;
+	extraRounds?: number;
+	history?: QualitySuiteRoundSnapshot[];
 	cleanupReport: CheckerReport;
 	designRequired: boolean;
 	designReport?: CheckerReport | null;
 	checkerReport: CheckerReport;
 }): QualitySuiteRoundDecision {
+	const extraRounds = options.extraRounds ?? QUALITY_SUITE_MAX_EXTRA_ROUNDS;
+	const roundBudget = {
+		base: options.maxRounds,
+		extra: extraRounds,
+		total: options.maxRounds + extraRounds,
+	};
 	const findingCounts: Record<QualityStageId, number> = {
 		cleanup: options.cleanupReport.findings.length,
 		design: options.designRequired ? (options.designReport?.findings.length ?? 0) : 0,
@@ -1117,6 +1764,36 @@ export function decideQualitySuiteRound(options: {
 	if (options.designRequired && findingCounts.design > 0) triggerStages.push("design");
 	if (findingCounts.checker > 0) triggerStages.push("checker");
 
+	const hardFindingCounts: Record<QualityStageId, number> = { cleanup: 0, design: 0, checker: 0 };
+	const softFindingCounts: Record<QualityStageId, number> = { cleanup: 0, design: 0, checker: 0 };
+	const hardGateFindings: QualityGateFindingSummary[] = [];
+	const softGateFindings: QualityGateFindingSummary[] = [];
+	const reportsByStage: Array<[QualityStageId, CheckerReport["findings"]]> = [
+		["cleanup", options.cleanupReport.findings],
+		["checker", options.checkerReport.findings],
+	];
+	if (options.designRequired) reportsByStage.splice(1, 0, ["design", options.designReport?.findings ?? []]);
+	for (const [stage, findings] of reportsByStage) {
+		for (const finding of findings) {
+			const summary = summarizeQualityGateFinding(stage, finding);
+			if (summary.classification === "hard") {
+				hardFindingCounts[stage] += 1;
+				hardGateFindings.push(summary);
+			} else {
+				softFindingCounts[stage] += 1;
+				softGateFindings.push(summary);
+			}
+		}
+	}
+
+	const snapshot = buildQualityRoundSnapshot({
+		round: options.round,
+		hardGateFindings,
+		softGateFindings,
+	});
+	const previousSnapshot = options.history?.[options.history.length - 1];
+	const materialProgress = previousSnapshot ? isMaterialQualityProgress(previousSnapshot, snapshot) : false;
+	const stagnationCount = countConsecutiveQualityStagnation(options.history ?? [], snapshot);
 	const designReviewStatus = options.designRequired ? "ran" : "skipped";
 	if (triggerStages.length === 0) {
 		return {
@@ -1124,29 +1801,110 @@ export function decideQualitySuiteRound(options: {
 			designReviewStatus,
 			triggerStages,
 			findingCounts,
+			hardFindingCounts,
+			softFindingCounts,
+			hardGateFindings,
+			softGateFindings,
+			materialProgress,
+			stagnationCount,
+			roundBudget,
+			snapshot,
 		};
 	}
 
-	if (options.round >= options.maxRounds) {
-		const remaining = triggerStages.map((stage) => `${stage} ${findingCounts[stage]}`).join(", ");
-		const hardGateNote = triggerStages.includes("design")
-			? " Design review is a hard gate and still has outstanding findings."
-			: "";
+	if (options.round < options.maxRounds) {
+		return {
+			action: "remediate",
+			designReviewStatus,
+			triggerStages,
+			findingCounts,
+			hardFindingCounts,
+			softFindingCounts,
+			hardGateFindings,
+			softGateFindings,
+			materialProgress,
+			stagnationCount,
+			roundBudget,
+			snapshot,
+			restartStage: "cleanup",
+		};
+	}
+
+	if (hardGateFindings.length > 0) {
+		if (options.round < roundBudget.total && materialProgress) {
+			return {
+				action: "remediate",
+				designReviewStatus,
+				triggerStages,
+				findingCounts,
+				hardFindingCounts,
+				softFindingCounts,
+				hardGateFindings,
+				softGateFindings,
+				materialProgress,
+				stagnationCount,
+				roundBudget,
+				snapshot,
+				restartStage: "cleanup",
+				message: `Extending the quality suite beyond ${options.maxRounds} round(s) because hard findings are still improving materially.`,
+			};
+		}
+		const stagnationNote =
+			stagnationCount >= QUALITY_SUITE_STAGNATION_LIMIT
+				? ` Findings have not materially improved for ${stagnationCount} consecutive round transition(s).`
+				: "";
 		return {
 			action: "fail",
 			designReviewStatus,
 			triggerStages,
 			findingCounts,
-			message: `Quality suite exhausted ${options.maxRounds} round(s). Remaining findings: ${remaining}.${hardGateNote}`,
+			hardFindingCounts,
+			softFindingCounts,
+			hardGateFindings,
+			softGateFindings,
+			materialProgress,
+			stagnationCount,
+			roundBudget,
+			snapshot,
+			message: `Quality suite stopped after ${options.round} round(s). Hard-blocking findings remain: ${renderQualityGateCountsSummary(hardGateFindings)}.${stagnationNote}`,
+		};
+	}
+
+	if (options.round < roundBudget.total && materialProgress) {
+		return {
+			action: "remediate",
+			designReviewStatus,
+			triggerStages,
+			findingCounts,
+			hardFindingCounts,
+			softFindingCounts,
+			hardGateFindings,
+			softGateFindings,
+			materialProgress,
+			stagnationCount,
+			roundBudget,
+			snapshot,
+			restartStage: "cleanup",
+			message: `Only soft quality findings remain, and the latest round improved materially, so the suite gets another pass (${options.round + 1}/${roundBudget.total}).`,
 		};
 	}
 
 	return {
-		action: "remediate",
+		action: "prompt",
 		designReviewStatus,
 		triggerStages,
 		findingCounts,
-		restartStage: "cleanup",
+		hardFindingCounts,
+		softFindingCounts,
+		hardGateFindings,
+		softGateFindings,
+		materialProgress,
+		stagnationCount,
+		roundBudget,
+		snapshot,
+		message:
+			`Only soft quality findings remain after ${options.round} round(s): ${renderQualityGateCountsSummary(softGateFindings)}. ` +
+			"Choose whether to accept the remaining polish issues, continue remediation anyway, or reformulate in discovery mode.",
 	};
 }
 
@@ -1162,8 +1920,11 @@ function createWorkflowQualityStats(): WorkflowQualityStats {
 			design: new Set<string>(),
 			checker: new Set<string>(),
 		},
+		agentsCheckResults: [],
 		pendingLegacyCleanupFindingSignatures: new Set<string>(),
 		legacyCodeOrFilesRemoved: false,
+		mergedResultVerificationRuns: 0,
+		mergedResultVerificationReasons: new Set<string>(),
 	};
 }
 
@@ -1234,7 +1995,12 @@ function mergeWorkflowQualityStats(target: WorkflowQualityStats, incoming: Workf
 			target.fixedFindingSignatures[stage].add(signature);
 		}
 	}
+	target.agentsCheckResults.push(...incoming.agentsCheckResults);
 	target.legacyCodeOrFilesRemoved ||= incoming.legacyCodeOrFilesRemoved;
+	target.mergedResultVerificationRuns += incoming.mergedResultVerificationRuns;
+	for (const reason of incoming.mergedResultVerificationReasons) {
+		target.mergedResultVerificationReasons.add(reason);
+	}
 }
 
 function summarizeWorkflowQualityStats(stats: WorkflowQualityStats): WorkflowQualitySummary {
@@ -1253,7 +2019,10 @@ function summarizeWorkflowQualityStats(stats: WorkflowQualityStats): WorkflowQua
 			checker,
 			total: cleanup + design + checker,
 		},
+		agentsChecks: summarizeAgentsCheckHistory(stats.agentsCheckResults),
 		legacyCodeOrFilesRemoved: stats.legacyCodeOrFilesRemoved,
+		mergedResultVerificationRuns: stats.mergedResultVerificationRuns,
+		mergedResultVerificationReasons: [...stats.mergedResultVerificationReasons].sort(),
 	};
 }
 
@@ -1433,12 +2202,12 @@ async function runWorkerPhase(options: {
 		},
 	});
 
-	const phaseAgentFiles = collectWorkerAgentFiles(options.agentFiles, options.cwd, options.phase.touchedPaths);
+	const phaseAgentFiles = collectWorkerAgentFiles(options.agentFiles, options.cwd, options.phase.touchedPaths, [phaseContextPath]);
 	const result = await runSubagent({
 		cwd: options.cwd,
 		systemPrompt: promptSelection.systemPrompt,
 		prompt: "Implement the assigned phase now. Read the attached plan and phase brief, inspect the relevant files, make the code changes, and then summarize what you completed.",
-		files: [options.planPath, ...phaseAgentFiles, phaseContextPath],
+		files: [options.planPath, ...phaseAgentFiles],
 		tools: WORKER_SUBAGENT_TOOLS,
 		model: options.model,
 		thinkingLevel: options.thinkingLevel,
@@ -1479,6 +2248,7 @@ async function runWorkerFixPass(options: {
 	tempDir: string;
 	planPath: string;
 	agentFiles: string[];
+	touchedPaths: string[];
 	systemPrompt: string;
 	contextTitle: string;
 	contextMarkdown: string;
@@ -1491,11 +2261,12 @@ async function runWorkerFixPass(options: {
 		`${options.contextTitle.replace(/\W+/g, "-")}.md`,
 		options.contextMarkdown,
 	);
+	const fixAgentFiles = collectWorkerAgentFiles(options.agentFiles, options.cwd, options.touchedPaths, [contextPath]);
 	const result = await runSubagent({
 		cwd: options.cwd,
 		systemPrompt: options.systemPrompt,
 		prompt: options.prompt,
-		files: [options.planPath, ...options.agentFiles, contextPath],
+		files: [options.planPath, ...fixAgentFiles],
 		tools: WORKER_SUBAGENT_TOOLS,
 		model: options.model,
 		thinkingLevel: options.thinkingLevel,
@@ -1619,16 +2390,15 @@ async function runCheckerSuite(options: {
 		commands: agentsCheckCommands,
 		policy: agentsCheckExecutionPolicy,
 	});
-	results.push(
-		...agentsCheckRuns.map((run) => ({
-			command: run.command,
-			source: run.source,
-			status: run.status,
-			summary: run.summary,
-		})),
-	);
+	const agentsCheckResults: CheckRunSummary[] = agentsCheckRuns.map((run) => ({
+		command: run.command,
+		source: run.source,
+		status: run.status,
+		summary: run.summary,
+	}));
+	results.push(...agentsCheckResults);
 	const report = appendAgentsChecksToCheckerReport(combineCheckerReports(modelRuns), agentsCheckRuns);
-	return { report, guidance: context.guidance, results, modelRuns };
+	return { report, guidance: context.guidance, results, agentsCheckResults, modelRuns };
 }
 
 async function runValidator(options: {
@@ -1645,29 +2415,25 @@ async function runValidator(options: {
 	model?: string;
 	thinkingLevel?: string;
 }): Promise<ValidationReport> {
-	const guidance = discoverRelevantGuidance(options.cwd, options.changedFiles, "AGENTS.md");
-	const decompositionPath = await writeTempContextFile(options.tempDir, "validator-decomposition.md", renderDecompositionSummary(options.decomposition));
-	const workerSummaryPath = await writeTempContextFile(options.tempDir, "validator-worker-summaries.md", renderWorkerPhaseSummaries(options.workerResults));
-	const changedFilesPath = await writeTempContextFile(options.tempDir, "validator-changed-files.md", renderChangedFilesSummary(options.changedFiles));
+	const context = await prepareReviewContextFiles({
+		cwd: options.cwd,
+		tempDir: options.tempDir,
+		prefix: "validator",
+		planPath: options.planPath,
+		agentFiles: options.agentFiles,
+		decomposition: options.decomposition,
+		workerResults: options.workerResults,
+		changedFiles: options.changedFiles,
+	});
 	const checkerPath = await writeTempContextFile(options.tempDir, "validator-checker.md", renderCheckerFindingsSummary(options.checkerReport));
 	const checkResultsPath = await writeTempContextFile(options.tempDir, "validator-check-results.md", renderCheckResultsSummary(options.checkResults));
-	const guidancePath = await writeTempContextFile(options.tempDir, "validator-agents-guidance.md", renderRelevantGuidanceSummary(guidance));
 
 	return await runStructuredStage({
 		name: "validator",
 		systemPrompt: options.validatorPrompt,
-		prompt: "Compare the approved plan against the current implementation and return JSON only.",
-		files: [
-			options.planPath,
-			...options.agentFiles,
-			...guidance.documents.map((document) => document.path),
-			decompositionPath,
-			workerSummaryPath,
-			changedFilesPath,
-			checkerPath,
-			checkResultsPath,
-			guidancePath,
-		],
+		prompt:
+			"Compare the approved plan against the current implementation and return JSON only. Treat any failed or blocked AGENTS.md-required checks in the attached checker findings and check-results context as blocking implementation gaps.",
+		files: [...context.files, checkerPath, checkResultsPath],
 		tools: READ_ONLY_SUBAGENT_TOOLS,
 		cwd: options.cwd,
 		model: options.model,
@@ -1675,6 +2441,914 @@ async function runValidator(options: {
 		tempDir: options.tempDir,
 		parse: parseValidationReport,
 	});
+}
+
+interface TargetedFollowThroughResult {
+	changedFiles: string[];
+	stats: WorkflowQualityStats;
+	deferredSoftFindings: QualityGateFindingSummary[];
+}
+
+interface CheckerLoopResult {
+	changedFiles: string[];
+	checkerRun: CheckerSuiteResult;
+	stats: WorkflowQualityStats;
+	acceptedResidualSoftFindings: QualityGateFindingSummary[];
+	blockingHardFindings: QualityGateFindingSummary[];
+}
+
+interface MergedResultVerificationResult {
+	changedFiles: string[];
+	checkerRun: CheckerSuiteResult;
+	stats: WorkflowQualityStats;
+	acceptedResidualSoftFindings: QualityGateFindingSummary[];
+	blockingHardFindings: QualityGateFindingSummary[];
+}
+
+function renderTargetedFollowThroughRemediationContext(options: {
+	round: number;
+	phase: DecompositionPhase;
+	changedFiles: string[];
+	cleanupRun: SpecialistReviewRun;
+	designRun: SpecialistReviewRun | null;
+}): string {
+	return trimBlock(
+		[
+			"## Targeted phase follow-through remediation",
+			"",
+			`- phase: ${options.phase.id} — ${options.phase.title}`,
+			`- round: ${options.round}/${TARGETED_FOLLOW_THROUGH_MAX_ROUNDS}`,
+			`- changed files in scope: ${options.changedFiles.length > 0 ? options.changedFiles.join(", ") : "none detected"}`,
+			"",
+			renderFindingReportSummary("Cleanup findings", options.cleanupRun.report),
+			"",
+			options.designRun
+				? renderFindingReportSummary("Design review findings", options.designRun.report)
+				: trimBlock(["## Design review", "", "Skipped for this targeted follow-through round."].join("\n")),
+		].join("\n"),
+	);
+}
+
+async function runPhaseFollowThroughLoop(options: {
+	cwd: string;
+	tempDir: string;
+	planPath: string;
+	agentFiles: string[];
+	workerPrompt: string;
+	designWorkerPrompt: string;
+	cleanupPrompt: string;
+	designReviewPrompt: string;
+	decomposition: DecompositionPlan;
+	workerResults: WorkerPhaseResult[];
+	phase: DecompositionPhase;
+	changedFiles: string[];
+	exec: ExecLike;
+	primaryModel?: string;
+	thinkingLevel?: string;
+	onUpdate?: (update: WorkflowProgressUpdate) => void;
+	onStageChange?: (nodeId: WorkflowNodeId) => void;
+	discrepancyContextText?: string;
+}): Promise<TargetedFollowThroughResult> {
+	let currentChangedFiles = uniquePaths(options.changedFiles);
+	const stats = createWorkflowQualityStats();
+	let deferredSoftFindings: QualityGateFindingSummary[] = [];
+
+	for (let round = 1; round <= TARGETED_FOLLOW_THROUGH_MAX_ROUNDS; round++) {
+		const scopedFiles = buildTargetedReviewFiles({
+			changedFiles: currentChangedFiles,
+			touchedPaths: options.phase.touchedPaths,
+		});
+		const scopeContextPath = await writeTempContextFile(
+			options.tempDir,
+			`${options.phase.id.replace(/\W+/g, "-")}-follow-through-scope-${round}.md`,
+			renderTargetedFollowThroughScopeContext({
+				phase: options.phase,
+				round,
+				changedFiles: scopedFiles,
+				touchedPaths: options.phase.touchedPaths,
+				discrepancyContextText: options.discrepancyContextText,
+			}),
+		);
+		const reviewAgentFiles = [...options.agentFiles, scopeContextPath];
+		const designRequired = shouldRunDesignReview({
+			phases: [options.phase],
+			changedFiles: scopedFiles,
+			discrepancyText: options.discrepancyContextText,
+		});
+		const roundLabel = `Follow-through round ${round}/${TARGETED_FOLLOW_THROUGH_MAX_ROUNDS}`;
+
+		options.onStageChange?.("cleanup");
+		emitWorkflowUpdate(options.onUpdate, {
+			type: "cleanup-started",
+			stage: "cleanup",
+			lines: [
+				`${roundLabel}: targeted cleanup for ${options.phase.title}`,
+				`Scope: ${summarizePaths(scopedFiles)}`,
+			],
+			context: {
+				phaseId: options.phase.id,
+				phaseTitle: options.phase.title,
+				changedFiles: scopedFiles,
+				changedFilesSummary: summarizePaths(scopedFiles),
+				qualityRound: round,
+				qualityRounds: TARGETED_FOLLOW_THROUGH_MAX_ROUNDS,
+				designReviewNeeded: designRequired,
+				note: `${roundLabel} targeted cleanup started`,
+			},
+		});
+		const cleanupRun = await runSpecialistReview({
+			name: `${options.phase.id}-follow-through-cleanup-${round}`,
+			prefix: `${options.phase.id}-follow-through-cleanup-${round}`,
+			reviewCommand: "cleanup-audit",
+			systemPrompt: options.cleanupPrompt,
+			prompt:
+				"Run a targeted cleanup follow-through review for the attached phase scope. Stay within the provided scope context, report only do-now cleanup issues, and return JSON only.",
+			cwd: options.cwd,
+			tempDir: options.tempDir,
+			planPath: options.planPath,
+			agentFiles: reviewAgentFiles,
+			decomposition: options.decomposition,
+			workerResults: options.workerResults,
+			changedFiles: scopedFiles,
+			model: options.primaryModel,
+			thinkingLevel: options.thinkingLevel,
+		});
+		stats.cleanupRuns += 1;
+		updateLegacyCleanupEvidence(stats, cleanupRun.report.findings);
+		emitWorkflowUpdate(options.onUpdate, {
+			type: "cleanup-completed",
+			stage: "cleanup",
+			lines: [
+				`${roundLabel}: targeted cleanup found ${cleanupRun.report.findings.length} finding(s).`,
+				cleanupRun.report.findings.length > 0
+					? `Top findings: ${summarizeFindingsList(cleanupRun.report.findings).join(" • ")}`
+					: `Scope: ${summarizePaths(scopedFiles)}`,
+			],
+			context: {
+				phaseId: options.phase.id,
+				phaseTitle: options.phase.title,
+				changedFiles: scopedFiles,
+				changedFilesSummary: summarizePaths(scopedFiles),
+				qualityRound: round,
+				qualityRounds: TARGETED_FOLLOW_THROUGH_MAX_ROUNDS,
+				note: `${roundLabel} targeted cleanup completed`,
+			},
+		});
+
+		let designRun: SpecialistReviewRun | null = null;
+		if (designRequired) {
+			options.onStageChange?.("design");
+			emitWorkflowUpdate(options.onUpdate, {
+				type: "design-started",
+				stage: "design",
+				lines: [
+					`${roundLabel}: targeted design review for ${options.phase.title}`,
+					`Scope: ${summarizePaths(scopedFiles)}`,
+				],
+				context: {
+					phaseId: options.phase.id,
+					phaseTitle: options.phase.title,
+					changedFiles: scopedFiles,
+					changedFilesSummary: summarizePaths(scopedFiles),
+					qualityRound: round,
+					qualityRounds: TARGETED_FOLLOW_THROUGH_MAX_ROUNDS,
+					designReviewNeeded: true,
+					note: `${roundLabel} targeted design review started`,
+				},
+			});
+			designRun = await runSpecialistReview({
+				name: `${options.phase.id}-follow-through-design-${round}`,
+				prefix: `${options.phase.id}-follow-through-design-${round}`,
+				reviewCommand: "design-review",
+				systemPrompt: options.designReviewPrompt,
+				prompt:
+					"Run a targeted design follow-through review for the attached phase scope. Stay within the provided scope context, report only concrete now-fix issues, and return JSON only.",
+				cwd: options.cwd,
+				tempDir: options.tempDir,
+				planPath: options.planPath,
+				agentFiles: reviewAgentFiles,
+				decomposition: options.decomposition,
+				workerResults: options.workerResults,
+				changedFiles: scopedFiles,
+				model: options.primaryModel,
+				thinkingLevel: options.thinkingLevel,
+			});
+			stats.designReviewRuns += 1;
+			emitWorkflowUpdate(options.onUpdate, {
+				type: "design-completed",
+				stage: "design",
+				lines: [
+					`${roundLabel}: targeted design review found ${designRun.report.findings.length} finding(s).`,
+					designRun.report.findings.length > 0
+						? `Top findings: ${summarizeFindingsList(designRun.report.findings).join(" • ")}`
+						: `Scope: ${summarizePaths(scopedFiles)}`,
+				],
+				context: {
+					phaseId: options.phase.id,
+					phaseTitle: options.phase.title,
+					changedFiles: scopedFiles,
+					changedFilesSummary: summarizePaths(scopedFiles),
+					qualityRound: round,
+					qualityRounds: TARGETED_FOLLOW_THROUGH_MAX_ROUNDS,
+					note: `${roundLabel} targeted design review completed`,
+				},
+			});
+		} else {
+			stats.designReviewSkips += 1;
+			emitWorkflowUpdate(options.onUpdate, {
+				type: "design-skipped",
+				stage: "design",
+				lines: [
+					`${roundLabel}: skipping targeted design review for ${options.phase.title}`,
+					"No design-sensitive signals were detected for this phase scope.",
+				],
+				context: {
+					phaseId: options.phase.id,
+					phaseTitle: options.phase.title,
+					changedFiles: scopedFiles,
+					changedFilesSummary: summarizePaths(scopedFiles),
+					qualityRound: round,
+					qualityRounds: TARGETED_FOLLOW_THROUGH_MAX_ROUNDS,
+					designReviewNeeded: false,
+					note: `${roundLabel} targeted design review skipped`,
+				},
+			});
+		}
+
+		const cleanupGate = partitionQualityGateFindings("cleanup", cleanupRun.report.findings);
+		const designGate = partitionQualityGateFindings("design", designRun?.report.findings ?? []);
+		const hardFindings = [...cleanupGate.hard, ...designGate.hard];
+		const softFindings = [...cleanupGate.soft, ...designGate.soft];
+		if (hardFindings.length === 0 && softFindings.length === 0) {
+			return { changedFiles: currentChangedFiles, stats, deferredSoftFindings: [] };
+		}
+		if (hardFindings.length === 0) {
+			deferredSoftFindings = softFindings;
+			emitWorkflowUpdate(options.onUpdate, {
+				type: "detail-lines",
+				stage: "design",
+				lines: [
+					`Deferring ${softFindings.length} non-critical targeted follow-through note(s) to the final holistic pass.`,
+				],
+				context: {
+					phaseId: options.phase.id,
+					phaseTitle: options.phase.title,
+					changedFiles: scopedFiles,
+					changedFilesSummary: summarizePaths(scopedFiles),
+					note: "Targeted follow-through stopped after soft findings only",
+				},
+			});
+			return { changedFiles: currentChangedFiles, stats, deferredSoftFindings };
+		}
+		if (round >= TARGETED_FOLLOW_THROUGH_MAX_ROUNDS) {
+			throw new Error(
+				`Targeted follow-through for ${options.phase.title} stopped with hard findings still remaining: ${renderQualityGateCountsSummary(hardFindings)}.`,
+			);
+		}
+
+		for (const stage of [
+			...(cleanupRun.report.findings.length > 0 ? (["cleanup"] as const) : []),
+			...(designRun && designRun.report.findings.length > 0 ? (["design"] as const) : []),
+		]) {
+			emitLoopTraversal(
+				options.onUpdate,
+				QUALITY_STAGE_FIX_EDGE[stage],
+				"fix",
+				[
+					`${roundLabel}: ${stage} requested targeted remediation for ${options.phase.title}.`,
+					`Scope: ${summarizePaths(scopedFiles)}`,
+				],
+				{
+					phaseId: options.phase.id,
+					phaseTitle: options.phase.title,
+					changedFiles: scopedFiles,
+					changedFilesSummary: summarizePaths(scopedFiles),
+					qualityRound: round,
+					qualityRounds: TARGETED_FOLLOW_THROUGH_MAX_ROUNDS,
+					note: `${roundLabel} ${stage} requested targeted remediation`,
+				},
+			);
+		}
+		const remediationPromptSelection = pickRemediationPrompt({
+			workerPrompt: options.workerPrompt,
+			designWorkerPrompt: options.designWorkerPrompt,
+			phases: [options.phase],
+			changedFiles: scopedFiles,
+			findings: [...cleanupRun.report.findings, ...(designRun?.report.findings ?? [])],
+			discrepancyText: options.discrepancyContextText,
+		});
+		options.onStageChange?.("fix");
+		emitWorkflowUpdate(options.onUpdate, {
+			type: "fix-started",
+			stage: "fix",
+			lines: [
+				`${roundLabel}: applying targeted follow-through fixes for ${options.phase.title}.`,
+				`Worker: ${remediationPromptSelection.promptLabel}`,
+			],
+			context: {
+				phaseId: options.phase.id,
+				phaseTitle: options.phase.title,
+				changedFiles: scopedFiles,
+				changedFilesSummary: summarizePaths(scopedFiles),
+				workerKind: remediationPromptSelection.kind,
+				qualityRound: round,
+				qualityRounds: TARGETED_FOLLOW_THROUGH_MAX_ROUNDS,
+				note: remediationPromptSelection.reason,
+			},
+		});
+		const fixSummary = await runWorkerFixPass({
+			cwd: options.cwd,
+			tempDir: options.tempDir,
+			planPath: options.planPath,
+			agentFiles: reviewAgentFiles,
+			touchedPaths: scopedFiles,
+			systemPrompt: remediationPromptSelection.systemPrompt,
+			contextTitle: `${options.phase.id}-follow-through-fix-${round}`,
+			contextMarkdown: renderTargetedFollowThroughRemediationContext({
+				round,
+				phase: options.phase,
+				changedFiles: scopedFiles,
+				cleanupRun,
+				designRun,
+			}),
+			prompt:
+				"Apply the attached targeted cleanup/design findings now. Stay inside the provided phase scope, fix only concrete issues, and then summarize what changed.",
+			model: options.primaryModel,
+			thinkingLevel: options.thinkingLevel,
+		});
+		options.workerResults.push({
+			phase: {
+				id: `${options.phase.id}-follow-through-fix-${round}`,
+				title: `${options.phase.title} targeted follow-through remediation ${round}`,
+				goal: `Resolve targeted follow-through findings for ${options.phase.title}`,
+				instructions: [`Resolve targeted cleanup/design follow-through findings for ${options.phase.id}.`],
+				dependsOn: [options.phase.id],
+				touchedPaths: scopedFiles,
+				parallelSafe: false,
+				designSensitive: remediationPromptSelection.designSensitive,
+			},
+			summary: fixSummary,
+		});
+		stats.remediationPasses += 1;
+		if (cleanupRun.report.findings.length > 0) recordQualityFindings(stats, "cleanup", cleanupRun.report.findings);
+		if (designRun?.report.findings.length) recordQualityFindings(stats, "design", designRun.report.findings);
+		emitWorkflowUpdate(options.onUpdate, {
+			type: "fix-completed",
+			stage: "fix",
+			lines: [
+				`${roundLabel}: completed targeted follow-through remediation for ${options.phase.title}.`,
+				`Worker: ${remediationPromptSelection.promptLabel}`,
+			],
+			context: {
+				phaseId: options.phase.id,
+				phaseTitle: options.phase.title,
+				changedFiles: scopedFiles,
+				changedFilesSummary: summarizePaths(scopedFiles),
+				workerKind: remediationPromptSelection.kind,
+				qualityRound: round,
+				qualityRounds: TARGETED_FOLLOW_THROUGH_MAX_ROUNDS,
+				note: remediationPromptSelection.reason,
+			},
+		});
+		currentChangedFiles = await detectChangedFiles(options.cwd, options.exec);
+		emitLoopTraversal(
+			options.onUpdate,
+			"fix->cleanup",
+			"cleanup",
+			[
+				`${roundLabel}: re-running targeted follow-through for ${options.phase.title}.`,
+				`Scope: ${summarizePaths(buildTargetedReviewFiles({ changedFiles: currentChangedFiles, touchedPaths: options.phase.touchedPaths }))}`,
+			],
+			{
+				phaseId: options.phase.id,
+				phaseTitle: options.phase.title,
+				changedFiles: currentChangedFiles,
+				changedFilesSummary: summarizePaths(currentChangedFiles),
+				qualityRound: round,
+				qualityRounds: TARGETED_FOLLOW_THROUGH_MAX_ROUNDS,
+				note: `${roundLabel} restarting targeted follow-through`,
+			},
+		);
+	}
+
+	return { changedFiles: currentChangedFiles, stats, deferredSoftFindings };
+}
+
+function renderMergedResultRemediationContext(options: {
+	reason: string;
+	changedFiles: string[];
+	findings: QualityGateFindingSummary[];
+}): string {
+	return trimBlock(
+		[
+			"## Final holistic remediation",
+			"",
+			`verification reason: ${options.reason}`,
+			`changed files: ${options.changedFiles.length > 0 ? options.changedFiles.join(", ") : "none detected"}`,
+			"",
+			renderQualityGateFindingsSection("Blocking final holistic findings", options.findings, "No blocking findings."),
+		].join("\n"),
+	);
+}
+
+async function runCheckerLoop(options: {
+	cwd: string;
+	tempDir: string;
+	planPath: string;
+	agentFiles: string[];
+	checkerPrompt: string;
+	workerPrompt: string;
+	designWorkerPrompt: string;
+	decomposition: DecompositionPlan;
+	workerResults: WorkerPhaseResult[];
+	changedFiles: string[];
+	exec: ExecLike;
+	primaryModel?: string;
+	checkerModels: string[];
+	thinkingLevel?: string;
+	onUpdate?: (update: WorkflowProgressUpdate) => void;
+	onStageChange?: (nodeId: WorkflowNodeId) => void;
+	resolveAgentsCheckExecutionPolicy?: (commands: AgentsCheckCommand[]) => Promise<AgentsCheckExecutionPolicy>;
+	holisticSoftFindings?: QualityGateFindingSummary[];
+}): Promise<CheckerLoopResult> {
+	let currentChangedFiles = uniquePaths(options.changedFiles);
+	const stats = createWorkflowQualityStats();
+	let checkerRun!: CheckerSuiteResult;
+
+	for (let round = 1; round <= FINAL_CHECKER_MAX_PASSES; round++) {
+		const scopeContextPath = await writeTempContextFile(
+			options.tempDir,
+			`final-checker-scope-${round}.md`,
+			renderFinalCheckerScopeContext({
+				round,
+				changedFiles: currentChangedFiles,
+				softFindings: options.holisticSoftFindings ?? [],
+			}),
+		);
+		const checkerAgentFiles = [...options.agentFiles, scopeContextPath];
+		options.onStageChange?.("checker");
+		emitWorkflowUpdate(options.onUpdate, {
+			type: "checker-started",
+			stage: "checker",
+			lines: [
+				`Final checker pass ${round}/${FINAL_CHECKER_MAX_PASSES}`,
+				`Changed files: ${summarizePaths(currentChangedFiles)}`,
+			],
+			context: {
+				changedFiles: currentChangedFiles,
+				changedFilesSummary: summarizePaths(currentChangedFiles),
+				qualityRound: round,
+				qualityRounds: FINAL_CHECKER_MAX_PASSES,
+				note: `Final checker pass ${round} started`,
+			},
+		});
+		checkerRun = await runCheckerSuite({
+			cwd: options.cwd,
+			tempDir: options.tempDir,
+			planPath: options.planPath,
+			agentFiles: checkerAgentFiles,
+			checkerPrompt: options.checkerPrompt,
+			decomposition: options.decomposition,
+			workerResults: options.workerResults,
+			changedFiles: currentChangedFiles,
+			checkerModels: options.checkerModels,
+			exec: options.exec,
+			thinkingLevel: options.thinkingLevel,
+			onUpdate: options.onUpdate,
+			resolveAgentsCheckExecutionPolicy: options.resolveAgentsCheckExecutionPolicy,
+		});
+		stats.checkerRuns += 1;
+		stats.agentsCheckResults.push(...checkerRun.agentsCheckResults);
+		emitWorkflowUpdate(options.onUpdate, {
+			type: "checker-completed",
+			stage: "checker",
+			lines: [
+				`Final checker pass ${round}/${FINAL_CHECKER_MAX_PASSES} finished with ${checkerRun.report.findings.length} finding(s).`,
+				checkerRun.report.findings.length > 0
+					? `Top findings: ${summarizeCheckerFindings(checkerRun.report).join(" • ")}`
+					: `Changed files: ${summarizePaths(currentChangedFiles)}`,
+			],
+			context: {
+				changedFiles: currentChangedFiles,
+				changedFilesSummary: summarizePaths(currentChangedFiles),
+				qualityRound: round,
+				qualityRounds: FINAL_CHECKER_MAX_PASSES,
+				note: `Final checker pass ${round} completed`,
+			},
+		});
+		const checkerGate = partitionQualityGateFindings("checker", checkerRun.report.findings);
+		if (checkerGate.hard.length === 0 && checkerGate.soft.length === 0) {
+			return {
+				changedFiles: currentChangedFiles,
+				checkerRun,
+				stats,
+				acceptedResidualSoftFindings: [],
+				blockingHardFindings: [],
+			};
+		}
+		if (round >= FINAL_CHECKER_MAX_PASSES) {
+			if (checkerGate.hard.length > 0) {
+				throw new Error(
+					`Final checker stopped after ${FINAL_CHECKER_MAX_PASSES} pass(es). Hard-blocking findings remain: ${renderQualityGateCountsSummary(checkerGate.hard)}.`,
+				);
+			}
+			return {
+				changedFiles: currentChangedFiles,
+				checkerRun,
+				stats,
+				acceptedResidualSoftFindings: checkerGate.soft,
+				blockingHardFindings: [],
+			};
+		}
+		emitLoopTraversal(
+			options.onUpdate,
+			"checker->fix",
+			"fix",
+			[
+				`Final checker pass ${round}/${FINAL_CHECKER_MAX_PASSES} requested remediation.`,
+				`Changed files: ${summarizePaths(currentChangedFiles)}`,
+			],
+			{
+				changedFiles: currentChangedFiles,
+				changedFilesSummary: summarizePaths(currentChangedFiles),
+				qualityRound: round,
+				qualityRounds: FINAL_CHECKER_MAX_PASSES,
+				note: `Final checker pass ${round} requested remediation`,
+			},
+		);
+		const remediationPromptSelection = pickRemediationPrompt({
+			workerPrompt: options.workerPrompt,
+			designWorkerPrompt: options.designWorkerPrompt,
+			phases: options.workerResults.map((result) => result.phase),
+			changedFiles: currentChangedFiles,
+			findings: checkerRun.report.findings,
+		});
+		options.onStageChange?.("fix");
+		emitWorkflowUpdate(options.onUpdate, {
+			type: "fix-started",
+			stage: "fix",
+			lines: [
+				`Applying final checker remediation after pass ${round}/${FINAL_CHECKER_MAX_PASSES}.`,
+				`Worker: ${remediationPromptSelection.promptLabel}`,
+			],
+			context: {
+				changedFiles: currentChangedFiles,
+				changedFilesSummary: summarizePaths(currentChangedFiles),
+				workerKind: remediationPromptSelection.kind,
+				qualityRound: round,
+				qualityRounds: FINAL_CHECKER_MAX_PASSES,
+				note: remediationPromptSelection.reason,
+			},
+		});
+		const fixSummary = await runWorkerFixPass({
+			cwd: options.cwd,
+			tempDir: options.tempDir,
+			planPath: options.planPath,
+			agentFiles: checkerAgentFiles,
+			touchedPaths: currentChangedFiles,
+			systemPrompt: remediationPromptSelection.systemPrompt,
+			contextTitle: `final-checker-fix-${round}`,
+			contextMarkdown: renderFindingReportSummary("Checker findings", checkerRun.report),
+			prompt:
+				"Apply the attached checker findings now. Focus on logic, regressions, side effects, correctness, and guidance issues, then summarize what changed.",
+			model: options.primaryModel,
+			thinkingLevel: options.thinkingLevel,
+		});
+		options.workerResults.push({
+			phase: {
+				id: `final-checker-fix-${round}`,
+				title: `Final checker remediation ${round}`,
+				goal: "Resolve final checker findings",
+				instructions: [`Resolve final checker findings from pass ${round}.`],
+				dependsOn: [],
+				touchedPaths: currentChangedFiles,
+				parallelSafe: false,
+				designSensitive: remediationPromptSelection.designSensitive,
+			},
+			summary: fixSummary,
+		});
+		stats.remediationPasses += 1;
+		recordQualityFindings(stats, "checker", checkerRun.report.findings);
+		emitWorkflowUpdate(options.onUpdate, {
+			type: "fix-completed",
+			stage: "fix",
+			lines: [
+				`Completed final checker remediation after pass ${round}/${FINAL_CHECKER_MAX_PASSES}.`,
+				`Worker: ${remediationPromptSelection.promptLabel}`,
+			],
+			context: {
+				changedFiles: currentChangedFiles,
+				changedFilesSummary: summarizePaths(currentChangedFiles),
+				workerKind: remediationPromptSelection.kind,
+				qualityRound: round,
+				qualityRounds: FINAL_CHECKER_MAX_PASSES,
+				note: remediationPromptSelection.reason,
+			},
+		});
+		currentChangedFiles = await detectChangedFiles(options.cwd, options.exec);
+		emitLoopTraversal(
+			options.onUpdate,
+			"fix->checker",
+			"checker",
+			[
+				`Re-running the final checker after remediation from pass ${round}/${FINAL_CHECKER_MAX_PASSES}.`,
+				`Changed files: ${summarizePaths(currentChangedFiles)}`,
+			],
+			{
+				changedFiles: currentChangedFiles,
+				changedFilesSummary: summarizePaths(currentChangedFiles),
+				qualityRound: round,
+				qualityRounds: FINAL_CHECKER_MAX_PASSES,
+				note: `Re-running final checker after remediation from pass ${round}`,
+			},
+		);
+	}
+
+	throw new Error(`Final checker exhausted ${FINAL_CHECKER_MAX_PASSES} pass(es).`);
+}
+
+async function runMergedResultVerification(options: {
+	cwd: string;
+	tempDir: string;
+	planPath: string;
+	agentFiles: string[];
+	workerPrompt: string;
+	designWorkerPrompt: string;
+	cleanupPrompt: string;
+	designReviewPrompt: string;
+	checkerPrompt: string;
+	decomposition: DecompositionPlan;
+	workerResults: WorkerPhaseResult[];
+	changedFiles: string[];
+	exec: ExecLike;
+	primaryModel?: string;
+	checkerModels: string[];
+	thinkingLevel?: string;
+	onUpdate?: (update: WorkflowProgressUpdate) => void;
+	onStageChange?: (nodeId: WorkflowNodeId) => void;
+	verificationReason: string;
+	designContextText?: string;
+	resolveAgentsCheckExecutionPolicy?: (commands: AgentsCheckCommand[]) => Promise<AgentsCheckExecutionPolicy>;
+}): Promise<MergedResultVerificationResult> {
+	let currentChangedFiles = uniquePaths(options.changedFiles);
+	const stats = createWorkflowQualityStats();
+	stats.mergedResultVerificationRuns += 1;
+	if (options.verificationReason.trim()) stats.mergedResultVerificationReasons.add(options.verificationReason.trim());
+	const holisticScopePath = await writeTempContextFile(
+		options.tempDir,
+		`merged-result-scope-${stats.mergedResultVerificationRuns}.md`,
+		renderFinalHolisticScopeContext({
+			changedFiles: currentChangedFiles,
+			workerResults: options.workerResults,
+			discrepancyContextText: options.designContextText,
+		}),
+	);
+	const reviewAgentFiles = [...options.agentFiles, holisticScopePath];
+
+	options.onStageChange?.("cleanup");
+	emitWorkflowUpdate(options.onUpdate, {
+		type: "cleanup-started",
+		stage: "cleanup",
+		lines: [
+			`Final holistic cleanup pass (${options.verificationReason}).`,
+			`Changed files: ${summarizePaths(currentChangedFiles)}`,
+		],
+		context: {
+			changedFiles: currentChangedFiles,
+			changedFilesSummary: summarizePaths(currentChangedFiles),
+			note: "Final holistic cleanup started",
+		},
+	});
+	const cleanupRun = await runSpecialistReview({
+		name: `merged-result-cleanup-${stats.mergedResultVerificationRuns}`,
+		prefix: `merged-result-cleanup-${stats.mergedResultVerificationRuns}`,
+		reviewCommand: "cleanup-audit",
+		systemPrompt: options.cleanupPrompt,
+		prompt:
+			"Run one final holistic cleanup review for the merged implementation result. Only report glaring feature-level cleanup issues that should block completion now. Return JSON only.",
+		cwd: options.cwd,
+		tempDir: options.tempDir,
+		planPath: options.planPath,
+		agentFiles: reviewAgentFiles,
+		decomposition: options.decomposition,
+		workerResults: options.workerResults,
+		changedFiles: currentChangedFiles,
+		model: options.primaryModel,
+		thinkingLevel: options.thinkingLevel,
+	});
+	stats.cleanupRuns += 1;
+	updateLegacyCleanupEvidence(stats, cleanupRun.report.findings);
+	emitWorkflowUpdate(options.onUpdate, {
+		type: "cleanup-completed",
+		stage: "cleanup",
+		lines: [
+			`Final holistic cleanup found ${cleanupRun.report.findings.length} finding(s).`,
+			cleanupRun.report.findings.length > 0
+				? `Top findings: ${summarizeFindingsList(cleanupRun.report.findings).join(" • ")}`
+				: `Changed files: ${summarizePaths(currentChangedFiles)}`,
+		],
+		context: {
+			changedFiles: currentChangedFiles,
+			changedFilesSummary: summarizePaths(currentChangedFiles),
+			note: "Final holistic cleanup completed",
+		},
+	});
+
+	let designRun: SpecialistReviewRun | null = null;
+	const designRequired = shouldRunDesignReview({
+		phases: options.workerResults.map((result) => result.phase),
+		changedFiles: currentChangedFiles,
+		discrepancyText: options.designContextText,
+	});
+	if (designRequired) {
+		options.onStageChange?.("design");
+		emitWorkflowUpdate(options.onUpdate, {
+			type: "design-started",
+			stage: "design",
+			lines: [
+				"Final holistic design review.",
+				`Changed files: ${summarizePaths(currentChangedFiles)}`,
+			],
+			context: {
+				changedFiles: currentChangedFiles,
+				changedFilesSummary: summarizePaths(currentChangedFiles),
+				designReviewNeeded: true,
+				note: "Final holistic design review started",
+			},
+		});
+		designRun = await runSpecialistReview({
+			name: `merged-result-design-${stats.mergedResultVerificationRuns}`,
+			prefix: `merged-result-design-${stats.mergedResultVerificationRuns}`,
+			reviewCommand: "design-review",
+			systemPrompt: options.designReviewPrompt,
+			prompt:
+				"Run one final holistic design review for the merged implementation result. Only report glaring feature-level design issues that should block completion now. Return JSON only.",
+			cwd: options.cwd,
+			tempDir: options.tempDir,
+			planPath: options.planPath,
+			agentFiles: reviewAgentFiles,
+			decomposition: options.decomposition,
+			workerResults: options.workerResults,
+			changedFiles: currentChangedFiles,
+			model: options.primaryModel,
+			thinkingLevel: options.thinkingLevel,
+		});
+		stats.designReviewRuns += 1;
+		emitWorkflowUpdate(options.onUpdate, {
+			type: "design-completed",
+			stage: "design",
+			lines: [
+				`Final holistic design review found ${designRun.report.findings.length} finding(s).`,
+				designRun.report.findings.length > 0
+					? `Top findings: ${summarizeFindingsList(designRun.report.findings).join(" • ")}`
+					: `Changed files: ${summarizePaths(currentChangedFiles)}`,
+			],
+			context: {
+				changedFiles: currentChangedFiles,
+				changedFilesSummary: summarizePaths(currentChangedFiles),
+				note: "Final holistic design review completed",
+			},
+		});
+	} else {
+		stats.designReviewSkips += 1;
+		emitWorkflowUpdate(options.onUpdate, {
+			type: "design-skipped",
+			stage: "design",
+			lines: [
+				"Skipping the final holistic design review.",
+				"No design-sensitive signals were detected in the merged result.",
+			],
+			context: {
+				changedFiles: currentChangedFiles,
+				changedFilesSummary: summarizePaths(currentChangedFiles),
+				designReviewNeeded: false,
+				note: "Final holistic design review skipped",
+			},
+		});
+	}
+
+	const cleanupGate = partitionQualityGateFindings("cleanup", cleanupRun.report.findings);
+	const designGate = partitionQualityGateFindings("design", designRun?.report.findings ?? []);
+	const holisticSoftFindings = [...cleanupGate.soft, ...designGate.soft];
+	const holisticHardFindings = [...cleanupGate.hard, ...designGate.hard];
+	if (holisticHardFindings.length > 0) {
+		const remediationPromptSelection = pickRemediationPrompt({
+			workerPrompt: options.workerPrompt,
+			designWorkerPrompt: options.designWorkerPrompt,
+			phases: options.workerResults.map((result) => result.phase),
+			changedFiles: currentChangedFiles,
+			findings: [
+				...cleanupRun.report.findings.filter((finding) => classifyQualityGateFinding("cleanup", finding) === "hard"),
+				...(designRun?.report.findings ?? []).filter((finding) => classifyQualityGateFinding("design", finding) === "hard"),
+			],
+			discrepancyText: options.designContextText,
+		});
+		options.onStageChange?.("fix");
+		emitWorkflowUpdate(options.onUpdate, {
+			type: "fix-started",
+			stage: "fix",
+			lines: [
+				`Applying ${holisticHardFindings.length} blocking final holistic finding(s) before the checker loop.`,
+				`Worker: ${remediationPromptSelection.promptLabel}`,
+			],
+			context: {
+				changedFiles: currentChangedFiles,
+				changedFilesSummary: summarizePaths(currentChangedFiles),
+				workerKind: remediationPromptSelection.kind,
+				note: remediationPromptSelection.reason,
+			},
+		});
+		const fixSummary = await runWorkerFixPass({
+			cwd: options.cwd,
+			tempDir: options.tempDir,
+			planPath: options.planPath,
+			agentFiles: reviewAgentFiles,
+			touchedPaths: currentChangedFiles,
+			systemPrompt: remediationPromptSelection.systemPrompt,
+			contextTitle: `merged-result-fix-${stats.mergedResultVerificationRuns}`,
+			contextMarkdown: renderMergedResultRemediationContext({
+				reason: options.verificationReason,
+				changedFiles: currentChangedFiles,
+				findings: holisticHardFindings,
+			}),
+			prompt:
+				"Apply the attached blocking final cleanup/design findings once before the checker loop. Keep the feature simple, stay within PLAN.md, and then summarize what changed.",
+			model: options.primaryModel,
+			thinkingLevel: options.thinkingLevel,
+		});
+		options.workerResults.push({
+			phase: {
+				id: `merged-result-fix-${stats.mergedResultVerificationRuns}`,
+				title: `Merged-result remediation ${stats.mergedResultVerificationRuns}`,
+				goal: "Resolve blocking final cleanup/design findings before checker verification",
+				instructions: ["Resolve the blocking final cleanup/design findings before the checker loop."],
+				dependsOn: [],
+				touchedPaths: currentChangedFiles,
+				parallelSafe: false,
+				designSensitive: remediationPromptSelection.designSensitive,
+			},
+			summary: fixSummary,
+		});
+		stats.remediationPasses += 1;
+		if (cleanupGate.hard.length > 0) {
+			recordQualityFindings(
+				stats,
+				"cleanup",
+				cleanupRun.report.findings.filter((finding) => classifyQualityGateFinding("cleanup", finding) === "hard"),
+			);
+		}
+		if (designGate.hard.length > 0 && designRun) {
+			recordQualityFindings(
+				stats,
+				"design",
+				designRun.report.findings.filter((finding) => classifyQualityGateFinding("design", finding) === "hard"),
+			);
+		}
+		emitWorkflowUpdate(options.onUpdate, {
+			type: "fix-completed",
+			stage: "fix",
+			lines: [
+				"Completed one-shot final holistic remediation before the checker loop.",
+				`Worker: ${remediationPromptSelection.promptLabel}`,
+			],
+			context: {
+				changedFiles: currentChangedFiles,
+				changedFilesSummary: summarizePaths(currentChangedFiles),
+				workerKind: remediationPromptSelection.kind,
+				note: remediationPromptSelection.reason,
+			},
+		});
+		currentChangedFiles = await detectChangedFiles(options.cwd, options.exec);
+	}
+
+	const checkerLoop = await runCheckerLoop({
+		cwd: options.cwd,
+		tempDir: options.tempDir,
+		planPath: options.planPath,
+		agentFiles: reviewAgentFiles,
+		checkerPrompt: options.checkerPrompt,
+		workerPrompt: options.workerPrompt,
+		designWorkerPrompt: options.designWorkerPrompt,
+		decomposition: options.decomposition,
+		workerResults: options.workerResults,
+		changedFiles: currentChangedFiles,
+		exec: options.exec,
+		primaryModel: options.primaryModel,
+		checkerModels: options.checkerModels,
+		thinkingLevel: options.thinkingLevel,
+		onUpdate: options.onUpdate,
+		onStageChange: options.onStageChange,
+		resolveAgentsCheckExecutionPolicy: options.resolveAgentsCheckExecutionPolicy,
+		holisticSoftFindings,
+	});
+	mergeWorkflowQualityStats(stats, checkerLoop.stats);
+	return {
+		changedFiles: checkerLoop.changedFiles,
+		checkerRun: checkerLoop.checkerRun,
+		stats,
+		acceptedResidualSoftFindings: [...holisticSoftFindings, ...checkerLoop.acceptedResidualSoftFindings],
+		blockingHardFindings: checkerLoop.blockingHardFindings,
+	};
 }
 
 function renderQualitySuiteRemediationContext(options: {
@@ -1725,18 +3399,25 @@ async function runQualitySuite(options: {
 	onUpdate?: (update: WorkflowProgressUpdate) => void;
 	onStageChange?: (nodeId: WorkflowNodeId) => void;
 	suiteId: string;
+	verificationReason: string;
 	designContextText?: string;
+	promptForSoftGateChoice?: (decision: QualitySuiteRoundDecision) => Promise<QualitySuiteSoftGateChoice>;
 	resolveAgentsCheckExecutionPolicy?: (commands: AgentsCheckCommand[]) => Promise<AgentsCheckExecutionPolicy>;
 }): Promise<QualitySuiteResult> {
 	let currentChangedFiles = [...options.changedFiles];
 	let designSignalFindings: CheckerReport["findings"] = [];
 	const stats = createWorkflowQualityStats();
+	stats.mergedResultVerificationRuns += 1;
+	if (options.verificationReason.trim()) stats.mergedResultVerificationReasons.add(options.verificationReason.trim());
+	const roundHistory: QualitySuiteRoundSnapshot[] = [];
+	let manualContinueBudget = 0;
 	let cleanupRun!: SpecialistReviewRun;
 	let designRun: SpecialistReviewRun | null = null;
 	let checkerRun!: CheckerSuiteResult;
 
-	for (let round = 1; round <= QUALITY_SUITE_MAX_ROUNDS; round++) {
-		const roundLabel = `Quality round ${round}/${QUALITY_SUITE_MAX_ROUNDS}`;
+	for (let round = 1; round <= QUALITY_SUITE_MAX_ROUNDS + QUALITY_SUITE_MAX_EXTRA_ROUNDS + manualContinueBudget; round++) {
+		const roundBudgetTotal = QUALITY_SUITE_MAX_ROUNDS + QUALITY_SUITE_MAX_EXTRA_ROUNDS + manualContinueBudget;
+		const roundLabel = `Quality round ${round}/${roundBudgetTotal}`;
 		const phaseContext = options.workerResults.map((result) => result.phase);
 		const designRequired = shouldRunDesignReview({
 			phases: phaseContext,
@@ -1757,7 +3438,7 @@ async function runQualitySuite(options: {
 				changedFiles: currentChangedFiles,
 				changedFilesSummary: summarizePaths(currentChangedFiles),
 				qualityRound: round,
-				qualityRounds: QUALITY_SUITE_MAX_ROUNDS,
+				qualityRounds: roundBudgetTotal,
 				designReviewNeeded: designRequired,
 				note: `${roundLabel} cleanup audit started`,
 			},
@@ -1793,7 +3474,7 @@ async function runQualitySuite(options: {
 				changedFiles: currentChangedFiles,
 				changedFilesSummary: summarizePaths(currentChangedFiles),
 				qualityRound: round,
-				qualityRounds: QUALITY_SUITE_MAX_ROUNDS,
+				qualityRounds: roundBudgetTotal,
 				designReviewNeeded: designRequired,
 				note: `${roundLabel} cleanup audit completed`,
 			},
@@ -1812,7 +3493,7 @@ async function runQualitySuite(options: {
 					changedFiles: currentChangedFiles,
 					changedFilesSummary: summarizePaths(currentChangedFiles),
 					qualityRound: round,
-					qualityRounds: QUALITY_SUITE_MAX_ROUNDS,
+					qualityRounds: roundBudgetTotal,
 					designReviewNeeded: true,
 					note: `${roundLabel} design review started`,
 				},
@@ -1847,7 +3528,7 @@ async function runQualitySuite(options: {
 					changedFiles: currentChangedFiles,
 					changedFilesSummary: summarizePaths(currentChangedFiles),
 					qualityRound: round,
-					qualityRounds: QUALITY_SUITE_MAX_ROUNDS,
+					qualityRounds: roundBudgetTotal,
 					designReviewNeeded: true,
 					note: `${roundLabel} design review completed`,
 				},
@@ -1866,7 +3547,7 @@ async function runQualitySuite(options: {
 					changedFiles: currentChangedFiles,
 					changedFilesSummary: summarizePaths(currentChangedFiles),
 					qualityRound: round,
-					qualityRounds: QUALITY_SUITE_MAX_ROUNDS,
+					qualityRounds: roundBudgetTotal,
 					designReviewNeeded: false,
 					note: `${roundLabel} design review not needed`,
 				},
@@ -1886,7 +3567,7 @@ async function runQualitySuite(options: {
 				changedFiles: currentChangedFiles,
 				changedFilesSummary: summarizePaths(currentChangedFiles),
 				qualityRound: round,
-				qualityRounds: QUALITY_SUITE_MAX_ROUNDS,
+				qualityRounds: roundBudgetTotal,
 				note: `${roundLabel} checker review started`,
 			},
 		});
@@ -1906,6 +3587,7 @@ async function runQualitySuite(options: {
 			resolveAgentsCheckExecutionPolicy: options.resolveAgentsCheckExecutionPolicy,
 		});
 		stats.checkerRuns += 1;
+		stats.agentsCheckResults.push(...checkerRun.agentsCheckResults);
 		emitWorkflowUpdate(options.onUpdate, {
 			type: "checker-completed",
 			stage: "checker",
@@ -1920,7 +3602,7 @@ async function runQualitySuite(options: {
 				changedFiles: currentChangedFiles,
 				changedFilesSummary: summarizePaths(currentChangedFiles),
 				qualityRound: round,
-				qualityRounds: QUALITY_SUITE_MAX_ROUNDS,
+				qualityRounds: roundBudgetTotal,
 				note: `${roundLabel} checker review completed`,
 			},
 		});
@@ -1933,6 +3615,8 @@ async function runQualitySuite(options: {
 		const decision = decideQualitySuiteRound({
 			round,
 			maxRounds: QUALITY_SUITE_MAX_ROUNDS,
+			extraRounds: QUALITY_SUITE_MAX_EXTRA_ROUNDS,
+			history: roundHistory,
 			cleanupReport: cleanupRun.report,
 			designRequired,
 			designReport: designRun?.report ?? null,
@@ -1940,6 +3624,9 @@ async function runQualitySuite(options: {
 		});
 		if (decision.action === "pass") {
 			return {
+				outcome: "pass",
+				acceptedResidualSoftFindings: [],
+				blockingHardFindings: [],
 				changedFiles: currentChangedFiles,
 				cleanupRun,
 				designRun,
@@ -1953,7 +3640,86 @@ async function runQualitySuite(options: {
 			options.onStageChange?.(decision.triggerStages[0] ?? "checker");
 			throw new Error(decision.message || "Quality suite failed to converge.");
 		}
+		if (decision.action === "prompt") {
+			emitWorkflowUpdate(options.onUpdate, {
+				type: "detail-lines",
+				stage: "checker",
+				lines: [
+					decision.message || "Only soft quality findings remain.",
+					`Soft findings: ${decision.softGateFindings.length}`,
+				],
+				context: {
+					changedFiles: currentChangedFiles,
+					changedFilesSummary: summarizePaths(currentChangedFiles),
+					qualityRound: round,
+					qualityRounds: roundBudgetTotal,
+					note: "Awaiting quality-suite soft-gate decision",
+				},
+			});
+			if (!options.promptForSoftGateChoice) {
+				throw new Error(
+					decision.message ||
+						"Quality suite stopped with soft findings still remaining, and no interactive prompt path is available.",
+				);
+			}
+			const choice = await options.promptForSoftGateChoice(decision);
+			if (choice === "Accept remaining soft findings and continue") {
+				emitWorkflowUpdate(options.onUpdate, {
+					type: "detail-lines",
+					stage: "checker",
+					lines: [
+						`Accepting ${decision.softGateFindings.length} residual soft quality finding(s) and continuing to validator.`,
+					],
+					context: {
+						changedFiles: currentChangedFiles,
+						changedFilesSummary: summarizePaths(currentChangedFiles),
+						qualityRound: round,
+						qualityRounds: roundBudgetTotal,
+						note: "Residual soft findings accepted",
+					},
+				});
+				return {
+					outcome: "accepted-soft",
+					acceptedResidualSoftFindings: decision.softGateFindings,
+					blockingHardFindings: decision.hardGateFindings,
+					changedFiles: currentChangedFiles,
+					cleanupRun,
+					designRun,
+					checkerRun,
+					stats,
+				};
+			}
+			if (choice === "Reformulate in discovery mode") {
+				throw new QualitySuiteReformulateError({
+					summary: buildQualityReformulationSummary({
+						changedFiles: currentChangedFiles,
+						checks: checkerRun.results,
+						checker: checkerRun.report,
+						quality: summarizeWorkflowQualityStats(stats),
+						softFindings: decision.softGateFindings,
+						hardFindings: decision.hardGateFindings,
+					}),
+					reformulationPrompt: buildQualityReformulationPrompt(decision.softGateFindings),
+				});
+			}
+			manualContinueBudget += 1;
+			if (decision.message) {
+				emitWorkflowUpdate(options.onUpdate, {
+					type: "detail-lines",
+					stage: "fix",
+					lines: [decision.message, `Manual remediation override granted. New round budget: ${roundBudgetTotal + 1}.`],
+					context: {
+						changedFiles: currentChangedFiles,
+						changedFilesSummary: summarizePaths(currentChangedFiles),
+						qualityRound: round,
+						qualityRounds: roundBudgetTotal + 1,
+						note: "Continuing quality remediation after soft-gate prompt",
+					},
+				});
+			}
+		}
 
+		roundHistory.push(decision.snapshot);
 		const remediationPromptSelection = pickRemediationPrompt({
 			workerPrompt: options.workerPrompt,
 			designWorkerPrompt: options.designWorkerPrompt,
@@ -1978,7 +3744,7 @@ async function runQualitySuite(options: {
 					changedFiles: currentChangedFiles,
 					changedFilesSummary: summarizePaths(currentChangedFiles),
 					qualityRound: round,
-					qualityRounds: QUALITY_SUITE_MAX_ROUNDS,
+					qualityRounds: roundBudgetTotal,
 					note: `${roundLabel} ${stage} requested remediation`,
 				},
 			);
@@ -1997,27 +3763,22 @@ async function runQualitySuite(options: {
 				changedFiles: currentChangedFiles,
 				changedFilesSummary: summarizePaths(currentChangedFiles),
 				qualityRound: round,
-				qualityRounds: QUALITY_SUITE_MAX_ROUNDS,
+				qualityRounds: roundBudgetTotal,
 				workerKind: remediationPromptSelection.kind,
 				note: remediationPromptSelection.reason,
 			},
 		});
-		const fixAgentFiles = [
-			...new Set([
-				...options.agentFiles,
-				...discoverRelevantGuidance(options.cwd, currentChangedFiles, "AGENTS.md").documents.map((document) => document.path),
-			]),
-		];
 		const fixSummary = await runWorkerFixPass({
 			cwd: options.cwd,
 			tempDir: options.tempDir,
 			planPath: options.planPath,
-			agentFiles: fixAgentFiles,
+			agentFiles: options.agentFiles,
+			touchedPaths: currentChangedFiles,
 			systemPrompt: remediationPromptSelection.systemPrompt,
 			contextTitle: `${options.suiteId}-quality-fix-round-${round}`,
 			contextMarkdown: renderQualitySuiteRemediationContext({
 				round,
-				maxRounds: QUALITY_SUITE_MAX_ROUNDS,
+				maxRounds: roundBudgetTotal,
 				decision,
 				changedFiles: currentChangedFiles,
 				cleanupRun,
@@ -2059,7 +3820,7 @@ async function runQualitySuite(options: {
 				changedFiles: currentChangedFiles,
 				changedFilesSummary: summarizePaths(currentChangedFiles),
 				qualityRound: round,
-				qualityRounds: QUALITY_SUITE_MAX_ROUNDS,
+				qualityRounds: roundBudgetTotal,
 				workerKind: remediationPromptSelection.kind,
 				note: remediationPromptSelection.reason,
 			},
@@ -2078,13 +3839,13 @@ async function runQualitySuite(options: {
 				changedFiles: currentChangedFiles,
 				changedFilesSummary: summarizePaths(currentChangedFiles),
 				qualityRound: round,
-				qualityRounds: QUALITY_SUITE_MAX_ROUNDS,
+				qualityRounds: roundBudgetTotal,
 				note: `${roundLabel} restarting quality suite from cleanup`,
 			},
 		);
 	}
 
-	throw new Error(`Quality suite exhausted ${QUALITY_SUITE_MAX_ROUNDS} round(s).`);
+	throw new Error(`Quality suite exhausted ${QUALITY_SUITE_MAX_ROUNDS + QUALITY_SUITE_MAX_EXTRA_ROUNDS + manualContinueBudget} round(s).`);
 }
 
 export async function runGuidedDiscoveryImplementationWorkflow(
@@ -2094,13 +3855,14 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 ): Promise<WorkflowSummary> {
 	const originalRepoRoot = findRepoRoot(ctx.cwd);
 	const exec = makeExec(pi);
-	const { workspace: runWorkspace } = await createManagedWorkspace({
+	const { workspace: runWorkspace, seededChangedFiles: initialSeededChangedFiles } = await createManagedWorkspace({
 		exec,
 		sourceCwd: ctx.cwd,
 		label: "run",
 	});
-	const workspaceRepoRoot = findRepoRoot(runWorkspace.cwd);
-	const workspaceRelativeCwd = relative(originalRepoRoot, ctx.cwd);
+	await runWorkspace.refresh();
+	const workspaceRepoRoot = runWorkspace.repoRoot;
+	const workspaceRelativeCwd = runWorkspace.sourceRelativeCwd;
 	const workflowCwd = resolve(runWorkspace.cwd, workspaceRelativeCwd);
 	let tempDir = "";
 	const workflowModels = resolveWorkflowModels(ctx);
@@ -2111,7 +3873,8 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 	const reviewModels = checkerModels.length > 0 ? checkerModels : primaryModel ? [primaryModel] : [];
 	let activeNode: WorkflowNodeId | undefined;
 	let runWorkspaceIntegrated = false;
-	let agentsCheckExecutionPolicy: AgentsCheckExecutionPolicy | undefined;
+	const agentsCheckExecutionPolicies = new Map<string, AgentsCheckExecutionPolicy>();
+	let handleRunWorkspaceIntegration: (() => Promise<void>) | undefined;
 
 	emitWorkflowUpdate(options.onUpdate, {
 		type: "workflow-start",
@@ -2121,6 +3884,7 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 				? "Synthesizing a lightweight plan in an isolated workspace."
 				: `Using ${options.planPath} as the approved source of truth in an isolated workspace.`,
 			`Workspace: ${runWorkspace.kind} @ ${runWorkspace.cwd}`,
+			`Seeded source checkout changes: ${initialSeededChangedFiles.length > 0 ? summarizePaths(initialSeededChangedFiles) : "none"}`,
 			`Primary model: ${primaryModel ?? "default"}`,
 			`Checker models: ${reviewModels.length > 0 ? reviewModels.join(", ") : primaryModel ?? "default"}`,
 		],
@@ -2134,9 +3898,9 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 		const originalCheckoutBaseline = await createWorkspaceSnapshot({
 			cwd: originalRepoRoot,
 			touchedPaths: [],
-			seededChangedFiles: [],
-			includeAllFiles: true,
+			seededChangedFiles: initialSeededChangedFiles,
 		});
+		const originalCheckoutRevision = await captureWorkspaceRevision(originalRepoRoot, exec);
 		tempDir = await mkdtemp(join(runWorkspace.cleanupRoot, "context-"));
 		const [implementationPlannerPrompt, decomposerPrompt, workerPrompt, designWorkerPrompt, cleanupPrompt, designReviewPrompt, checkerPrompt, validatorPrompt] =
 			await Promise.all([
@@ -2165,31 +3929,37 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 		const resolveAgentsCheckExecutionPolicy = async (
 			commands: AgentsCheckCommand[],
 		): Promise<AgentsCheckExecutionPolicy> => {
-			if (agentsCheckExecutionPolicy?.allowed) return agentsCheckExecutionPolicy;
-			if (agentsCheckExecutionPolicy && !agentsCheckExecutionPolicy.allowed) return agentsCheckExecutionPolicy;
-			agentsCheckExecutionPolicy = await requestAgentsCheckExecutionPolicy(ctx, commands);
-			return agentsCheckExecutionPolicy;
+			const commandSetKey = agentsCheckCommandSetKey(commands);
+			const cachedPolicy = agentsCheckExecutionPolicies.get(commandSetKey);
+			if (cachedPolicy) return cachedPolicy;
+			const policy = await requestAgentsCheckExecutionPolicy(ctx, commands);
+			agentsCheckExecutionPolicies.set(commandSetKey, policy);
+			return policy;
 		};
 		const integrateRunWorkspace = async (): Promise<void> => {
 			if (runWorkspaceIntegrated) return;
-			const finalIntegration = await planWorkspaceIntegration({
-				childCwd: runWorkspace.cwd,
+			await runWorkspace.refresh();
+			const currentOriginalCheckoutRevision = await captureWorkspaceRevision(originalRepoRoot, exec);
+			if (workspaceRevisionChanged(originalCheckoutRevision, currentOriginalCheckoutRevision)) {
+				throw new Error(
+					`The original checkout moved to a different ${currentOriginalCheckoutRevision.kind} revision while the isolated workspace was running. Update or rebase the checkout, then rerun instead of auto-integrating stale workspace output.`,
+				);
+			}
+			const finalIntegration = await integrateWorkspaceChanges({
+				childCwd: runWorkspace.repoRoot,
 				parentCwd: originalRepoRoot,
 				baseline: originalCheckoutBaseline,
 				exec,
+				allowPartialIntegration: false,
 			});
 			if (finalIntegration.conflictingFiles.length > 0) {
 				throw new Error(
 					`The original checkout changed while the isolated workspace was running. Resolve these files manually and rerun: ${finalIntegration.conflictingFiles.join(", ")}`,
 				);
 			}
-			await syncWorkspaceFiles({
-				sourceCwd: runWorkspace.cwd,
-				targetCwd: originalRepoRoot,
-				files: finalIntegration.nonConflictingFiles,
-			});
 			runWorkspaceIntegrated = true;
 		};
+		handleRunWorkspaceIntegration = integrateRunWorkspace;
 		const planInfoPath = await writeTempContextFile(
 			tempDir,
 			"workflow-instructions.md",
@@ -2199,6 +3969,8 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 				`- original repo root: ${originalRepoRoot}`,
 				`- isolated workspace root: ${workspaceRepoRoot}`,
 				`- workflow cwd: ${workflowCwd}`,
+				`- workflow cwd relative to repo root: ${workspaceRelativeCwd}`,
+				`- seeded source checkout changes: ${initialSeededChangedFiles.length > 0 ? initialSeededChangedFiles.join(", ") : "none"}`,
 				`- approved plan source: ${materializedPlan.label}`,
 				...(options.extraInstructions.trim()
 					? ["", "## Additional instructions", "", options.extraInstructions.trim()]
@@ -2263,7 +4035,12 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 			},
 		});
 
+		let resolvedChildIntegrationConflicts = false;
 		const workerResults: WorkerPhaseResult[] = [];
+		const workflowQualityStats = createWorkflowQualityStats();
+		const setActiveNode = (nodeId: WorkflowNodeId): void => {
+			activeNode = nodeId;
+		};
 		for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
 			activeNode = "implementation";
 			const batch = batches[batchIndex];
@@ -2284,8 +4061,8 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 					note: `Implementation batch ${batchIndex + 1} started`,
 				},
 			});
-			const runBatchPhase = (phase: DecompositionPhase, cwd: string): Promise<WorkerPhaseResult> =>
-				runWorkerPhase({
+			const runBatchPhase = async (phase: DecompositionPhase, cwd: string, priorWorkerResults: WorkerPhaseResult[]): Promise<WorkerPhaseResult[]> => {
+				const phaseResult = await runWorkerPhase({
 					cwd,
 					tempDir,
 					planPath,
@@ -2300,76 +4077,103 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 					thinkingLevel,
 					onUpdate: options.onUpdate,
 				});
+				const phaseWorkerResults = [...priorWorkerResults, phaseResult];
+				const phaseChangedFiles = await detectChangedFiles(cwd, exec);
+				const followThrough = await runPhaseFollowThroughLoop({
+					cwd,
+					tempDir,
+					planPath,
+					agentFiles,
+					workerPrompt,
+					designWorkerPrompt,
+					cleanupPrompt,
+					designReviewPrompt,
+					decomposition,
+					workerResults: phaseWorkerResults,
+					phase: phaseResult.phase,
+					changedFiles: phaseChangedFiles,
+					exec,
+					primaryModel,
+					thinkingLevel,
+					onUpdate: options.onUpdate,
+					onStageChange: setActiveNode,
+				});
+				mergeWorkflowQualityStats(workflowQualityStats, followThrough.stats);
+				return phaseWorkerResults.slice(priorWorkerResults.length);
+			};
 			const phaseResults: WorkerPhaseResult[] = [];
-			if (batch.length > 1) {
-				const childRuns = await Promise.all(
+			if (batch.some((phase) => phase.parallelSafe)) {
+				const childWorkspaces: ManagedWorkspace[] = [];
+				const childRunResults = await Promise.allSettled(
 					batch.map(async (phase) => {
 						const child = await createChildWorkspace({
 							exec,
-							parentCwd: runWorkspace.cwd,
+							parentCwd: runWorkspace.repoRoot,
 							label: phase.id,
 							touchedPaths: phase.touchedPaths,
 						});
-						const childWorkflowCwd = resolve(child.workspace.cwd, workspaceRelativeCwd);
-						try {
-							return {
-								phase,
-								child,
-								result: await runBatchPhase(phase, childWorkflowCwd),
-							};
-						} catch (error) {
-							await child.workspace.cleanup();
-							throw error;
-						}
+						childWorkspaces.push(child.workspace);
+						await child.workspace.refresh();
+						const childWorkflowCwd = resolve(child.workspace.repoRoot, workspaceRelativeCwd);
+						return {
+							phase,
+							child,
+							results: await runBatchPhase(phase, childWorkflowCwd, workerResults),
+						};
 					}),
 				);
-				for (const childRun of childRuns) {
-					const integration = await planWorkspaceIntegration({
-						childCwd: childRun.child.workspace.cwd,
-						parentCwd: runWorkspace.cwd,
-						baseline: childRun.child.baseline,
-						exec,
-					});
-					await syncWorkspaceFiles({
-						sourceCwd: childRun.child.workspace.cwd,
-						targetCwd: runWorkspace.cwd,
-						files: integration.nonConflictingFiles,
-					});
-					if (integration.conflictingFiles.length > 0) {
-						const summary = await resolveWorkspaceIntegrationConflicts({
-							cwd: workflowCwd,
-							tempDir,
-							planPath,
-							agentFiles: collectWorkerAgentFiles(agentFiles, workflowCwd, integration.conflictingFiles),
-							workerPrompt,
-							designWorkerPrompt,
-							phase: childRun.phase,
-							childWorkspace: childRun.child.workspace,
+				try {
+					const failedChildRun = childRunResults.find((result) => result.status === "rejected");
+					if (failedChildRun?.status === "rejected") throw failedChildRun.reason;
+					for (const childRunResult of childRunResults) {
+						if (childRunResult.status !== "fulfilled") continue;
+						const childRun = childRunResult.value;
+						await childRun.child.workspace.refresh();
+						await runWorkspace.refresh();
+						const integration = await integrateWorkspaceChanges({
+							childCwd: childRun.child.workspace.repoRoot,
+							parentCwd: runWorkspace.repoRoot,
 							baseline: childRun.child.baseline,
-							conflictingFiles: integration.conflictingFiles,
-							model: primaryModel,
-							thinkingLevel,
-							onUpdate: options.onUpdate,
+							exec,
 						});
-						workerResults.push({
-							phase: {
-								id: `${childRun.phase.id}-integration-conflicts`,
-								title: `${childRun.phase.title} integration conflict resolution`,
-								goal: "Resolve workspace integration conflicts",
-								instructions: [`Resolve workspace integration conflicts for ${childRun.phase.id}.`],
-								dependsOn: [childRun.phase.id],
-								touchedPaths: integration.conflictingFiles,
-								parallelSafe: false,
-								designSensitive: childRun.phase.designSensitive,
-							},
-							summary,
-						});
+						if (integration.conflictingFiles.length > 0) {
+							resolvedChildIntegrationConflicts = true;
+							const summary = await resolveWorkspaceIntegrationConflicts({
+								cwd: workflowCwd,
+								tempDir,
+								planPath,
+								agentFiles,
+								workerPrompt,
+								designWorkerPrompt,
+								phase: childRun.phase,
+								childWorkspace: childRun.child.workspace,
+								baseline: childRun.child.baseline,
+								conflictingFiles: integration.conflictingFiles,
+								model: primaryModel,
+								thinkingLevel,
+								onUpdate: options.onUpdate,
+							});
+							workerResults.push({
+								phase: {
+									id: `${childRun.phase.id}-integration-conflicts`,
+									title: `${childRun.phase.title} integration conflict resolution`,
+									goal: "Resolve workspace integration conflicts",
+									instructions: [`Resolve workspace integration conflicts for ${childRun.phase.id}.`],
+									dependsOn: [childRun.phase.id],
+									touchedPaths: integration.conflictingFiles,
+									parallelSafe: false,
+									designSensitive: childRun.phase.designSensitive,
+								},
+								summary,
+							});
+						}
+						phaseResults.push(...childRun.results);
 					}
-					phaseResults.push(childRun.result);
-					await childRun.child.workspace.cleanup();
+				} finally {
+					await Promise.allSettled(childWorkspaces.map(async (workspace) => await workspace.cleanup()));
 				}
 			} else {
-				phaseResults.push(await runBatchPhase(batch[0], workflowCwd));
+				phaseResults.push(...(await runBatchPhase(batch[0], workflowCwd, workerResults)));
 			}
 			workerResults.push(...phaseResults);
 			emitWorkflowUpdate(options.onUpdate, {
@@ -2391,12 +4195,10 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 		}
 
 		let changedFiles = await detectChangedFiles(workflowCwd, exec);
-		const workflowQualityStats = createWorkflowQualityStats();
-		const setActiveNode = (nodeId: WorkflowNodeId): void => {
-			activeNode = nodeId;
-		};
+		let acceptedResidualSoftFindings: QualityGateFindingSummary[] = [];
+		let blockingHardFindings: QualityGateFindingSummary[] = [];
 
-		let qualityPass = await runQualitySuite({
+		let verificationPass = await runMergedResultVerification({
 			cwd: workflowCwd,
 			tempDir,
 			planPath,
@@ -2404,7 +4206,7 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 			workerPrompt,
 			designWorkerPrompt,
 			cleanupPrompt,
-			designReviewPrompt: designReviewPrompt,
+			designReviewPrompt,
 			checkerPrompt,
 			decomposition,
 			workerResults,
@@ -2415,23 +4217,21 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 			thinkingLevel,
 			onUpdate: options.onUpdate,
 			onStageChange: setActiveNode,
-			suiteId: "implementation",
+			verificationReason: resolvedChildIntegrationConflicts
+				? "merged implementation result after child-workspace conflict resolution"
+				: "merged implementation result",
 			resolveAgentsCheckExecutionPolicy,
 		});
-		mergeWorkflowQualityStats(workflowQualityStats, qualityPass.stats);
-		changedFiles = qualityPass.changedFiles;
-		let checkPass = qualityPass.checkerRun;
+		mergeWorkflowQualityStats(workflowQualityStats, verificationPass.stats);
+		changedFiles = verificationPass.changedFiles;
+		acceptedResidualSoftFindings = verificationPass.acceptedResidualSoftFindings;
+		blockingHardFindings = verificationPass.blockingHardFindings;
+		let checkPass = verificationPass.checkerRun;
 
 		const validationResolution = createValidationResolutionSummary();
 		const autoAttemptedDiscrepancySignatures = new Set<string>();
 		let validation!: ValidationReport;
 		let discrepancySummaryItems: string[] = [];
-		const recordDiscrepancyIds = (target: string[], discrepancies: ValidationDiscrepancy[]): void => {
-			for (const discrepancy of discrepancies) {
-				const id = discrepancy.id || discrepancy.item;
-				if (id && !target.includes(id)) target.push(id);
-			}
-		};
 		const runValidatorPass = async (validatorPass: {
 			startLine: string;
 			startedNote: string;
@@ -2549,17 +4349,12 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 					note: finishPromptSelection.reason,
 				},
 			});
-			const finishAgentFiles = [
-				...new Set([
-					...agentFiles,
-					...discoverRelevantGuidance(workflowCwd, changedFiles, "AGENTS.md").documents.map((document) => document.path),
-				]),
-			];
 			const finishSummary = await runWorkerFixPass({
 				cwd: workflowCwd,
 				tempDir,
 				planPath,
-				agentFiles: finishAgentFiles,
+				agentFiles,
+				touchedPaths: changedFiles,
 				systemPrompt: finishPromptSelection.systemPrompt,
 				contextTitle: `${remediation.suiteId}-validator-pass`,
 				contextMarkdown: finishContextText,
@@ -2568,26 +4363,20 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 				model: primaryModel,
 				thinkingLevel,
 			});
+			const remediationPhase: DecompositionPhase = {
+				id: `${remediation.suiteId}-validator-pass`,
+				title: remediation.title,
+				goal: remediation.goal,
+				instructions: [remediation.instruction],
+				dependsOn: [],
+				touchedPaths: changedFiles,
+				parallelSafe: false,
+				designSensitive: finishPromptSelection.designSensitive,
+			};
 			workerResults.push({
-				phase: {
-					id: `${remediation.suiteId}-validator-pass`,
-					title: remediation.title,
-					goal: remediation.goal,
-					instructions: [remediation.instruction],
-					dependsOn: [],
-					touchedPaths: changedFiles,
-					parallelSafe: false,
-					designSensitive: finishPromptSelection.designSensitive,
-				},
+				phase: remediationPhase,
 				summary: finishSummary,
 			});
-			if (remediation.kind === "auto") {
-				validationResolution.autoRemediationPasses += 1;
-				recordDiscrepancyIds(validationResolution.autoRemediatedDiscrepancyIds, remediation.discrepancies);
-			} else {
-				validationResolution.manualRemediationPasses += 1;
-				recordDiscrepancyIds(validationResolution.manuallyTargetedDiscrepancyIds, remediation.discrepancies);
-			}
 			emitWorkflowUpdate(options.onUpdate, {
 				type: "finish-completed",
 				stage: "finish",
@@ -2612,7 +4401,7 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 				"finish->cleanup",
 				"cleanup",
 				[
-					`Re-running cleanup, design review, and checker after ${remediation.kind === "auto" ? "automatic" : "selected-item"} validator remediation.`,
+					`Running targeted follow-through and final verification after ${remediation.kind === "auto" ? "automatic" : "selected-item"} validator remediation.`,
 					`Changed files: ${summarizePaths(changedFiles)}`,
 				],
 				{
@@ -2624,7 +4413,7 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 					note: remediation.completionNote,
 				},
 			);
-			qualityPass = await runQualitySuite({
+			const followThrough = await runPhaseFollowThroughLoop({
 				cwd: workflowCwd,
 				tempDir,
 				planPath,
@@ -2632,7 +4421,29 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 				workerPrompt,
 				designWorkerPrompt,
 				cleanupPrompt,
-				designReviewPrompt: designReviewPrompt,
+				designReviewPrompt,
+				decomposition,
+				workerResults,
+				phase: remediationPhase,
+				changedFiles,
+				exec,
+				primaryModel,
+				thinkingLevel,
+				onUpdate: options.onUpdate,
+				onStageChange: setActiveNode,
+				discrepancyContextText: finishContextText,
+			});
+			mergeWorkflowQualityStats(workflowQualityStats, followThrough.stats);
+			changedFiles = followThrough.changedFiles;
+			verificationPass = await runMergedResultVerification({
+				cwd: workflowCwd,
+				tempDir,
+				planPath,
+				agentFiles,
+				workerPrompt,
+				designWorkerPrompt,
+				cleanupPrompt,
+				designReviewPrompt,
 				checkerPrompt,
 				decomposition,
 				workerResults,
@@ -2643,13 +4454,18 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 				thinkingLevel,
 				onUpdate: options.onUpdate,
 				onStageChange: setActiveNode,
-				suiteId: remediation.suiteId,
+				verificationReason:
+					remediation.kind === "auto"
+						? "merged result after automatic validator remediation"
+						: "merged result after selected validator remediation",
 				designContextText: finishContextText,
 				resolveAgentsCheckExecutionPolicy,
 			});
-			mergeWorkflowQualityStats(workflowQualityStats, qualityPass.stats);
-			changedFiles = qualityPass.changedFiles;
-			checkPass = qualityPass.checkerRun;
+			mergeWorkflowQualityStats(workflowQualityStats, verificationPass.stats);
+			changedFiles = verificationPass.changedFiles;
+			acceptedResidualSoftFindings = verificationPass.acceptedResidualSoftFindings;
+			blockingHardFindings = verificationPass.blockingHardFindings;
+			checkPass = verificationPass.checkerRun;
 		};
 
 		await runValidatorPass({
@@ -2658,7 +4474,6 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 			completedNote: "Validator completed",
 		});
 
-		let validatorDiscrepanciesAccepted = false;
 		const returnReformulation = async (): Promise<WorkflowSummary> => {
 			await integrateRunWorkspace();
 			const summary = buildSummary(
@@ -2668,6 +4483,10 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 				checkPass.report,
 				summarizeWorkflowQualityStats(workflowQualityStats),
 				validationResolution,
+				{
+					acceptedResidualSoftFindings,
+					blockingHardFindings,
+				},
 			);
 			emitWorkflowUpdate(options.onUpdate, {
 				type: "workflow-completed",
@@ -2690,122 +4509,93 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 			};
 		};
 
-		while (true) {
-			const validationHandling = decideValidatorDiscrepancyHandling({
-				validation,
-				hasUI: ctx.hasUI,
-				discrepanciesAccepted: validatorDiscrepanciesAccepted,
-				attemptedAutoSignatures: autoAttemptedDiscrepancySignatures,
-				stage:
-					validationResolution.autoRemediationPasses > 0 || validationResolution.manualRemediationPasses > 0
-						? "post-remediation"
-						: "initial",
-			});
-			if (validationHandling.action === "continue") break;
-			if (validationHandling.action === "fail") {
-				throw new Error(validationHandling.message || "Validator reported unresolved actionable discrepancies.");
-			}
-			if (validationHandling.action === "auto-remediate") {
-				for (const discrepancy of validationHandling.autoDiscrepancies) {
-					autoAttemptedDiscrepancySignatures.add(discrepancyAttemptSignature(discrepancy));
-				}
+		const validatorLoopResult = await runValidatorDiscrepancyLoop({
+			initialValidation: validation,
+			hasUI: ctx.hasUI,
+			validationResolution,
+			attemptedAutoSignatures: autoAttemptedDiscrepancySignatures,
+			onAutoRemediationPlanned: async (step) => {
 				emitWorkflowUpdate(options.onUpdate, {
 					type: "detail-lines",
 					stage: "validator",
 					lines: [
-						`Automatically remediating ${validationHandling.autoDiscrepancies.length} worthwhile validator discrepancy(s).`,
-						...(summarizeDiscrepancies(validationHandling.autoDiscrepancies).length > 0
-							? [`Discrepancies: ${summarizeDiscrepancies(validationHandling.autoDiscrepancies).join(" • ")}`]
+						`Automatically remediating ${step.handling.autoDiscrepancies.length} worthwhile validator discrepancy(s).`,
+						...(summarizeDiscrepancies(step.handling.autoDiscrepancies).length > 0
+							? [`Discrepancies: ${summarizeDiscrepancies(step.handling.autoDiscrepancies).join(" • ")}`]
 							: []),
 					],
 					context: {
-						discrepancyCount: validationHandling.autoDiscrepancies.length,
-						discrepancySummary: summarizeDiscrepancies(validationHandling.autoDiscrepancies),
-						recommendation: validation.recommendation,
+						discrepancyCount: step.handling.autoDiscrepancies.length,
+						discrepancySummary: summarizeDiscrepancies(step.handling.autoDiscrepancies),
+						recommendation: step.validation.recommendation,
 						note: "Automatically remediating worthwhile discrepancies",
 					},
 				});
-				await runTargetedValidatorRemediation({
-					kind: "auto",
-					discrepancies: validationHandling.autoDiscrepancies,
-					suiteId: `post-auto-${validationResolution.autoRemediationPasses + 1}`,
-					title: `Validator auto-remediation pass ${validationResolution.autoRemediationPasses + 1}`,
-					goal: "Implement only the worthwhile validator discrepancies selected for automatic remediation",
-					instruction: "Implement only the selected worthwhile validator discrepancies.",
-					loopNote: "Validator triggered automatic worthwhile-item remediation",
-					completionNote: "Returning to cleanup after automatic validator remediation",
+			},
+			onPromptRequired: async (step) => {
+				emitWorkflowUpdate(options.onUpdate, {
+					type: "detail-lines",
+					stage: "validator",
+					lines: [
+						`Validator still found ${step.handling.remainingActionableDiscrepancies.length} actionable discrepancy(s).`,
+						...(step.handling.attemptedAutoDiscrepancies.length > 0
+							? [`Already auto-attempted: ${summarizeDiscrepancies(step.handling.attemptedAutoDiscrepancies).join(" • ")}`]
+							: []),
+						`Recommendation: ${step.validation.recommendation}`,
+						...(summarizeDiscrepancies(step.handling.remainingActionableDiscrepancies).length > 0
+							? [`Remaining actionable discrepancies: ${summarizeDiscrepancies(step.handling.remainingActionableDiscrepancies).join(" • ")}`]
+							: []),
+					],
+					context: {
+						discrepancyCount: step.handling.remainingActionableDiscrepancies.length,
+						discrepancySummary: summarizeDiscrepancies(step.handling.remainingActionableDiscrepancies),
+						recommendation: step.validation.recommendation,
+						note: "Awaiting validator discrepancy decision",
+					},
 				});
-				await runValidatorPass({
-					startLine: "Re-running validator after targeted validator remediation.",
-					startedNote: "Validator restarted after targeted remediation",
-					completedNote: "Validator completed after targeted remediation",
+			},
+			promptForChoice: async (step) =>
+				await promptForValidatorDiscrepancyChoice(ctx, step.validation, {
+					attemptedAutoSignatures: autoAttemptedDiscrepancySignatures,
+					heading:
+						step.stage === "post-remediation"
+							? "Validator still found unresolved plan discrepancies after targeted remediation. What next?"
+							: "Validator found unresolved plan discrepancies. What next?",
+				}),
+			selectDiscrepancies: async (step) => {
+				emitWorkflowUpdate(options.onUpdate, {
+					type: "detail-lines",
+					stage: "validator",
+					lines: [
+						`Waiting for selection of ${step.handling.remainingActionableDiscrepancies.length} actionable validator discrepancy(s).`,
+						"Select only the items you want to implement in this pass.",
+						...(step.handling.informationalDiscrepancies.length > 0
+							? [`Informational only: ${step.handling.informationalDiscrepancies.length} superseded discrepancy(s).`]
+							: []),
+					],
+					context: {
+						discrepancyCount: step.handling.remainingActionableDiscrepancies.length,
+						discrepancySummary: summarizeDiscrepancies(step.handling.remainingActionableDiscrepancies),
+						recommendation: step.validation.recommendation,
+						note: "Waiting for validator discrepancy selection",
+					},
 				});
-				continue;
-			}
-			emitWorkflowUpdate(options.onUpdate, {
-				type: "detail-lines",
-				stage: "validator",
-				lines: [
-					`Validator still found ${validationHandling.remainingActionableDiscrepancies.length} actionable discrepancy(s).`,
-					...(validationHandling.attemptedAutoDiscrepancies.length > 0
-						? [`Already auto-attempted: ${summarizeDiscrepancies(validationHandling.attemptedAutoDiscrepancies).join(" • ")}`]
-						: []),
-					`Recommendation: ${validation.recommendation}`,
-					...(summarizeDiscrepancies(validationHandling.remainingActionableDiscrepancies).length > 0
-						? [`Remaining actionable discrepancies: ${summarizeDiscrepancies(validationHandling.remainingActionableDiscrepancies).join(" • ")}`]
-						: []),
-				],
-				context: {
-					discrepancyCount: validationHandling.remainingActionableDiscrepancies.length,
-					discrepancySummary: summarizeDiscrepancies(validationHandling.remainingActionableDiscrepancies),
-					recommendation: validation.recommendation,
-					note: "Awaiting validator discrepancy decision",
-				},
-			});
-			const choice = await promptForValidatorDiscrepancyChoice(ctx, validation, {
-				attemptedAutoSignatures: autoAttemptedDiscrepancySignatures,
-				heading:
-					validationResolution.autoRemediationPasses > 0 || validationResolution.manualRemediationPasses > 0
-						? "Validator still found unresolved plan discrepancies after targeted remediation. What next?"
-						: "Validator found unresolved plan discrepancies. What next?",
-			});
-			if (choice === "Reformulate in discovery mode") return await returnReformulation();
-			if (choice === "Accept the discrepancies and finish") {
-				validatorDiscrepanciesAccepted = true;
-				validationResolution.acceptedRemainingDiscrepancies = true;
-				break;
-			}
-			emitWorkflowUpdate(options.onUpdate, {
-				type: "detail-lines",
-				stage: "validator",
-				lines: [
-					`Waiting for selection of ${validationHandling.remainingActionableDiscrepancies.length} actionable validator discrepancy(s).`,
-					"Select only the items you want to implement in this pass.",
-					...(validationHandling.informationalDiscrepancies.length > 0
-						? [`Informational only: ${validationHandling.informationalDiscrepancies.length} superseded discrepancy(s).`]
-						: []),
-				],
-				context: {
-					discrepancyCount: validationHandling.remainingActionableDiscrepancies.length,
-					discrepancySummary: summarizeDiscrepancies(validationHandling.remainingActionableDiscrepancies),
-					recommendation: validation.recommendation,
-					note: "Waiting for validator discrepancy selection",
-				},
-			});
-			const selectedManualDiscrepancies = await selectRemainingActionableDiscrepancies(ctx, {
-				title: "Select validator discrepancies to implement",
-				actionableDiscrepancies: validationHandling.remainingActionableDiscrepancies,
-				informationalDiscrepancies: validationHandling.informationalDiscrepancies,
-				introLines: [
-					validation.summary || `${validationHandling.remainingActionableDiscrepancies.length} actionable discrepancy(s) remain.`,
-					...(validationHandling.attemptedAutoDiscrepancies.length > 0
-						? [
-							`${validationHandling.attemptedAutoDiscrepancies.length} worthwhile item(s) were already auto-attempted and still remain unresolved.`,
-						]
-						: []),
-				],
-			});
-			if (selectedManualDiscrepancies === undefined) {
+				return await selectRemainingActionableDiscrepancies(ctx, {
+					title: "Select validator discrepancies to implement",
+					actionableDiscrepancies: step.handling.remainingActionableDiscrepancies,
+					informationalDiscrepancies: step.handling.informationalDiscrepancies,
+					introLines: [
+						step.validation.summary || `${step.handling.remainingActionableDiscrepancies.length} actionable discrepancy(s) remain.`,
+						...(step.handling.attemptedAutoDiscrepancies.length > 0
+							? [
+								`${step.handling.attemptedAutoDiscrepancies.length} worthwhile item(s) were already auto-attempted and still remain unresolved.`,
+							]
+							: []),
+					],
+					initialSelectedIds: step.initialSelectedIds,
+				});
+			},
+			onSelectionCancelled: async (step) => {
 				emitWorkflowUpdate(options.onUpdate, {
 					type: "detail-lines",
 					stage: "validator",
@@ -2814,15 +4604,14 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 						"Choose whether to select items, reformulate, or accept the remaining discrepancies.",
 					],
 					context: {
-						discrepancyCount: validationHandling.remainingActionableDiscrepancies.length,
-						discrepancySummary: summarizeDiscrepancies(validationHandling.remainingActionableDiscrepancies),
-						recommendation: validation.recommendation,
+						discrepancyCount: step.handling.remainingActionableDiscrepancies.length,
+						discrepancySummary: summarizeDiscrepancies(step.handling.remainingActionableDiscrepancies),
+						recommendation: step.validation.recommendation,
 						note: "Validator discrepancy selection cancelled",
 					},
 				});
-				continue;
-			}
-			if (selectedManualDiscrepancies.length === 0) {
+			},
+			onSelectionEmpty: async (step) => {
 				emitWorkflowUpdate(options.onUpdate, {
 					type: "detail-lines",
 					stage: "validator",
@@ -2831,30 +4620,58 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 						"Choose whether to select items, reformulate, or accept the remaining discrepancies.",
 					],
 					context: {
-						discrepancyCount: validationHandling.remainingActionableDiscrepancies.length,
-						discrepancySummary: summarizeDiscrepancies(validationHandling.remainingActionableDiscrepancies),
-						recommendation: validation.recommendation,
+						discrepancyCount: step.handling.remainingActionableDiscrepancies.length,
+						discrepancySummary: summarizeDiscrepancies(step.handling.remainingActionableDiscrepancies),
+						recommendation: step.validation.recommendation,
 						note: "No validator discrepancies selected",
 					},
 				});
-				continue;
-			}
-			await runTargetedValidatorRemediation({
-				kind: "manual",
-				discrepancies: selectedManualDiscrepancies,
-				suiteId: `post-manual-${validationResolution.manualRemediationPasses + 1}`,
-				title: `Validator selected-item remediation pass ${validationResolution.manualRemediationPasses + 1}`,
-				goal: "Implement only the selected actionable validator discrepancies",
-				instruction: "Implement only the selected validator discrepancies.",
-				loopNote: "Validator requested selected-item remediation",
-				completionNote: "Returning to cleanup after selected validator remediation",
-			});
-			await runValidatorPass({
-				startLine: "Re-running validator after selected validator remediation.",
-				startedNote: "Validator restarted after selected-item remediation",
-				completedNote: "Validator completed after selected-item remediation",
-			});
-		}
+			},
+			runRemediation: async ({ kind, discrepancies, passNumber }) => {
+				await runTargetedValidatorRemediation({
+					kind,
+					discrepancies,
+					suiteId: kind === "auto" ? `post-auto-${passNumber}` : `post-manual-${passNumber}`,
+					title:
+						kind === "auto"
+							? `Validator auto-remediation pass ${passNumber}`
+							: `Validator selected-item remediation pass ${passNumber}`,
+					goal:
+						kind === "auto"
+							? "Implement only the worthwhile validator discrepancies selected for automatic remediation"
+							: "Implement only the selected actionable validator discrepancies",
+					instruction:
+						kind === "auto"
+							? "Implement only the selected worthwhile validator discrepancies."
+							: "Implement only the selected validator discrepancies.",
+					loopNote:
+						kind === "auto"
+							? "Validator triggered automatic worthwhile-item remediation"
+							: "Validator requested selected-item remediation",
+					completionNote:
+						kind === "auto"
+							? "Returning to cleanup after automatic validator remediation"
+							: "Returning to cleanup after selected validator remediation",
+				});
+				await runValidatorPass({
+					startLine:
+						kind === "auto"
+							? "Re-running validator after targeted validator remediation."
+							: "Re-running validator after selected validator remediation.",
+					startedNote:
+						kind === "auto"
+							? "Validator restarted after targeted remediation"
+							: "Validator restarted after selected-item remediation",
+					completedNote:
+						kind === "auto"
+							? "Validator completed after targeted remediation"
+							: "Validator completed after selected-item remediation",
+				});
+				return validation;
+			},
+		});
+		validation = validatorLoopResult.validation;
+		if (validatorLoopResult.decision === "reformulate") return await returnReformulation();
 
 		await integrateRunWorkspace();
 		const summary = buildSummary(
@@ -2864,6 +4681,10 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 			checkPass.report,
 			summarizeWorkflowQualityStats(workflowQualityStats),
 			validationResolution,
+			{
+				acceptedResidualSoftFindings,
+				blockingHardFindings,
+			},
 		);
 		discrepancySummaryItems = summarizeDiscrepancies(validation.discrepancies);
 		emitWorkflowUpdate(options.onUpdate, {
@@ -2888,6 +4709,22 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 			summary,
 		};
 	} catch (error) {
+		if (error instanceof QualitySuiteReformulateError) {
+			await handleRunWorkspaceIntegration?.();
+			emitWorkflowUpdate(options.onUpdate, {
+				type: "workflow-completed",
+				stage: "complete",
+				lines: ["Implementation paused for discovery reformulation after merged-result quality review."],
+				context: {
+					note: "Workflow handed back to discovery mode after quality-suite reformulation choice",
+				},
+			});
+			return {
+				decision: "reformulate",
+				summary: error.summary,
+				reformulationPrompt: error.reformulationPrompt,
+			};
+		}
 		emitWorkflowUpdate(options.onUpdate, {
 			type: "workflow-failed",
 			message: error instanceof Error ? error.message : String(error),

@@ -1,6 +1,6 @@
 import type { Theme, ThemeColor } from "@mariozechner/pi-coding-agent";
 import type { Component, TUI } from "@mariozechner/pi-tui";
-import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import { truncateToWidth, visibleWidth } from "./tui-compat.ts";
 import {
 	WORKFLOW_EDGE_META,
 	type ImplementationProgressSnapshot,
@@ -39,6 +39,7 @@ const LOOP_OVERLAY_EDGES = new Set([
 	"design->fix",
 	"checker->fix",
 	"fix->cleanup",
+	"fix->checker",
 	"validator->finish",
 	"finish->cleanup",
 ]);
@@ -476,12 +477,15 @@ class ImplementationProgressWidgetComponent implements Component {
 	private cachedWidth?: number;
 	private cachedState?: ImplementationProgressState;
 	private cachedLines?: string[];
+	private readonly theme: Theme;
+	private readonly getState: () => ImplementationProgressState;
+	private readonly options: ImplementationProgressWidgetOptions;
 
-	constructor(
-		private readonly theme: Theme,
-		private readonly getState: () => ImplementationProgressState,
-		private readonly options: ImplementationProgressWidgetOptions,
-	) {}
+	constructor(theme: Theme, getState: () => ImplementationProgressState, options: ImplementationProgressWidgetOptions) {
+		this.theme = theme;
+		this.getState = getState;
+		this.options = options;
+	}
 
 	render(width: number): string[] {
 		const state = this.getState();
