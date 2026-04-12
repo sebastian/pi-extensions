@@ -1,284 +1,161 @@
-<!-- Generated automatically by guided-discovery on 2026-04-12T11:47:59.585Z -->
+<!-- Generated automatically by guided-discovery on 2026-04-12T13:38:05.510Z -->
 
 ## Problem
 
-The current sub-agent implementation workflow is still too heavy at the endgame.
+The subagent workspace lifecycle currently has a jj-specific collision/leak risk:
 
-Today, `.pi/extensions/guided-discovery/implement-workflow.ts` runs a merged-result quality suite that loops:
-
-- cleanup
-- design review
-- checker
-- fix
-- restart from cleanup
-
-That same pattern also reruns after validator-driven finish work. Even with the newer graded gating, this can still burn rounds and feel endless.
-
-Your requested direction is:
-
-- move cleanup into the implementation loop
-- move design review into the implementation loop when visible/user-facing elements are altered
-- scope both to the affected code and immediate surroundings only
-- do only one final holistic cleanup/design pass for glaring feature-level issues
-- let only the final checker loop
-- checker should focus on logic/regressions/side effects
-- after 2 checker passes, leftover non-critical comments are not blocking
-- checker should use only one companion model: prefer `openai-codex/gpt-5.3-codex`, else `GLM-5.1`
-
-You also clarified two important decisions:
-
-- the embedded loop should be **per phase**
-- validator remediation should reuse that **same targeted loop**
+- `.pi/extensions/guided-discovery/workspaces.ts` always creates the checkout at `join(cleanupRoot, "workspace")`
+- for `jj workspace add`, the default workspace name is the basename of the destination directory
+- that means every created jj workspace ends up named `workspace`
+- stale failed runs can leave that name behind, and concurrent same-repo runs can collide immediately
+- cleanup is also shaky because jj cleanup currently calls `jj workspace forget <workspacePath>`, while jj’s documented forget target is the workspace **name**
+- there are a couple of early-failure paths where a created workspace can leak before the top-level `finally` runs
 
 ## What I learned
 
-- The main orchestration is in:
+- Relevant code:
+  - `.pi/extensions/guided-discovery/workspaces.ts`
   - `.pi/extensions/guided-discovery/implement-workflow.ts`
-  - `.pi/extensions/guided-discovery/models.ts`
-  - `.pi/extensions/guided-discovery/implementation-progress.ts`
-
-- The current workflow is still centered on a reusable whole-run `runQualitySuite()` that:
-  - runs after implementation
-  - reruns after validator remediation
-  - loops `cleanup -> design -> checker -> fix -> cleanup`
-
-- Current review prompts are broader than what you want:
-  - `.pi/extensions/guided-discovery/agents/cleanup-auditor.md` explicitly allows nearby code and even concrete repo-wide cleanup opportunities
-  - `.pi/extensions/guided-discovery/agents/design-reviewer.md` and `checker.md` say they may inspect nearby code paths as needed
-
-- Design review is currently triggered by:
-  - decomposer `designSensitive`
-  - changed-file heuristics
-  - discrepancy text
-  - prior findings
-  via `shouldRunDesignReview()` in `implement-workflow.ts`
-
-- Worker routing already supports:
-  - normal worker
-  - design worker
-  via `pickWorkerPromptForPhase()` and `pickRemediationPrompt()`
-
-- The current checker model resolution is broader than you want:
-  - `.pi/extensions/guided-discovery/models.ts` currently builds a checker list that can include:
-    - primary
-    - `gpt-5.4`
-    - `gpt-5.3-codex`
-    - `GLM-5.1`
-  - tests in `.pi/extensions/guided-discovery/tests/models.test.ts` assert that wider behavior
-
-- The progress UI and docs still describe the heavier loop:
+  - `.pi/extensions/guided-discovery/tests/workspaces.test.ts`
   - `.pi/extensions/guided-discovery/README.md`
-  - `.pi/extensions/guided-discovery/implementation-progress.ts`
-  - related progress tests
 
-- There is no existing “affected + immediate surroundings/callsites” scope helper yet; current scoping is mostly prompt-driven plus changed-file context.
+- Current creation flow in `workspaces.ts`:
+  - creates a unique temp root via `mkdtemp(...)`
+  - then always uses `const workspacePath = join(cleanupRoot, "workspace")`
+
+- Current cleanup flow for jj:
+  - `cleanupJjWorkspace()` runs `jj workspace forget workspacePath`
+  - then removes the directory from disk
+
+- External docs implication:
+  - jj docs/manpage say `jj workspace add` defaults the workspace name to the destination directory basename
+  - jj docs/manpage say `jj workspace forget` takes workspace **names**
+  - that strongly supports your concern: the fixed `workspace` basename is the real collision source, and forgetting by path is not the right contract
+
+- Current lifecycle gaps:
+  - `runGuidedDiscoveryImplementationWorkflow()` creates `runWorkspace` and calls `runWorkspace.refresh()` **before** entering its `try/finally`
+  - `createChildWorkspace()` creates a managed workspace, then builds a baseline snapshot without its own cleanup guard
+  - child workspaces are cleaned in the batch `finally`, which is good once they are fully returned, but not for setup failures before that point
 
 ## Decision log
 
-- **Embed cleanup/design follow-through per phase.**
-  - After each implementation phase, run targeted cleanup.
-  - Run targeted design review only when that phase is design-sensitive / user-visible.
-
-- **Reuse the same targeted loop for validator remediation.**
-  - Validator-selected follow-up work should behave like a new implementation phase, not jump straight into a heavy global quality suite.
-
-- **Limit targeted review scope.**
-  - Targeted cleanup/design should focus on:
-    - files changed by that phase
-    - the phase’s declared touched paths
-    - immediate surrounding code only when directly relevant
-    - callsites/importers/tests/config around that area as needed
-  - No repo-wide cleanup hunting in targeted mode.
-
-- **Keep a final holistic cleanup/design pass, but single-shot only.**
-  - Purpose: catch glaring feature-level mistakes.
-  - No remediation loop from these passes.
-
-- **Make the checker the only looping final gate.**
-  - Checker should focus on:
-    - logic bugs
-    - regressions
-    - unintended side effects
-    - correctness/security/guidance issues
-  - Residual non-critical comments after 2 passes are non-blocking.
-
-- **Checker model policy should be capped to one companion model.**
-  - Use:
-    - primary checker model
-    - plus at most one secondary:
-      - `openai-codex/gpt-5.3-codex`
-      - else `GLM-5.1`
-  - Do not run both secondary models.
-
-- **Do not add heavy static analysis for “surrounding code” in v1.**
-  - Start with explicit scope context + prompt constraints.
-  - Keep it simple and robust.
+- Use a unique workspace identity for every created workspace.
+- Store the jj workspace name explicitly on `ManagedWorkspace`.
+- Clean up jj workspaces by **name**, not by path.
+- Make creation/setup paths cleanup-safe, not only the happy-path end of the run.
+- Prefer the simplest compatible fix:
+  - make the workspace directory basename unique
+  - let jj derive the workspace name from that basename
+  - this avoids depending on newer `jj workspace add --name` support unless you want extra explicitness
+- Keep git worktree behavior path-based, but apply the same failure-safe cleanup discipline.
 
 ## Recommended approach
 
-Refactor the workflow from a single global quality-suite loop into three smaller behaviors:
+Refactor workspace creation so each workspace gets a generated name like:
 
-1. **Phase-local follow-through loop**
-   - Runs immediately after each phase.
-   - Handles targeted cleanup and targeted design review.
-   - Applies fixes locally until the phase is acceptable.
+- `guided-discovery-run-<shortid>`
+- `guided-discovery-phase-1-<shortid>`
 
-2. **Final holistic review pass**
-   - Runs once after all implementation is done.
-   - Cleanup + conditional design review.
-   - Feature-level, glaring issues only.
-   - No loop.
+Then use that generated name consistently for:
 
-3. **Final checker loop**
-   - Runs after the holistic pass.
-   - Bounded to 2 passes.
-   - Only this stage loops.
+- the workspace directory basename
+- jj cleanup (`jj workspace forget <workspaceName>`)
+- optional debug/status output
 
-That gives you the behavior you asked for while staying close to the current architecture:
+The minimal robust shape is:
 
-- existing decomposition stays
-- existing worker/design-worker routing stays
-- validator loop stays
-- but the heavy merged-result quality suite becomes much lighter and more focused
+1. generate `workspaceName = <sanitized label> + short random suffix`
+2. create `workspacePath = join(cleanupRoot, workspaceName)` instead of `join(cleanupRoot, "workspace")`
+3. store `workspaceName` on `ManagedWorkspace`
+4. cleanup jj by workspace name
+5. add cleanup-on-error in `createManagedWorkspace()`, `createChildWorkspace()`, and the top-level workflow setup path
 
-The simplest robust implementation is to keep the current agent model and prompt system, but introduce explicit **review scope context** so each review knows whether it is:
+That fixes both classes of problems you called out:
 
-- a **targeted phase follow-through review**
-- or a **final holistic feature review**
-
-That is preferable to building new repo-analysis machinery first.
+- stale failed runs no longer poison the repo with a reusable `workspace` name
+- concurrent runs stop colliding on the same jj workspace name
 
 ## Implementation plan
 
-1. **Refactor workflow structure in `.pi/extensions/guided-discovery/implement-workflow.ts`**
-   - Extract a new per-phase helper, e.g.:
-     - `runPhaseFollowThroughLoop()`
-   - Use it:
-     - after each `runWorkerPhase()`
-     - after each validator remediation pass
-   - Remove the current dependency on one big post-implementation `runQualitySuite()` loop as the main quality mechanism.
+1. **Change workspace identity in `.pi/extensions/guided-discovery/workspaces.ts`**
+   - Add a helper that builds a unique workspace name from:
+     - sanitized label
+     - short random suffix
+   - Change:
+     - from `workspacePath = join(cleanupRoot, "workspace")`
+     - to `workspacePath = join(cleanupRoot, workspaceName)`
+   - Add `workspaceName` to `ManagedWorkspace`
 
-2. **Add explicit scope/context builders**
-   - Introduce targeted review context for a single phase:
-     - phase metadata
-     - changed files since phase start
-     - phase touched paths
-     - explicit scope rules: changed files + immediate surrounding code/callsites only
-   - Introduce final holistic context:
-     - whole changed feature
-     - aggregate worker summaries
-     - explicit rule: only glaring feature-level mistakes, no wishlist
-   - Reuse `prepareReviewContextFiles()` patterns, but split targeted vs final behavior.
+2. **Fix jj cleanup semantics**
+   - Update `cleanupJjWorkspace()` to accept both:
+     - `workspaceName`
+     - `workspacePath`
+   - Run:
+     - `jj workspace forget <workspaceName>`
+   - Then remove the directory from disk as today
 
-3. **Implement targeted cleanup/design follow-through**
-   - For each phase:
-     - run worker
-     - detect phase-local changed files
-     - run targeted cleanup
-     - if phase is design-sensitive, run targeted design review
-     - if findings remain, run fix worker and repeat
-   - Keep this bounded and convergence-aware so it cannot become another endless loop.
-   - Recommended default:
-     - targeted phase loop can retry a small fixed number of times
-     - if only minor polish remains, defer it to final holistic pass instead of thrashing
+3. **Make `createManagedWorkspace()` failure-safe**
+   - Wrap the post-`mkdtemp()` creation flow in cleanup-protected logic
+   - If any of these fail after the temp root exists:
+     - `createJjWorkspace()`
+     - `createGitWorkspace()`
+     - `findRepoRootOrSelf(workspacePath)`
+     - `seedWorkspaceFromSource()`
+   - Then best-effort cleanup the created workspace/worktree and remove `cleanupRoot` before rethrowing
 
-4. **Replace final quality suite with single-pass cleanup/design + checker loop**
-   - Add:
-     - `runFinalHolisticCleanupPass()`
-     - `runFinalHolisticDesignPass()`
-     - `runCheckerLoop()`
-   - Final cleanup/design:
-     - run once
-     - no automatic loop
-     - only hard/glaring issues should be considered blocking
-   - Final checker:
-     - focus prompt on logic/regression/side-effect review
-     - run at most 2 passes total
-     - after pass 2, residual soft/non-critical comments are informational
+4. **Make `createChildWorkspace()` failure-safe**
+   - If `createWorkspaceSnapshot()` fails after the child workspace is created, clean up that child workspace before rethrowing
 
-5. **Tighten checker model selection in `.pi/extensions/guided-discovery/models.ts`**
-   - Change checker resolution to:
-     - primary
-     - plus one secondary only:
-       - prefer `openai-codex/gpt-5.3-codex`
-       - else `huggingface/zai-org/GLM-5.1` / `zai/zai-org/GLM-5.1`
-   - Update:
-     - `.pi/extensions/guided-discovery/tests/models.test.ts`
+5. **Close the top-level workflow leak in `.pi/extensions/guided-discovery/implement-workflow.ts`**
+   - Move the top-level run workspace lifecycle under `try/finally`
+   - Specifically ensure `runWorkspace.refresh()` is covered by the same cleanup guard as the rest of the workflow
+   - Use `await runWorkspace?.cleanup()` in `finally` only after successful creation
 
-6. **Update prompts to match the new scope**
-   - `.pi/extensions/guided-discovery/agents/cleanup-auditor.md`
-     - targeted mode: no repo-wide cleanup exploration
-     - final mode: whole-feature glaring cleanup only
-   - `.pi/extensions/guided-discovery/agents/design-reviewer.md`
-     - targeted mode: only changed phase + immediate surrounding UI/code
-     - final mode: whole-feature glaring design mistakes only
-   - `.pi/extensions/guided-discovery/agents/checker.md`
-     - de-emphasize cleanup/polish
-     - emphasize logic bugs, regressions, side effects, correctness
+6. **Add regression tests in `.pi/extensions/guided-discovery/tests/workspaces.test.ts`**
+   - Verify jj managed workspaces no longer use the literal name `workspace`
+   - Verify two same-label workspaces get different names
+   - Verify jj cleanup forgets by generated workspace name
+   - Verify temp cleanup still removes `cleanupRoot`
+   - Add a failure-path test where workspace creation succeeds but later setup fails, and assert cleanup still runs
 
-7. **Adjust validator remediation flow**
-   - In `runTargetedValidatorRemediation()` and its callers:
-     - after implementing selected discrepancies, run the same targeted phase follow-through loop
-     - then run final holistic cleanup/design pass
-     - then run final checker loop
-     - then validator again
-
-8. **Update progress UI and docs**
-   - `.pi/extensions/guided-discovery/implementation-progress.ts`
-   - `.pi/extensions/guided-discovery/implementation-progress.test.ts`
-   - `.pi/extensions/guided-discovery/README.md`
-   - Make the top-level flow reflect:
-     - implementation (with embedded follow-through)
-     - final cleanup
-     - final design
-     - checker
-     - validator
-   - Avoid showing the old global cleanup/design/checker loop as the default spine.
-
-9. **Update workflow tests**
-   - `.pi/extensions/guided-discovery/tests/implement-workflow.test.ts`
-   - Add/replace tests for:
-     - per-phase cleanup loop
-     - per-phase design review only for design-sensitive/user-visible phases
-     - validator remediation reusing the same targeted loop
-     - final cleanup/design being single-pass and non-looping
-     - checker stopping after 2 passes
-     - non-critical checker findings not blocking after pass 2
-     - hard checker findings still blocking
+7. **Optional small observability improvement**
+   - Include the generated workspace name in startup/debug lines in `implement-workflow.ts`
+   - Helpful for diagnosing future stale-workspace issues, but not required for correctness
 
 ## Acceptance criteria
 
-- After each implementation phase, the workflow runs targeted cleanup on that phase’s changes.
-- After each design-sensitive/user-visible phase, the workflow also runs targeted design review.
-- Targeted cleanup/design are explicitly limited to:
-  - changed phase files
-  - touched paths
-  - immediate surrounding code/callsites/tests/config only
-- Targeted cleanup/design no longer roam into repo-wide cleanup work.
-- Validator-driven follow-up implementation reuses the same targeted per-phase follow-through behavior.
-- After the overall implementation is done, the workflow runs:
-  - one final holistic cleanup pass
-  - one final holistic design pass when relevant
-  - no loop from those passes
-- The final checker is the only looping end-stage reviewer.
-- Final checker runs at most 2 passes.
-- After 2 checker passes, remaining non-critical findings do not block completion.
-- Checker model selection uses only:
-  - primary
-  - plus one preferred secondary (`gpt-5.3-codex`, else `GLM-5.1`)
-- README, progress UI, and tests all match the new workflow semantics.
+- No jj workspace created by the subagent workflow is named exactly `workspace`
+- Two runs with the same logical label can create workspaces concurrently without jj name collisions
+- Failed runs do not leave a stale jj workspace named `workspace`
+- jj cleanup uses the generated workspace name, not the path
+- The top-level isolated workspace is cleaned up even if refresh or early setup fails
+- Child workspaces are cleaned up if setup fails before they fully enter batch execution
+- Existing workspace tests still pass, and new regression tests cover unique naming and cleanup-on-failure
 
 ## Risks / follow-ups
 
-- The phrase “immediately surrounding code / callsites” is inherently fuzzy.
-  Recommended v1: enforce it through context and prompts, not heavy static analysis.
+- If you choose to use `jj workspace add --name`, check your desired jj version floor first.  
+  I’d avoid that unless you want extra explicitness; unique destination basenames already solve the problem.
 
-- Refactoring away from `runQualitySuite()` will likely touch many tests and progress-state assumptions.
-  This is more of a structural simplification than a tiny patch.
+- Keep generated names reasonably short to avoid unnecessary path-length growth.
 
-- Final holistic cleanup/design needs a clear blocking rule.
-  My recommendation: only truly glaring hard issues block there; otherwise findings are reported and the checker remains the main loop.
+- Current cleanup is intentionally best-effort; tests should verify the intended jj arguments so silent cleanup failures don’t regress unnoticed.
 
-- Some existing quality-budget helpers may become dead code and should be removed rather than half-reused.
+- No more research is needed before implementation.
 
-- **No more research is needed before implementation.**
+## Sources consulted
+
+- [Working on Windows - Jujutsu docs](https://jj-vcs.github.io/jj/v0.32.0/windows/) — query: site:jj-vcs.github.io workspace add --name jujutsu • Jujutsu may make incorrect decision on whether a file is a binary file and apply line conversion incorrectly, but currently, Jujutsu doesn't support configuring line endings conve…
+- [Conflicts - Jujutsu docs](https://jj-vcs.github.io/jj/v0.24.0/technical/conflicts/) — query: site:jj-vcs.github.io workspace add --name jujutsu • For example, if you merge two branches in a repo, there may be conflicting changes between the two branches. Most DVCSs require you to resolve those conflicts before you can finis…
+- [301 Moved Permanently](https://jj-vcs.github.io/jj/v0.33.0/guides/divergence/) — query: site:jj-vcs.github.io workspace add --name jujutsu • 301 Moved Permanently 301 Moved Permanently nginx
+- [jj-workspace-add(1) — Arch manual pages](https://man.archlinux.org/man/jj-workspace-add.1.en)
+- [Working branches and the JJ "way" · jj-vcs jj · Discussion #2425](https://github.com/jj-vcs/jj/discussions/2425) — query: jj workspace add command manual name • Something like jj workspace add -r name -of-branch path/to/ workspace should be OK, and will do what you ask. You can then just flip between the two folders as desired.
+- [CLI reference - Jujutsu docs](https://docs.jj-vcs.dev/latest/cli-reference/)
+- [Commands Reference | jj-vcs/jj | DeepWiki](https://deepwiki.com/jj-vcs/jj/5.2-commands-reference) — query: jj workspace forget path name manual • This page provides a comprehensive reference for all jj commands available to users. It covers core workflow commands (creating and modifying changes), Git integration commands (c…
+- [Jujutsu VCS: My Personal Cheat Sheet | Rahul's Blog](https://www.rahuljuliato.com/posts/jj-cheat-sheet) — query: jj workspace add command manual name • A practical quick-reference for the JJ (Jujutsu) version control system: not a tutorial, but a ready-to-use guide with the most essential commands and workflows.
+- [Working copy - Jujutsu docs](https://docs.jj-vcs.dev/latest/working-copy/)
+- [Jujutsu Version Control System - tdudziak.com](https://tdudziak.com/2026/02/07/jujutsu-vcs.html) — query: jj workspace add command manual name • Another useful piece of jj functionality is the ability to use multiple workspaces , a feature similar to Git worktrees. With jj workspace add you can check out a working copy in…
+- [Commands and Configuration | jj-vcs/jj | DeepWiki](https://deepwiki.com/jj-vcs/jj/5.2-commands-and-configuration) — query: jj workspace add command manual name • This page documents the major ` jj ` commands and their configuration options. It covers command categories, common usage patterns, and the configuration system that controls comm…
+- [jj-workspace-forget(1) — Arch manual pages](https://man.archlinux.org/man/extra/jujutsu/jj-workspace-forget.1.en)
+- [jj/docs/working-copy.md at main · jj-vcs/jj · GitHub](https://github.com/jj-vcs/jj/blob/main/docs/working-copy.md) — query: jj workspace forget path name manual • If needed, jj workspace root -- name < workspace > prints the root path of the specified workspace (defaults to the current one). When you're done using a workspace , use jj works…
+- [jj-workspace-experiments | Skills Ma... · LobeHub](https://lobehub.com/skills/thoughtpolice-a-jj-workspace-experiments) — query: jj workspace forget path name manual • This Skill provides a disciplined workflow for creating isolated jj workspaces under a work/ directory to run experiments, test breaking changes, and develop alternative implement…

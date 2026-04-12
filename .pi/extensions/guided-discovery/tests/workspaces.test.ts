@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import {
 	captureWorkspaceRevision,
 	createChildWorkspace,
@@ -87,6 +87,9 @@ test("createManagedWorkspace seeds source checkout changes into a jj workspace a
 	assert.equal(workspace.sourceRepoRoot, root);
 	assert.equal(workspace.sourceCwd, sourceCwd);
 	assert.equal(workspace.sourceRelativeCwd, "src");
+	assert.notEqual(workspace.workspaceName, "workspace");
+	assert.match(workspace.workspaceName, /^guided-discovery-run-[0-9a-f]{8}$/);
+	assert.equal(basename(workspace.cwd), workspace.workspaceName);
 	assert.deepEqual(seededChangedFiles, ["src/changed.ts", "src/deleted.ts"]);
 	assert.deepEqual(workspace.seededChangedFiles, seededChangedFiles);
 	assert.equal(await readFile(join(workspace.cwd, "src", "changed.ts"), "utf8"), "source-change\n");
@@ -102,11 +105,181 @@ test("createManagedWorkspace seeds source checkout changes into a jj workspace a
 
 	const cleanupRoot = workspace.cleanupRoot;
 	await workspace.cleanup();
-	assert.ok(
-		calls.some(
-			(call) => call.command === "jj" && call.args[0] === "workspace" && call.args[1] === "forget" && call.cwd === root,
-		),
+	const forgetCall = calls.find(
+		(call) => call.command === "jj" && call.args[0] === "workspace" && call.args[1] === "forget" && call.cwd === root,
 	);
+	assert.ok(forgetCall);
+	assert.deepEqual(forgetCall.args, ["workspace", "forget", workspace.workspaceName]);
+	assert.notEqual(forgetCall.args[2], workspace.cwd);
+	assert.equal(await pathExists(cleanupRoot), false);
+});
+
+test("createManagedWorkspace gives same-label jj workspaces distinct generated names", async () => {
+	const root = await createRepoRoot("guided-discovery-jj-workspace-");
+
+	const calls: Array<{ command: string; args: string[]; cwd?: string }> = [];
+	const exec: ExecLike = async (command, args, options) => {
+		calls.push({ command, args, cwd: options?.cwd });
+		if (command === "jj" && args[0] === "workspace" && args[1] === "add") {
+			const workspacePath = args[2];
+			await mkdir(join(workspacePath, ".jj"), { recursive: true });
+			return { stdout: "", stderr: "", code: 0 };
+		}
+		if (command === "jj" && args[0] === "new") {
+			return { stdout: "", stderr: "", code: 0 };
+		}
+		if (command === "jj" && args[0] === "diff" && args[1] === "--summary" && options?.cwd === root) {
+			return { stdout: "", stderr: "", code: 0 };
+		}
+		if (command === "jj" && args[0] === "workspace" && args[1] === "forget") {
+			return { stdout: "", stderr: "", code: 0 };
+		}
+		return { stdout: "", stderr: "", code: 0 };
+	};
+
+	const [{ workspace: first }, { workspace: second }] = await Promise.all([
+		createManagedWorkspace({
+			exec,
+			sourceCwd: root,
+			label: "phase-1",
+		}),
+		createManagedWorkspace({
+			exec,
+			sourceCwd: root,
+			label: "phase-1",
+		}),
+	]);
+
+	assert.notEqual(first.workspaceName, second.workspaceName);
+	assert.equal(basename(first.cwd), first.workspaceName);
+	assert.equal(basename(second.cwd), second.workspaceName);
+	assert.notEqual(first.workspaceName, "workspace");
+	assert.notEqual(second.workspaceName, "workspace");
+
+	await Promise.all([first.cleanup(), second.cleanup()]);
+
+	assert.deepEqual(
+		calls
+			.filter((call) => call.command === "jj" && call.args[0] === "workspace" && call.args[1] === "forget")
+			.map((call) => call.args[2])
+			.sort(),
+		[first.workspaceName, second.workspaceName].sort(),
+	);
+});
+
+test("createManagedWorkspace bounds cleanup-root names for long labels", async () => {
+	const root = await createRepoRoot("guided-discovery-jj-workspace-");
+	const longLabel = `phase-${"very-long-segment-".repeat(40)}`;
+
+	const exec: ExecLike = async (command, args, options) => {
+		if (command === "jj" && args[0] === "workspace" && args[1] === "add") {
+			const workspacePath = args[2];
+			await mkdir(join(workspacePath, ".jj"), { recursive: true });
+			return { stdout: "", stderr: "", code: 0 };
+		}
+		if (command === "jj" && args[0] === "new") {
+			return { stdout: "", stderr: "", code: 0 };
+		}
+		if (command === "jj" && args[0] === "diff" && args[1] === "--summary" && options?.cwd === root) {
+			return { stdout: "", stderr: "", code: 0 };
+		}
+		if (command === "jj" && args[0] === "workspace" && args[1] === "forget") {
+			return { stdout: "", stderr: "", code: 0 };
+		}
+		return { stdout: "", stderr: "", code: 0 };
+	};
+
+	const { workspace } = await createManagedWorkspace({
+		exec,
+		sourceCwd: root,
+		label: longLabel,
+	});
+
+	assert.ok(basename(workspace.cleanupRoot).length <= 64);
+	assert.ok(workspace.workspaceName.length <= 80);
+
+	await workspace.cleanup();
+});
+
+test("createManagedWorkspace does not forget a jj workspace when add fails before registration", async () => {
+	const root = await createRepoRoot("guided-discovery-jj-workspace-");
+
+	const calls: Array<{ command: string; args: string[]; cwd?: string }> = [];
+	let workspacePath = "";
+	const exec: ExecLike = async (command, args, options) => {
+		calls.push({ command, args, cwd: options?.cwd });
+		if (command === "jj" && args[0] === "workspace" && args[1] === "add") {
+			workspacePath = args[2];
+			return { stdout: "", stderr: "workspace already exists\n", code: 1 };
+		}
+		if (command === "jj" && args[0] === "workspace" && args[1] === "forget") {
+			return { stdout: "", stderr: "", code: 0 };
+		}
+		return { stdout: "", stderr: "", code: 0 };
+	};
+
+	await assert.rejects(
+		createManagedWorkspace({
+			exec,
+			sourceCwd: root,
+			label: "run",
+		}),
+		/workspace already exists/,
+	);
+
+	assert.ok(workspacePath);
+	assert.equal(
+		calls.some((call) => call.command === "jj" && call.args[0] === "workspace" && call.args[1] === "forget"),
+		false,
+	);
+	assert.equal(await pathExists(dirname(workspacePath)), false);
+});
+
+test("createManagedWorkspace cleans up a jj workspace when setup fails after creation", async () => {
+	const root = await createRepoRoot("guided-discovery-jj-workspace-");
+	const sourceCwd = join(root, "src");
+	await writeFile(join(sourceCwd, "changed.ts"), "source-change\n", "utf8");
+	const outside = await mkdtemp(join(tmpdir(), "guided-discovery-outside-"));
+
+	const calls: Array<{ command: string; args: string[]; cwd?: string }> = [];
+	let workspacePath = "";
+	const exec: ExecLike = async (command, args, options) => {
+		calls.push({ command, args, cwd: options?.cwd });
+		if (command === "jj" && args[0] === "workspace" && args[1] === "add") {
+			workspacePath = args[2];
+			await mkdir(join(workspacePath, ".jj"), { recursive: true });
+			await symlink(outside, join(workspacePath, "src"), "dir");
+			return { stdout: "", stderr: "", code: 0 };
+		}
+		if (command === "jj" && args[0] === "new") {
+			return { stdout: "", stderr: "", code: 0 };
+		}
+		if (command === "jj" && args[0] === "diff" && args[1] === "--summary" && options?.cwd === root) {
+			return { stdout: "M src/changed.ts\n", stderr: "", code: 0 };
+		}
+		if (command === "jj" && args[0] === "workspace" && args[1] === "forget") {
+			return { stdout: "", stderr: "", code: 0 };
+		}
+		return { stdout: "", stderr: "", code: 0 };
+	};
+
+	await assert.rejects(
+		createManagedWorkspace({
+			exec,
+			sourceCwd,
+			label: "run",
+		}),
+		/Refusing to sync workspace path outside the workspace root: src\/changed\.ts/,
+	);
+
+	assert.ok(workspacePath);
+	const workspaceName = basename(workspacePath);
+	const cleanupRoot = dirname(workspacePath);
+	const forgetCall = calls.find(
+		(call) => call.command === "jj" && call.args[0] === "workspace" && call.args[1] === "forget",
+	);
+	assert.ok(forgetCall);
+	assert.deepEqual(forgetCall.args, ["workspace", "forget", workspaceName]);
 	assert.equal(await pathExists(cleanupRoot), false);
 });
 
@@ -240,6 +413,90 @@ test("createChildWorkspace baseline includes seeded changes outside the touched 
 	assert.equal(await readFile(join(child.workspace.cwd, "package.json"), "utf8"), '{"name":"changed"}\n');
 
 	await child.workspace.cleanup();
+});
+
+test("createChildWorkspace cleans up its jj workspace when baseline snapshot creation fails", async () => {
+	const root = await createRepoRoot("guided-discovery-child-workspace-");
+	await writeFile(join(root, "src", "changed.ts"), "source-change\n", "utf8");
+	const outside = await mkdtemp(join(tmpdir(), "guided-discovery-outside-"));
+
+	const calls: Array<{ command: string; args: string[]; cwd?: string }> = [];
+	let workspacePath = "";
+	let mutationScheduled = false;
+	let mutationResolved = false;
+	let resolveMutation!: () => void;
+	let rejectMutation!: (error: unknown) => void;
+	const mutationDone = new Promise<void>((resolve, reject) => {
+		resolveMutation = resolve;
+		rejectMutation = reject;
+	});
+	const mutateWorkspaceAfterSeed = async (attempt = 0): Promise<void> => {
+		if (mutationResolved) return;
+		try {
+			if (attempt > 200) {
+				throw new Error("Timed out waiting to sabotage the child workspace baseline snapshot.");
+			}
+			const targetFile = join(workspacePath, "src", "changed.ts");
+			const targetContents = await readFile(targetFile, "utf8").catch(() => "");
+			if (targetContents !== "source-change\n") {
+				setImmediate(() => {
+					void mutateWorkspaceAfterSeed(attempt + 1);
+				});
+				return;
+			}
+			mutationResolved = true;
+			await rm(join(workspacePath, "src"), { recursive: true, force: true });
+			await symlink(outside, join(workspacePath, "src"), "dir");
+			resolveMutation();
+		} catch (error) {
+			mutationResolved = true;
+			rejectMutation(error);
+		}
+	};
+	const exec: ExecLike = async (command, args, options) => {
+		calls.push({ command, args, cwd: options?.cwd });
+		if (command === "jj" && args[0] === "workspace" && args[1] === "add") {
+			workspacePath = args[2];
+			await mkdir(join(workspacePath, ".jj"), { recursive: true });
+			await mkdir(join(workspacePath, "src"), { recursive: true });
+			await writeFile(join(workspacePath, "src", "changed.ts"), "baseline\n", "utf8");
+			return { stdout: "", stderr: "", code: 0 };
+		}
+		if (command === "jj" && args[0] === "new") return { stdout: "", stderr: "", code: 0 };
+		if (command === "jj" && args[0] === "diff" && args[1] === "--summary" && options?.cwd === root) {
+			if (!mutationScheduled) {
+				mutationScheduled = true;
+				setImmediate(() => {
+					void mutateWorkspaceAfterSeed();
+				});
+			}
+			return { stdout: "M src/changed.ts\n", stderr: "", code: 0 };
+		}
+		if (command === "jj" && args[0] === "workspace" && args[1] === "forget") {
+			return { stdout: "", stderr: "", code: 0 };
+		}
+		return { stdout: "", stderr: "", code: 0 };
+	};
+
+	await assert.rejects(
+		createChildWorkspace({
+			exec,
+			parentCwd: root,
+			label: "phase-1",
+			touchedPaths: ["missing"],
+		}),
+	);
+	await mutationDone;
+
+	assert.ok(workspacePath);
+	const workspaceName = basename(workspacePath);
+	const cleanupRoot = dirname(workspacePath);
+	const forgetCall = calls.find(
+		(call) => call.command === "jj" && call.args[0] === "workspace" && call.args[1] === "forget",
+	);
+	assert.ok(forgetCall);
+	assert.deepEqual(forgetCall.args, ["workspace", "forget", workspaceName]);
+	assert.equal(await pathExists(cleanupRoot), false);
 });
 
 test("createWorkspaceSnapshot ignores escaping touched paths", async () => {

@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import {
 	QUALITY_SUITE_MAX_EXTRA_ROUNDS,
 	QUALITY_SUITE_MAX_ROUNDS,
@@ -14,6 +14,7 @@ import {
 	hasVerifiedLegacyCleanupRemoval,
 	materializeWorkflowPlan,
 	parseImplementationRequest,
+	runGuidedDiscoveryImplementationWorkflow,
 	partitionValidationDiscrepancies,
 	pickRemediationPrompt,
 	pickWorkerPromptForPhase,
@@ -116,6 +117,21 @@ function qualitySummary(overrides: Partial<WorkflowQualitySummary> = {}): Workfl
 				"merged result after selected validator remediation",
 			],
 	};
+}
+
+async function createJjRepoRoot(prefix: string): Promise<string> {
+	const root = await mkdtemp(join(tmpdir(), prefix));
+	await mkdir(join(root, ".jj"), { recursive: true });
+	return root;
+}
+
+async function pathExists(path: string): Promise<boolean> {
+	try {
+		await stat(path);
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 test("shouldRunDesignReview honors explicit design metadata and fallback heuristics", () => {
@@ -998,4 +1014,57 @@ test("materializeWorkflowPlan synthesizes a workflow-local plan from a raw promp
 	assert.match(requestContext, /Add a standalone \/sync command and keep the UI minimal\./);
 	assert.match(requestContext, /## Additional instructions/);
 	assert.match(requestContext, /Reuse the existing command patterns\./);
+});
+
+test("runGuidedDiscoveryImplementationWorkflow cleans up the run workspace when refresh fails before setup completes", async () => {
+	const root = await createJjRepoRoot("guided-discovery-workflow-run-");
+
+	const calls: Array<{ command: string; args: string[]; cwd?: string }> = [];
+	let workspacePath = "";
+	const pi = {
+		exec: async (command: string, args: string[], options?: { cwd?: string; timeout?: number }) => {
+			calls.push({ command, args, cwd: options?.cwd });
+			if (command === "jj" && args[0] === "workspace" && args[1] === "add") {
+				workspacePath = args[2];
+				await mkdir(join(workspacePath, ".jj"), { recursive: true });
+				return { stdout: "", stderr: "", code: 0 };
+			}
+			if (command === "jj" && args[0] === "new") {
+				return { stdout: "", stderr: "", code: 0 };
+			}
+			if (command === "jj" && args[0] === "diff" && args[1] === "--summary" && options?.cwd === root) {
+				return { stdout: "", stderr: "", code: 0 };
+			}
+			if (command === "jj" && args[0] === "workspace" && args[1] === "update-stale") {
+				return { stdout: "", stderr: "refresh failed\n", code: 1 };
+			}
+			if (command === "jj" && args[0] === "workspace" && args[1] === "forget") {
+				return { stdout: "", stderr: "", code: 0 };
+			}
+			return { stdout: "", stderr: "", code: 0 };
+		},
+		getThinkingLevel: () => undefined,
+	} as any;
+	const ctx = {
+		cwd: root,
+		hasUI: false,
+		modelRegistry: { getAvailable: () => [] },
+	} as any;
+
+	await assert.rejects(
+		runGuidedDiscoveryImplementationWorkflow(pi, ctx, {
+			extraInstructions: "",
+		}),
+		/refresh failed/,
+	);
+
+	assert.ok(workspacePath);
+	const workspaceName = basename(workspacePath);
+	const cleanupRoot = dirname(workspacePath);
+	const forgetCall = calls.find(
+		(call) => call.command === "jj" && call.args[0] === "workspace" && call.args[1] === "forget",
+	);
+	assert.ok(forgetCall);
+	assert.deepEqual(forgetCall.args, ["workspace", "forget", workspaceName]);
+	assert.equal(await pathExists(cleanupRoot), false);
 });

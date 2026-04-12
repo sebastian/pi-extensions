@@ -1360,6 +1360,48 @@ function emitLoopTraversal(
 	});
 }
 
+function formatErrorMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+async function runBestEffortWorkflowCleanup(options: {
+	tempDir: string;
+	runWorkspace?: ManagedWorkspace;
+	onUpdate?: WorkflowOptions["onUpdate"];
+	stage: "complete" | "failed";
+}): Promise<void> {
+	const cleanupFailures: string[] = [];
+	if (options.tempDir) {
+		try {
+			await rm(options.tempDir, { recursive: true, force: true });
+		} catch (error) {
+			cleanupFailures.push(`Failed to remove workflow temp dir ${options.tempDir}: ${formatErrorMessage(error)}`);
+		}
+	}
+	if (options.runWorkspace) {
+		try {
+			await options.runWorkspace.cleanup();
+		} catch (error) {
+			cleanupFailures.push(
+				`Failed to clean up isolated workspace ${options.runWorkspace.cwd}: ${formatErrorMessage(error)}`,
+			);
+		}
+	}
+	if (cleanupFailures.length === 0) return;
+	try {
+		emitWorkflowUpdate(options.onUpdate, {
+			type: "detail-lines",
+			stage: options.stage,
+			lines: ["Best-effort workflow cleanup reported issues:", ...cleanupFailures.map((message) => `- ${message}`)],
+			context: {
+				note: "Workflow cleanup reported issues",
+			},
+		});
+	} catch {
+		// Cleanup reporting must stay best-effort too so it never overrides the workflow outcome.
+	}
+}
+
 async function writeChildConflictReferenceFiles(options: {
 	tempDir: string;
 	prefix: string;
@@ -3855,15 +3897,11 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 ): Promise<WorkflowSummary> {
 	const originalRepoRoot = findRepoRoot(ctx.cwd);
 	const exec = makeExec(pi);
-	const { workspace: runWorkspace, seededChangedFiles: initialSeededChangedFiles } = await createManagedWorkspace({
-		exec,
-		sourceCwd: ctx.cwd,
-		label: "run",
-	});
-	await runWorkspace.refresh();
-	const workspaceRepoRoot = runWorkspace.repoRoot;
-	const workspaceRelativeCwd = runWorkspace.sourceRelativeCwd;
-	const workflowCwd = resolve(runWorkspace.cwd, workspaceRelativeCwd);
+	let runWorkspace: ManagedWorkspace | undefined;
+	let initialSeededChangedFiles: string[] = [];
+	let workspaceRepoRoot = "";
+	let workspaceRelativeCwd = "";
+	let workflowCwd = "";
 	let tempDir = "";
 	const workflowModels = resolveWorkflowModels(ctx);
 	const primaryModel = workflowModels.primary;
@@ -3872,29 +3910,42 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 
 	const reviewModels = checkerModels.length > 0 ? checkerModels : primaryModel ? [primaryModel] : [];
 	let activeNode: WorkflowNodeId | undefined;
+	let cleanupReportStage: "complete" | "failed" = "failed";
 	let runWorkspaceIntegrated = false;
 	const agentsCheckExecutionPolicies = new Map<string, AgentsCheckExecutionPolicy>();
 	let handleRunWorkspaceIntegration: (() => Promise<void>) | undefined;
 
-	emitWorkflowUpdate(options.onUpdate, {
-		type: "workflow-start",
-		stage: "starting",
-		lines: [
-			options.rawPrompt?.trim()
-				? "Synthesizing a lightweight plan in an isolated workspace."
-				: `Using ${options.planPath} as the approved source of truth in an isolated workspace.`,
-			`Workspace: ${runWorkspace.kind} @ ${runWorkspace.cwd}`,
-			`Seeded source checkout changes: ${initialSeededChangedFiles.length > 0 ? summarizePaths(initialSeededChangedFiles) : "none"}`,
-			`Primary model: ${primaryModel ?? "default"}`,
-			`Checker models: ${reviewModels.length > 0 ? reviewModels.join(", ") : primaryModel ?? "default"}`,
-		],
-		context: {
-			checkerModels: reviewModels,
-			note: "Sub-agent implementation workflow starting",
-		},
-	});
-
 	try {
+		const managedRunWorkspace = await createManagedWorkspace({
+			exec,
+			sourceCwd: ctx.cwd,
+			label: "run",
+		});
+		runWorkspace = managedRunWorkspace.workspace;
+		initialSeededChangedFiles = managedRunWorkspace.seededChangedFiles;
+		await runWorkspace.refresh();
+		workspaceRepoRoot = runWorkspace.repoRoot;
+		workspaceRelativeCwd = runWorkspace.sourceRelativeCwd;
+		workflowCwd = resolve(runWorkspace.cwd, workspaceRelativeCwd);
+
+		emitWorkflowUpdate(options.onUpdate, {
+			type: "workflow-start",
+			stage: "starting",
+			lines: [
+				options.rawPrompt?.trim()
+					? "Synthesizing a lightweight plan in an isolated workspace."
+					: `Using ${options.planPath} as the approved source of truth in an isolated workspace.`,
+				`Workspace: ${runWorkspace.kind} @ ${runWorkspace.cwd}`,
+				`Seeded source checkout changes: ${initialSeededChangedFiles.length > 0 ? summarizePaths(initialSeededChangedFiles) : "none"}`,
+				`Primary model: ${primaryModel ?? "default"}`,
+				`Checker models: ${reviewModels.length > 0 ? reviewModels.join(", ") : primaryModel ?? "default"}`,
+			],
+			context: {
+				checkerModels: reviewModels,
+				note: "Sub-agent implementation workflow starting",
+			},
+		});
+
 		const originalCheckoutBaseline = await createWorkspaceSnapshot({
 			cwd: originalRepoRoot,
 			touchedPaths: [],
@@ -4502,6 +4553,7 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 					note: "Workflow handed back to discovery mode",
 				},
 			});
+			cleanupReportStage = "complete";
 			return {
 				decision: "reformulate",
 				summary,
@@ -4704,6 +4756,7 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 				note: "Workflow completed",
 			},
 		});
+		cleanupReportStage = "complete";
 		return {
 			decision: "done",
 			summary,
@@ -4719,6 +4772,7 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 					note: "Workflow handed back to discovery mode after quality-suite reformulation choice",
 				},
 			});
+			cleanupReportStage = "complete";
 			return {
 				decision: "reformulate",
 				summary: error.summary,
@@ -4737,7 +4791,11 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 		});
 		throw error;
 	} finally {
-		if (tempDir) await rm(tempDir, { recursive: true, force: true });
-		await runWorkspace.cleanup();
+		await runBestEffortWorkflowCleanup({
+			tempDir,
+			runWorkspace,
+			onUpdate: options.onUpdate,
+			stage: cleanupReportStage,
+		});
 	}
 }

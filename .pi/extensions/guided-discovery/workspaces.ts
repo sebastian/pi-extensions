@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { copyFile, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
@@ -9,6 +9,7 @@ export type WorkspaceRepoKind = "jj" | "git";
 
 export interface ManagedWorkspace {
 	kind: WorkspaceRepoKind;
+	workspaceName: string;
 	cwd: string;
 	repoRoot: string;
 	sourceRepoRoot: string;
@@ -49,9 +50,27 @@ async function pathExists(path: string): Promise<boolean> {
 	}
 }
 
+const WORKSPACE_LABEL_MAX_LENGTH = 48;
+const CLEANUP_ROOT_LABEL_MAX_LENGTH = 24;
+
 function sanitizeWorkspaceLabel(label: string): string {
 	const sanitized = label.replace(/[^a-z0-9]+/gi, "-").toLowerCase().replace(/^-+|-+$/g, "");
 	return sanitized || "workspace";
+}
+
+function createWorkspaceLabelSegment(label: string, maxLength: number): string {
+	return sanitizeWorkspaceLabel(label).slice(0, maxLength).replace(/-+$/g, "") || "workspace";
+}
+
+function createWorkspaceName(label: string): string {
+	const sanitizedLabel = createWorkspaceLabelSegment(label, WORKSPACE_LABEL_MAX_LENGTH);
+	const suffix = randomBytes(4).toString("hex");
+	return `guided-discovery-${sanitizedLabel}-${suffix}`;
+}
+
+function createCleanupRootPrefix(label: string): string {
+	const sanitizedLabel = createWorkspaceLabelSegment(label, CLEANUP_ROOT_LABEL_MAX_LENGTH);
+	return join(tmpdir(), `guided-discovery-${sanitizedLabel}-`);
 }
 
 function normalizeWorkspaceRelativeDirectory(repoRoot: string, cwd: string): string {
@@ -192,11 +211,17 @@ export function workspaceRevisionChanged(expected: WorkspaceRevision, actual: Wo
 	return expected.kind !== actual.kind || expected.revision !== actual.revision;
 }
 
-async function createJjWorkspace(exec: ExecLike, repoRoot: string, workspacePath: string): Promise<void> {
+async function createJjWorkspace(
+	exec: ExecLike,
+	repoRoot: string,
+	workspacePath: string,
+	onWorkspaceRegistered?: () => void,
+): Promise<void> {
 	const createResult = await exec("jj", ["workspace", "add", workspacePath], { cwd: repoRoot, timeout: 60_000 });
 	if (createResult.code !== 0) {
 		throw new Error(createResult.stderr || createResult.stdout || `Failed to create jj workspace at ${workspacePath}`);
 	}
+	onWorkspaceRegistered?.();
 	const newResult = await exec("jj", ["new"], { cwd: workspacePath, timeout: 60_000 });
 	if (newResult.code !== 0) {
 		throw new Error(newResult.stderr || newResult.stdout || `Failed to create a new jj change in ${workspacePath}`);
@@ -237,11 +262,19 @@ export async function refreshManagedWorkspace(workspace: Pick<ManagedWorkspace, 
 	}
 }
 
-async function cleanupJjWorkspace(exec: ExecLike, repoRoot: string, workspacePath: string): Promise<void> {
-	try {
-		await exec("jj", ["workspace", "forget", workspacePath], { cwd: repoRoot, timeout: 60_000 });
-	} catch {
-		// best effort
+async function cleanupJjWorkspace(
+	exec: ExecLike,
+	repoRoot: string,
+	workspaceName: string,
+	workspacePath: string,
+	workspaceRegistered: boolean,
+): Promise<void> {
+	if (workspaceRegistered) {
+		try {
+			await exec("jj", ["workspace", "forget", workspaceName], { cwd: repoRoot, timeout: 60_000 });
+		} catch {
+			// best effort
+		}
 	}
 	await rm(workspacePath, { recursive: true, force: true });
 }
@@ -253,6 +286,32 @@ async function cleanupGitWorkspace(exec: ExecLike, repoRoot: string, workspacePa
 		// best effort
 	}
 	await rm(workspacePath, { recursive: true, force: true });
+}
+
+async function cleanupManagedWorkspace(options: {
+	exec: ExecLike;
+	kind: WorkspaceRepoKind;
+	repoRoot: string;
+	workspaceName: string;
+	workspacePath: string;
+	cleanupRoot: string;
+	jjWorkspaceRegistered: boolean;
+}): Promise<void> {
+	try {
+		if (options.kind === "jj") {
+			await cleanupJjWorkspace(
+				options.exec,
+				options.repoRoot,
+				options.workspaceName,
+				options.workspacePath,
+				options.jjWorkspaceRegistered,
+			);
+		} else {
+			await cleanupGitWorkspace(options.exec, options.repoRoot, options.workspacePath);
+		}
+	} finally {
+		await rm(options.cleanupRoot, { recursive: true, force: true });
+	}
 }
 
 async function seedWorkspaceFromSource(exec: ExecLike, sourceCwd: string, targetRepoRoot: string): Promise<string[]> {
@@ -270,31 +329,59 @@ export async function createManagedWorkspace(options: {
 	const sourceCwd = resolve(options.sourceCwd);
 	const sourceRepoRoot = findRepoRootOrSelf(sourceCwd);
 	const kind = detectWorkspaceRepoKind(sourceCwd);
-	const cleanupRoot = await mkdtemp(join(tmpdir(), `guided-discovery-${sanitizeWorkspaceLabel(options.label)}-`));
-	const workspacePath = join(cleanupRoot, "workspace");
-	if (kind === "jj") await createJjWorkspace(options.exec, sourceRepoRoot, workspacePath);
-	else await createGitWorkspace(options.exec, sourceRepoRoot, workspacePath);
-	const repoRoot = findRepoRootOrSelf(workspacePath);
-	const seededChangedFiles = await seedWorkspaceFromSource(options.exec, sourceCwd, repoRoot);
-	const workspace: ManagedWorkspace = {
-		kind,
-		cwd: workspacePath,
-		repoRoot,
-		sourceRepoRoot,
-		sourceCwd,
-		sourceRelativeCwd: normalizeWorkspaceRelativeDirectory(sourceRepoRoot, sourceCwd),
-		cleanupRoot,
-		seededChangedFiles: [...seededChangedFiles],
-		refresh: async () => {
-			await refreshManagedWorkspace({ kind, repoRoot }, options.exec);
-		},
-		cleanup: async () => {
-			if (kind === "jj") await cleanupJjWorkspace(options.exec, sourceRepoRoot, workspacePath);
-			else await cleanupGitWorkspace(options.exec, sourceRepoRoot, workspacePath);
-			await rm(cleanupRoot, { recursive: true, force: true });
-		},
-	};
-	return { workspace, seededChangedFiles };
+	const workspaceName = createWorkspaceName(options.label);
+	const cleanupRoot = await mkdtemp(createCleanupRootPrefix(options.label));
+	const workspacePath = join(cleanupRoot, workspaceName);
+	let jjWorkspaceRegistered = false;
+
+	try {
+		if (kind === "jj") {
+			await createJjWorkspace(options.exec, sourceRepoRoot, workspacePath, () => {
+				jjWorkspaceRegistered = true;
+			});
+		} else {
+			await createGitWorkspace(options.exec, sourceRepoRoot, workspacePath);
+		}
+		const repoRoot = findRepoRootOrSelf(workspacePath);
+		const seededChangedFiles = await seedWorkspaceFromSource(options.exec, sourceCwd, repoRoot);
+		const workspace: ManagedWorkspace = {
+			kind,
+			workspaceName,
+			cwd: workspacePath,
+			repoRoot,
+			sourceRepoRoot,
+			sourceCwd,
+			sourceRelativeCwd: normalizeWorkspaceRelativeDirectory(sourceRepoRoot, sourceCwd),
+			cleanupRoot,
+			seededChangedFiles: [...seededChangedFiles],
+			refresh: async () => {
+				await refreshManagedWorkspace({ kind, repoRoot }, options.exec);
+			},
+			cleanup: async () => {
+				await cleanupManagedWorkspace({
+					exec: options.exec,
+					kind,
+					repoRoot: sourceRepoRoot,
+					workspaceName,
+					workspacePath,
+					cleanupRoot,
+					jjWorkspaceRegistered,
+				});
+			},
+		};
+		return { workspace, seededChangedFiles };
+	} catch (error) {
+		await cleanupManagedWorkspace({
+			exec: options.exec,
+			kind,
+			repoRoot: sourceRepoRoot,
+			workspaceName,
+			workspacePath,
+			cleanupRoot,
+			jjWorkspaceRegistered,
+		}).catch(() => {});
+		throw error;
+	}
 }
 
 export async function createChildWorkspace(options: {
@@ -308,12 +395,17 @@ export async function createChildWorkspace(options: {
 		sourceCwd: options.parentCwd,
 		label: options.label,
 	});
-	const baseline = await createWorkspaceSnapshot({
-		cwd: workspace.repoRoot,
-		touchedPaths: options.touchedPaths,
-		seededChangedFiles,
-	});
-	return { workspace, baseline, seededChangedFiles };
+	try {
+		const baseline = await createWorkspaceSnapshot({
+			cwd: workspace.repoRoot,
+			touchedPaths: options.touchedPaths,
+			seededChangedFiles,
+		});
+		return { workspace, baseline, seededChangedFiles };
+	} catch (error) {
+		await workspace.cleanup().catch(() => {});
+		throw error;
+	}
 }
 
 export async function planWorkspaceIntegration(options: {
