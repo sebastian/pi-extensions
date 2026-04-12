@@ -1,6 +1,6 @@
 import type { Theme, ThemeColor } from "@mariozechner/pi-coding-agent";
 import type { Component, TUI } from "@mariozechner/pi-tui";
-import { truncateToWidth, visibleWidth } from "./tui-compat.ts";
+import { padToWidth, truncateToWidth, visibleWidth } from "./tui-compat.ts";
 import {
 	WORKFLOW_EDGE_META,
 	type ImplementationProgressSnapshot,
@@ -420,7 +420,10 @@ function renderBottomBorder(theme: Theme, innerWidth: number): string {
 }
 
 function frameBodyLines(theme: Theme, lines: string[], innerWidth: number): string[] {
-	return lines.map((line) => theme.fg("border", "│") + truncateToWidth(line, innerWidth, "…", true) + theme.fg("border", "│"));
+	return lines.map((line) => {
+		const fitted = padToWidth(truncateToWidth(line, innerWidth, "…", true), innerWidth);
+		return theme.fg("border", "│") + fitted + theme.fg("border", "│");
+	});
 }
 
 export function renderImplementationProgressSnapshot(
