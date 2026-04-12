@@ -13,6 +13,7 @@ export interface SubagentInvocation {
 	thinkingLevel?: string;
 	signal?: AbortSignal;
 	onEvent?: (event: SubagentEvent) => void;
+	onUsage?: (usage: SubagentUsageTotals) => void;
 }
 
 export interface SubagentEvent {
@@ -22,6 +23,16 @@ export interface SubagentEvent {
 	args?: unknown;
 }
 
+export interface SubagentUsageTotals {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	totalTokens: number;
+	cost: number;
+	turns: number;
+}
+
 export interface SubagentRunResult {
 	exitCode: number;
 	stderr: string;
@@ -29,6 +40,7 @@ export interface SubagentRunResult {
 	assistantText: string;
 	stopReason?: string;
 	errorMessage?: string;
+	usage: SubagentUsageTotals;
 }
 
 function getPiInvocation(args: string[]): { command: string; args: string[] } {
@@ -78,6 +90,36 @@ function parseEventLine(line: string): Record<string, unknown> | null {
 	}
 }
 
+function emptySubagentUsageTotals(): SubagentUsageTotals {
+	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: 0, turns: 0 };
+}
+
+function extractAssistantUsage(message: Message): SubagentUsageTotals {
+	if (message.role !== "assistant") return emptySubagentUsageTotals();
+	const usage = (message as Message & { usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; totalTokens?: number; cost?: { total?: number } } }).usage;
+	return {
+		input: usage?.input ?? 0,
+		output: usage?.output ?? 0,
+		cacheRead: usage?.cacheRead ?? 0,
+		cacheWrite: usage?.cacheWrite ?? 0,
+		totalTokens: usage?.totalTokens ?? 0,
+		cost: usage?.cost?.total ?? 0,
+		turns: 1,
+	};
+}
+
+function addSubagentUsageTotals(total: SubagentUsageTotals, delta: SubagentUsageTotals): SubagentUsageTotals {
+	return {
+		input: total.input + delta.input,
+		output: total.output + delta.output,
+		cacheRead: total.cacheRead + delta.cacheRead,
+		cacheWrite: total.cacheWrite + delta.cacheWrite,
+		totalTokens: total.totalTokens + delta.totalTokens,
+		cost: total.cost + delta.cost,
+		turns: total.turns + delta.turns,
+	};
+}
+
 export async function runSubagent(invocation: SubagentInvocation): Promise<SubagentRunResult> {
 	const args = [
 		"--mode",
@@ -119,6 +161,7 @@ export async function runSubagent(invocation: SubagentInvocation): Promise<Subag
 		const collectedMessages: Message[] = [];
 		let stopReason: string | undefined;
 		let errorMessage: string | undefined;
+		let usage = emptySubagentUsageTotals();
 		let aborted = false;
 
 		const processEvent = (event: Record<string, unknown>) => {
@@ -136,7 +179,11 @@ export async function runSubagent(invocation: SubagentInvocation): Promise<Subag
 					if (message && isObject(message)) {
 						collectedMessages.push(message as Message);
 						if (message.role === "assistant") {
-							const assistantText = getAssistantText([message as Message]);
+							const assistantMessage = message as Message;
+							const assistantText = getAssistantText([assistantMessage]);
+							const usageDelta = extractAssistantUsage(assistantMessage);
+							usage = addSubagentUsageTotals(usage, usageDelta);
+							if (usageDelta.turns) invocation.onUsage?.(usageDelta);
 							if (assistantText) invocation.onEvent?.({ type: "assistant", message: assistantText });
 							if (typeof message.stopReason === "string") stopReason = message.stopReason;
 							if (typeof message.errorMessage === "string") errorMessage = message.errorMessage;
@@ -191,6 +238,7 @@ export async function runSubagent(invocation: SubagentInvocation): Promise<Subag
 				assistantText: getAssistantText(messages),
 				stopReason,
 				errorMessage,
+				usage,
 			});
 		});
 

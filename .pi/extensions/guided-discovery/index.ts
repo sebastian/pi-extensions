@@ -2,6 +2,7 @@ import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { AssistantMessage, TextContent } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Key } from "@mariozechner/pi-tui";
+import { padToWidth, truncateToWidth, visibleWidth } from "./tui-compat.ts";
 import { access, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import {
@@ -17,6 +18,7 @@ import {
 	type WorkflowProgressUpdate,
 } from "./implementation-progress.ts";
 import { createImplementationProgressWidget } from "./implementation-progress-widget.ts";
+import type { SubagentUsageTotals } from "./subagent-runner.ts";
 import registerQuestionnaire from "./questionnaire.ts";
 import {
 	type ResearchSource,
@@ -65,6 +67,35 @@ interface SavedState {
 	previousActiveTools?: string[] | null;
 	lastSavedPlanSignature?: string | null;
 	researchSources?: ResearchSource[] | null;
+	subagentUsageTotals?: SubagentUsageTotals | null;
+}
+
+function emptySubagentUsageTotals(): SubagentUsageTotals {
+	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: 0, turns: 0 };
+}
+
+function addSubagentUsageTotals(total: SubagentUsageTotals, delta: SubagentUsageTotals): SubagentUsageTotals {
+	return {
+		input: total.input + delta.input,
+		output: total.output + delta.output,
+		cacheRead: total.cacheRead + delta.cacheRead,
+		cacheWrite: total.cacheWrite + delta.cacheWrite,
+		totalTokens: total.totalTokens + delta.totalTokens,
+		cost: total.cost + delta.cost,
+		turns: total.turns + delta.turns,
+	};
+}
+
+function hasSubagentUsageTotals(usage: SubagentUsageTotals): boolean {
+	return Boolean(usage.input || usage.output || usage.cacheRead || usage.cacheWrite || usage.cost || usage.turns);
+}
+
+function formatTokens(count: number): string {
+	if (count < 1000) return count.toString();
+	if (count < 10000) return (count / 1000).toFixed(1) + "k";
+	if (count < 1000000) return Math.round(count / 1000) + "k";
+	if (count < 10000000) return (count / 1000000).toFixed(1) + "M";
+	return Math.round(count / 1000000) + "M";
 }
 
 function normalizeToolList(names: string[] | null | undefined): string[] | null {
@@ -132,6 +163,9 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 	let previousActiveTools: string[] | null = null;
 	let researchSources: ResearchSource[] = [];
 	let lastSavedPlanSignature: string | null = null;
+	let subagentUsageTotals = emptySubagentUsageTotals();
+	let subagentWorkflowActive = false;
+	let ownsFooter = false;
 
 	function persistState(): void {
 		pi.appendEntry(STATE_TYPE, {
@@ -139,13 +173,122 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 			previousActiveTools,
 			lastSavedPlanSignature,
 			researchSources,
+			subagentUsageTotals,
 		} satisfies SavedState);
+	}
+
+	function collectSessionAssistantUsage(ctx: ExtensionContext): SubagentUsageTotals {
+		let total = emptySubagentUsageTotals();
+		const entries = ctx.sessionManager.getEntries() as any[];
+		for (const entry of entries) {
+			if (entry.type !== "message" || !entry.message || entry.message.role !== "assistant") continue;
+			const message = entry.message as AssistantMessage;
+			total = addSubagentUsageTotals(total, {
+				input: message.usage.input,
+				output: message.usage.output,
+				cacheRead: message.usage.cacheRead,
+				cacheWrite: message.usage.cacheWrite,
+				totalTokens: message.usage.totalTokens,
+				cost: message.usage.cost.total,
+				turns: 1,
+			});
+		}
+		return total;
+	}
+
+	function sanitizeFooterText(text: string): string {
+	const controlChars = [String.fromCharCode(13), String.fromCharCode(10), String.fromCharCode(9)];
+	let value = text;
+	for (const controlChar of controlChars) value = value.split(controlChar).join(" ");
+	return value.replace(/ +/g, " ").trim();
+}
+
+function syncUsageFooter(ctx: ExtensionContext): void {
+		if (!ctx.hasUI) return;
+		if (!subagentWorkflowActive && !hasSubagentUsageTotals(subagentUsageTotals)) {
+			if (ownsFooter) {
+				ctx.ui.setFooter(undefined);
+				ownsFooter = false;
+			}
+			return;
+		}
+
+		ctx.ui.setFooter(function (tui, theme, footerData) {
+			const dispose = footerData.onBranchChange(function () {
+				tui.requestRender();
+			});
+
+			return {
+				dispose,
+				invalidate() {},
+				render(width: number): string[] {
+					const sessionUsage = collectSessionAssistantUsage(ctx);
+					const totalUsage = addSubagentUsageTotals(sessionUsage, subagentUsageTotals);
+					const contextUsage = ctx.getContextUsage();
+					const contextWindow = contextUsage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
+					const contextPercentValue = contextUsage?.percent ?? 0;
+					const contextPercent = contextUsage?.percent !== null && contextUsage?.percent !== undefined ? contextPercentValue.toFixed(1) : "?";
+
+					let pwd = ctx.sessionManager.getCwd();
+					const home = process.env.HOME || process.env.USERPROFILE;
+					if (home && pwd.startsWith(home)) pwd = "~" + pwd.slice(home.length);
+					const branch = footerData.getGitBranch();
+					if (branch) pwd += " (" + branch + ")";
+					const sessionName = ctx.sessionManager.getSessionName();
+					if (sessionName) pwd += " • " + sessionName;
+
+					const statsParts: string[] = [];
+					if (totalUsage.input) statsParts.push("↑" + formatTokens(totalUsage.input));
+					if (totalUsage.output) statsParts.push("↓" + formatTokens(totalUsage.output));
+					if (totalUsage.cacheRead) statsParts.push("R" + formatTokens(totalUsage.cacheRead));
+					if (totalUsage.cacheWrite) statsParts.push("W" + formatTokens(totalUsage.cacheWrite));
+					if (totalUsage.cost || hasSubagentUsageTotals(subagentUsageTotals)) {
+						let costPart = "$" + totalUsage.cost.toFixed(3);
+						if (hasSubagentUsageTotals(subagentUsageTotals)) costPart += " +subagents";
+						statsParts.push(costPart);
+					}
+
+					let contextDisplay = contextPercent === "?" ? "?/" + formatTokens(contextWindow) : contextPercent + "%/" + formatTokens(contextWindow);
+					if (contextPercentValue < 70) {
+						contextDisplay = theme.fg("dim", contextDisplay);
+					} else if (contextPercentValue < 90) {
+						contextDisplay = theme.fg("warning", contextDisplay);
+					} else {
+						contextDisplay = theme.fg("error", contextDisplay);
+					}
+					statsParts.push(contextDisplay);
+
+					let statsLeft = theme.fg("dim", statsParts.join(" "));
+					const baseModelName = ctx.model?.id || "no-model";
+					let rightSide = baseModelName;
+					if (ctx.model?.reasoning) {
+						rightSide = baseModelName + " • " + (pi.getThinkingLevel() || "off");
+					}
+					if (footerData.getAvailableProviderCount() && footerData.getAvailableProviderCount() !== 1 && ctx.model) {
+						rightSide = "(" + ctx.model.provider + ") " + rightSide;
+					}
+					rightSide = theme.fg("dim", rightSide);
+
+					const pwdLine = truncateToWidth(theme.fg("dim", pwd), width, theme.fg("dim", "..."));
+					const statsLine = truncateToWidth(padToWidth(statsLeft, Math.max(0, width - visibleWidth(rightSide))) + rightSide, width);
+					const lines = [pwdLine, statsLine];
+					const extensionStatuses = footerData.getExtensionStatuses();
+					if (extensionStatuses.size) {
+						const statusLine = Array.from(extensionStatuses.values()).map(sanitizeFooterText).join(" ");
+						lines.push(truncateToWidth(statusLine, width, theme.fg("dim", "...")));
+					}
+					return lines;
+				}
+			};
+		});
+		ownsFooter = true;
 	}
 
 	function updateUi(ctx: ExtensionContext): void {
 		if (!enabled) {
 			ctx.ui.setStatus(STATUS_KEY, undefined);
 			ctx.ui.setWidget(WIDGET_KEY, undefined);
+			syncUsageFooter(ctx);
 			return;
 		}
 
@@ -166,6 +309,7 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 
 		ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("accent", "🧭 discover"));
 		ctx.ui.setWidget(WIDGET_KEY, lines);
+		syncUsageFooter(ctx);
 	}
 
 	function applyDiscoveryTools(): void {
@@ -354,6 +498,9 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 		const progressIntro = options.rawPrompt?.trim()
 			? ["Synthesizing a lightweight plan from the provided request."]
 			: [`Using ${PLAN_FILE} as the approved source of truth.`];
+		const runUsageTotals = emptySubagentUsageTotals();
+		subagentWorkflowActive = true;
+		if (ctx.hasUI) syncUsageFooter(ctx);
 		let implementationProgress = createImplementationProgressState({
 			detailLines: progressIntro,
 			context: {
@@ -377,6 +524,18 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 			for (const line of rest) console.error(`  ${line}`);
 		};
 
+		const handleImplementationUsage = function (usage: SubagentUsageTotals): void {
+			subagentUsageTotals = addSubagentUsageTotals(subagentUsageTotals, usage);
+			runUsageTotals.input += usage.input;
+			runUsageTotals.output += usage.output;
+			runUsageTotals.cacheRead += usage.cacheRead;
+			runUsageTotals.cacheWrite += usage.cacheWrite;
+			runUsageTotals.totalTokens += usage.totalTokens;
+			runUsageTotals.cost += usage.cost;
+			runUsageTotals.turns += usage.turns;
+			if (ctx.hasUI) syncUsageFooter(ctx);
+		};
+
 		if (ctx.hasUI) {
 			setImplementationProgress(ctx, "starting", implementationProgress, progressIntro);
 		}
@@ -386,6 +545,7 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 				rawPrompt: options.rawPrompt,
 				extraInstructions: options.extraInstructions,
 				onUpdate: handleImplementationProgress,
+			onUsage: handleImplementationUsage,
 			});
 
 			if (ctx.hasUI) {
@@ -429,7 +589,12 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 			}
 			return false;
 		} finally {
-			if (ctx.hasUI) clearImplementationProgress(ctx);
+			subagentWorkflowActive = false;
+			if (hasSubagentUsageTotals(runUsageTotals)) persistState();
+			if (ctx.hasUI) {
+				syncUsageFooter(ctx);
+				clearImplementationProgress(ctx);
+			}
 		}
 	}
 
@@ -658,6 +823,7 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 		previousActiveTools = normalizeToolList(savedState?.previousActiveTools) ?? previousActiveTools;
 		lastSavedPlanSignature = savedState?.lastSavedPlanSignature ?? null;
 		researchSources = mergeResearchSources(savedState?.researchSources ?? [], extractResearchSourcesFromEntries(branchEntries));
+		subagentUsageTotals = savedState?.subagentUsageTotals ?? emptySubagentUsageTotals();
 
 		if (enabled) {
 			applyDiscoveryTools();

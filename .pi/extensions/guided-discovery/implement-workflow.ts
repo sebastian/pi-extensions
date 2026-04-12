@@ -19,7 +19,7 @@ import {
 	type RelevantGuidanceResult,
 } from "./guidance.ts";
 import { resolveWorkflowModels } from "./models.ts";
-import { runSubagent } from "./subagent-runner.ts";
+import { runSubagent, type SubagentUsageTotals } from "./subagent-runner.ts";
 import {
 	captureWorkspaceRevision,
 	createChildWorkspace,
@@ -111,6 +111,7 @@ interface WorkflowOptions {
 	rawPrompt?: string;
 	extraInstructions: string;
 	onUpdate?: (update: WorkflowProgressUpdate) => void;
+	onUsage?: (usage: SubagentUsageTotals) => void;
 }
 
 interface WorkerPhaseResult {
@@ -122,6 +123,12 @@ interface WorkflowSummary {
 	decision: WorkflowDecision;
 	summary: string;
 	reformulationPrompt?: string;
+}
+
+let currentWorkflowSubagentUsageSink: ((usage: SubagentUsageTotals) => void) | undefined;
+
+function forwardWorkflowSubagentUsage(usage: SubagentUsageTotals): void {
+	currentWorkflowSubagentUsageSink?.(usage);
 }
 
 export interface WorkerPromptSelection {
@@ -1211,6 +1218,7 @@ async function runStructuredStage<T>(options: {
 	model?: string;
 	thinkingLevel?: string;
 	tempDir: string;
+	onUsage?: (usage: SubagentUsageTotals) => void;
 	parse: (text: string) => T;
 }): Promise<T> {
 	const first = await runSubagent({
@@ -1221,6 +1229,7 @@ async function runStructuredStage<T>(options: {
 		tools: options.tools,
 		model: options.model,
 		thinkingLevel: options.thinkingLevel,
+		onUsage: forwardWorkflowSubagentUsage,
 	});
 	const firstText = ensureSuccessfulSubagent(options.name, first);
 	try {
@@ -1247,6 +1256,7 @@ async function runStructuredStage<T>(options: {
 			tools: options.tools,
 			model: options.model,
 			thinkingLevel: options.thinkingLevel,
+			onUsage: forwardWorkflowSubagentUsage,
 		});
 		const retryText = ensureSuccessfulSubagent(`${options.name} retry`, retry);
 		return options.parse(retryText);
@@ -1935,6 +1945,7 @@ async function runWorkerPhase(options: {
 		tools: WORKER_SUBAGENT_TOOLS,
 		model: options.model,
 		thinkingLevel: options.thinkingLevel,
+		onUsage: forwardWorkflowSubagentUsage,
 	});
 
 	const summary = ensureSuccessfulSubagent(`worker ${options.phase.id}`, result);
@@ -1994,6 +2005,7 @@ async function runWorkerFixPass(options: {
 		tools: WORKER_SUBAGENT_TOOLS,
 		model: options.model,
 		thinkingLevel: options.thinkingLevel,
+		onUsage: forwardWorkflowSubagentUsage,
 	});
 	return ensureSuccessfulSubagent(options.contextTitle, result);
 }
@@ -3596,6 +3608,8 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 	let runWorkspaceIntegrated = false;
 	const agentsCheckExecutionPolicies = new Map<string, AgentsCheckExecutionPolicy>();
 	let handleRunWorkspaceIntegration: (() => Promise<void>) | undefined;
+	const previousWorkflowSubagentUsageSink = currentWorkflowSubagentUsageSink;
+	currentWorkflowSubagentUsageSink = options.onUsage;
 
 	try {
 		const managedRunWorkspace = await createManagedWorkspace({
@@ -4110,6 +4124,7 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 		});
 		throw error;
 	} finally {
+		currentWorkflowSubagentUsageSink = previousWorkflowSubagentUsageSink;
 		await runBestEffortWorkflowCleanup({
 			tempDir,
 			runWorkspace,
