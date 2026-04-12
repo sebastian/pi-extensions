@@ -9,7 +9,6 @@ export const WORKFLOW_NODE_ORDER = [
 	"checker",
 	"fix",
 	"validator",
-	"finish",
 ] as const;
 export const WORKFLOW_EDGE_ORDER = [
 	"decomposer->implementation",
@@ -23,8 +22,6 @@ export const WORKFLOW_EDGE_ORDER = [
 	"fix->cleanup",
 	"fix->checker",
 	"checker->validator",
-	"validator->finish",
-	"finish->cleanup",
 ] as const;
 
 export type WorkflowNodeId = (typeof WORKFLOW_NODE_ORDER)[number];
@@ -101,18 +98,6 @@ export const WORKFLOW_EDGE_META: Record<
 		to: "validator",
 		label: "Checker → Validator",
 		shortLabel: "C→V",
-	},
-	"validator->finish": {
-		from: "validator",
-		to: "finish",
-		label: "Validator → Finish",
-		shortLabel: "V→Fin",
-	},
-	"finish->cleanup": {
-		from: "finish",
-		to: "cleanup",
-		label: "Finish → Cleanup",
-		shortLabel: "Fin→Cl",
 	},
 };
 export interface ProgressNodeState {
@@ -218,8 +203,6 @@ export type ImplementationProgressEvent =
 	| ({ type: "fix-completed" } & ImplementationProgressEventBase)
 	| ({ type: "validator-started" } & ImplementationProgressEventBase)
 	| ({ type: "validator-completed" } & ImplementationProgressEventBase)
-	| ({ type: "finish-started" } & ImplementationProgressEventBase)
-	| ({ type: "finish-completed" } & ImplementationProgressEventBase)
 	| ({ type: "loop-traversed"; edge: WorkflowEdgeId; count?: number } & ImplementationProgressEventBase)
 	| ({ type: "workflow-completed" } & ImplementationProgressEventBase)
 	| ({ type: "workflow-failed"; message: string; nodeId?: WorkflowNodeId } & ImplementationProgressEventBase);
@@ -323,7 +306,6 @@ const NODE_META: Record<WorkflowNodeId, { label: string; shortLabel: string }> =
 	checker: { label: "Code review", shortLabel: "Review" },
 	fix: { label: "Fix", shortLabel: "Fix" },
 	validator: { label: "Plan check", shortLabel: "Plan" },
-	finish: { label: "Follow-up", shortLabel: "Follow" },
 };
 
 function createNodes(): Record<WorkflowNodeId, ProgressNodeState> {
@@ -647,7 +629,6 @@ export function reduceImplementationProgress(
 			setImplementationStatus(next, next.nodes.implementation.visits > 0 ? "done" : next.nodes.implementation.status);
 			removeActiveLocation(next, (location) => location.nodeId === "implementation");
 			if (next.nodes.fix.status === "active") markNodeDone(next, "fix");
-			if (next.nodes.finish.status === "active") markNodeDone(next, "finish");
 			setSingleActiveStage(next, "cleanup");
 			break;
 		}
@@ -704,23 +685,12 @@ export function reduceImplementationProgress(
 			if (next.nodes.design.status === "active") markNodeDone(next, "design");
 			if (next.nodes.checker.status === "active") markNodeDone(next, "checker");
 			if (next.nodes.fix.status === "active") markNodeDone(next, "fix");
-			if (next.nodes.finish.status === "active") markNodeDone(next, "finish");
 			setSingleActiveStage(next, "validator");
 			break;
 		}
 		case "validator-completed": {
 			markNodeDone(next, "validator");
 			clearStageActiveLocations(next, "validator");
-			break;
-		}
-		case "finish-started": {
-			markNodeDone(next, "validator");
-			setSingleActiveStage(next, "finish");
-			break;
-		}
-		case "finish-completed": {
-			markNodeDone(next, "finish");
-			clearStageActiveLocations(next, "finish");
 			break;
 		}
 		case "loop-traversed": {
@@ -850,11 +820,9 @@ export function buildImplementationProgressSnapshot(
 		state.nodes.design.visits > 0 ||
 		state.implementation.batches.some((batch) => batch.phases.some((phase) => phase.designSensitive));
 	const fixVisible = state.nodes.fix.status !== "pending" || state.nodes.fix.visits > 0;
-	const finishVisible = state.nodes.finish.status !== "pending" || state.nodes.finish.visits > 0;
 	const pipelineNodeIds = WORKFLOW_NODE_ORDER.filter((id) => {
 		if (id === "design") return designVisible;
 		if (id === "fix") return fixVisible;
-		if (id === "finish") return finishVisible;
 		return true;
 	});
 

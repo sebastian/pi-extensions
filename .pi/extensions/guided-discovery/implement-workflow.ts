@@ -10,7 +10,6 @@ import {
 	type AgentsCheckCommand,
 	type AgentsCheckExecutionPolicy,
 } from "./agents-checks.ts";
-import { selectRemainingActionableDiscrepancies } from "./discrepancy-selector.ts";
 import {
 	collectRelevantGuidancePaths,
 	discoverAncestorDocumentPaths,
@@ -35,7 +34,6 @@ import {
 	parseCheckerReport,
 	parseDecompositionPlan,
 	parseValidationReport,
-	resolveValidationDiscrepancyId,
 	type CheckerFindingCategory,
 	type CheckerReport,
 	type DecompositionPhase,
@@ -124,19 +122,6 @@ interface WorkflowSummary {
 	decision: WorkflowDecision;
 	summary: string;
 	reformulationPrompt?: string;
-}
-
-export interface ValidationDiscrepancyTriage {
-	actionableDiscrepancies: ValidationDiscrepancy[];
-	informationalDiscrepancies: ValidationDiscrepancy[];
-	autoDiscrepancies: ValidationDiscrepancy[];
-	remainingActionableDiscrepancies: ValidationDiscrepancy[];
-	attemptedAutoDiscrepancies: ValidationDiscrepancy[];
-}
-
-export interface ValidatorDiscrepancyHandlingDecision extends ValidationDiscrepancyTriage {
-	action: "continue" | "auto-remediate" | "prompt" | "fail";
-	message?: string;
 }
 
 export interface WorkerPromptSelection {
@@ -245,14 +230,6 @@ export interface WorkflowQualitySummary {
 	legacyCodeOrFilesRemoved: boolean;
 	mergedResultVerificationRuns: number;
 	mergedResultVerificationReasons: string[];
-}
-
-export interface ValidationResolutionSummary {
-	autoRemediationPasses: number;
-	autoRemediatedDiscrepancyIds: string[];
-	manualRemediationPasses: number;
-	manuallyTargetedDiscrepancyIds: string[];
-	acceptedRemainingDiscrepancies: boolean;
 }
 
 function trimBlock(text: string): string {
@@ -796,143 +773,33 @@ function combineCheckerReports(modelRuns: CheckerModelRun[]): CheckerReport {
 	};
 }
 
-function createValidationResolutionSummary(): ValidationResolutionSummary {
-	return {
-		autoRemediationPasses: 0,
-		autoRemediatedDiscrepancyIds: [],
-		manualRemediationPasses: 0,
-		manuallyTargetedDiscrepancyIds: [],
-		acceptedRemainingDiscrepancies: false,
-	};
-}
-
-function recordDiscrepancyIds(target: string[], discrepancies: ValidationDiscrepancy[]): void {
-	for (const [index, discrepancy] of discrepancies.entries()) {
-		const id = resolveValidationDiscrepancyId(discrepancy, index);
-		if (!target.includes(id)) target.push(id);
-	}
-}
-
-function discrepancyIdsInOrder(
-	discrepancies: ValidationDiscrepancy[],
-	allDiscrepancies: ValidationDiscrepancy[],
-): string[] {
-	return discrepancies.map((discrepancy, index) => {
-		const allIndex = allDiscrepancies.indexOf(discrepancy);
-		return resolveValidationDiscrepancyId(discrepancy, allIndex >= 0 ? allIndex : index);
-	});
-}
-
-export function discrepancyAttemptSignature(discrepancy: ValidationDiscrepancy): string {
-	const normalize = (value: string): string =>
-		value
-			.trim()
-			.toLowerCase()
-			.replace(/["']/g, "")
-			.replace(/[^a-z0-9]+/g, "-")
-			.replace(/^-+|-+$/g, "");
-	const idPart = normalize(discrepancy.id || "");
-	const itemPart = normalize(discrepancy.item);
-	return [idPart, itemPart].filter(Boolean).join("|") || `discrepancy|${discrepancy.status}`;
-}
-
 function isActionableDiscrepancy(discrepancy: ValidationDiscrepancy): boolean {
 	return discrepancy.status === "missing" || discrepancy.status === "partial";
 }
 
-export function partitionValidationDiscrepancies(options: {
-	discrepancies: ValidationDiscrepancy[];
-	attemptedAutoSignatures?: Iterable<string>;
-}): ValidationDiscrepancyTriage {
-	const actionableDiscrepancies: ValidationDiscrepancy[] = [];
-	const informationalDiscrepancies: ValidationDiscrepancy[] = [];
-	const autoDiscrepancies: ValidationDiscrepancy[] = [];
-	const remainingActionableDiscrepancies: ValidationDiscrepancy[] = [];
-	const attemptedAutoDiscrepancies: ValidationDiscrepancy[] = [];
-	const attemptedSignatures = new Set(
-		Array.from(options.attemptedAutoSignatures ?? []).map((signature) => signature.trim()).filter(Boolean),
-	);
-
-	for (const discrepancy of options.discrepancies) {
-		if (!isActionableDiscrepancy(discrepancy)) {
-			informationalDiscrepancies.push(discrepancy);
-			continue;
-		}
-		actionableDiscrepancies.push(discrepancy);
-		if (discrepancy.worthImplementingNow && !attemptedSignatures.has(discrepancyAttemptSignature(discrepancy))) {
-			autoDiscrepancies.push(discrepancy);
-			continue;
-		}
-		remainingActionableDiscrepancies.push(discrepancy);
-		if (discrepancy.worthImplementingNow) attemptedAutoDiscrepancies.push(discrepancy);
-	}
-
-	return {
-		actionableDiscrepancies,
-		informationalDiscrepancies,
-		autoDiscrepancies,
-		remainingActionableDiscrepancies,
-		attemptedAutoDiscrepancies,
-	};
-}
-
 export function renderUnresolvedDiscrepancySummary(discrepancies: ValidationDiscrepancy[]): string {
-	const triage = partitionValidationDiscrepancies({ discrepancies });
 	if (discrepancies.length === 0) {
 		return trimBlock(["## Remaining validator discrepancies", "", "No unresolved discrepancies."].join("\n"));
 	}
+	const actionableDiscrepancies = discrepancies.filter(isActionableDiscrepancy);
+	const informationalDiscrepancies = discrepancies.filter((discrepancy) => !isActionableDiscrepancy(discrepancy));
 	return trimBlock(
 		[
 			"## Remaining validator discrepancies",
 			"",
-			`Actionable: ${triage.actionableDiscrepancies.length}`,
-			`Informational (superseded): ${triage.informationalDiscrepancies.length}`,
+			`Actionable: ${actionableDiscrepancies.length}`,
+			`Informational (superseded): ${informationalDiscrepancies.length}`,
 			"",
 			renderDiscrepancySection(
 				"Actionable discrepancies",
-				triage.actionableDiscrepancies,
+				actionableDiscrepancies,
 				"No actionable discrepancies remain.",
 			),
 			"",
 			renderDiscrepancySection(
 				"Informational discrepancies",
-				triage.informationalDiscrepancies,
+				informationalDiscrepancies,
 				"No informational discrepancies remain.",
-			),
-		].join("\n"),
-	);
-}
-
-export function renderTargetedDiscrepancyContext(options: {
-	selectedDiscrepancies: ValidationDiscrepancy[];
-	allDiscrepancies: ValidationDiscrepancy[];
-	summary?: string;
-	recommendation?: ValidationReport["recommendation"];
-}): string {
-	const selectedSignatures = new Set(options.selectedDiscrepancies.map((discrepancy) => discrepancyAttemptSignature(discrepancy)));
-	const outOfScopeDiscrepancies = options.allDiscrepancies.filter(
-		(discrepancy) => !selectedSignatures.has(discrepancyAttemptSignature(discrepancy)),
-	);
-	return trimBlock(
-		[
-			"## Targeted validator discrepancy remediation",
-			"",
-			"Implement only the selected discrepancies in this pass.",
-			"Do not implement any other unresolved validator discrepancies unless they are a direct dependency of a selected fix.",
-			"Stay within PLAN.md and avoid extra scope.",
-			...(options.summary ? ["", `Validator summary: ${options.summary}`] : []),
-			...(options.recommendation ? ["", `Validator recommendation: ${options.recommendation}`] : []),
-			"",
-			renderDiscrepancySection(
-				"Selected discrepancies to implement now",
-				options.selectedDiscrepancies,
-				"No discrepancies were selected for this pass.",
-			),
-			"",
-			renderDiscrepancySection(
-				"Other unresolved discrepancies not in scope for this pass",
-				outOfScopeDiscrepancies,
-				"No other unresolved discrepancies remain.",
 			),
 		].join("\n"),
 	);
@@ -962,7 +829,6 @@ export function buildSummary(
 	validation: ValidationReport,
 	checker: CheckerReport,
 	quality: WorkflowQualitySummary,
-	validationResolution: ValidationResolutionSummary,
 	qualityOutcome: {
 		acceptedResidualSoftFindings: QualityGateFindingSummary[];
 		blockingHardFindings: QualityGateFindingSummary[];
@@ -1100,190 +966,6 @@ function summarizeDiscrepancies(discrepancies: ValidationDiscrepancy[], maxItems
 	return discrepancies.slice(0, maxItems).map((item) => `${item.status}: ${item.item}`);
 }
 
-export function decideValidatorDiscrepancyHandling(options: {
-	validation: ValidationReport;
-	hasUI: boolean;
-	discrepanciesAccepted?: boolean;
-	attemptedAutoSignatures?: Iterable<string>;
-	stage: "initial" | "post-remediation";
-}): ValidatorDiscrepancyHandlingDecision {
-	const triage = partitionValidationDiscrepancies({
-		discrepancies: options.validation.discrepancies,
-		attemptedAutoSignatures: options.attemptedAutoSignatures,
-	});
-	if (triage.actionableDiscrepancies.length === 0 || options.discrepanciesAccepted) {
-		return { action: "continue", ...triage };
-	}
-	if (triage.autoDiscrepancies.length > 0) {
-		return { action: "auto-remediate", ...triage };
-	}
-	if (options.hasUI) return { action: "prompt", ...triage };
-	const stageNote = options.stage === "post-remediation" ? "after targeted remediation" : "before completion";
-	const discrepancies = summarizeDiscrepancies(triage.remainingActionableDiscrepancies);
-	return {
-		action: "fail",
-		message: [
-			`Validator still reports actionable plan discrepancies ${stageNote} in non-interactive mode, and no interactive selection path is available.`,
-			triage.attemptedAutoDiscrepancies.length > 0
-				? `Automatic remediation was already attempted for ${triage.attemptedAutoDiscrepancies.length} worthwhile item(s).`
-				: "",
-			`Recommendation: ${options.validation.recommendation}`,
-			options.validation.summary || `${triage.remainingActionableDiscrepancies.length} actionable discrepancy(s) reported.`,
-			...(discrepancies.length > 0 ? [`Remaining actionable discrepancies: ${discrepancies.join(" • ")}`] : []),
-		].filter(Boolean).join(" "),
-		...triage,
-	};
-}
-
-export type ValidatorDiscrepancyChoice =
-	| "Select items to implement now"
-	| "Reformulate in discovery mode"
-	| "Accept the discrepancies and finish";
-
-export interface ValidatorDiscrepancyLoopStep {
-	validation: ValidationReport;
-	handling: ValidatorDiscrepancyHandlingDecision;
-	stage: "initial" | "post-remediation";
-	lastSelectedActionableIds: string[];
-}
-
-export interface ValidatorDiscrepancyLoopResult {
-	decision: "continue" | "reformulate";
-	validation: ValidationReport;
-}
-
-export async function runValidatorDiscrepancyLoop(options: {
-	initialValidation: ValidationReport;
-	hasUI: boolean;
-	validationResolution: ValidationResolutionSummary;
-	attemptedAutoSignatures?: Set<string>;
-	promptForChoice: (step: ValidatorDiscrepancyLoopStep) => Promise<ValidatorDiscrepancyChoice>;
-	selectDiscrepancies: (
-		step: ValidatorDiscrepancyLoopStep & { initialSelectedIds: string[] },
-	) => Promise<ValidationDiscrepancy[] | undefined>;
-	runRemediation: (options: {
-		kind: "auto" | "manual";
-		discrepancies: ValidationDiscrepancy[];
-		passNumber: number;
-		step: ValidatorDiscrepancyLoopStep;
-	}) => Promise<ValidationReport>;
-	onAutoRemediationPlanned?: (step: ValidatorDiscrepancyLoopStep & { passNumber: number }) => Promise<void> | void;
-	onPromptRequired?: (step: ValidatorDiscrepancyLoopStep) => Promise<void> | void;
-	onSelectionCancelled?: (step: ValidatorDiscrepancyLoopStep) => Promise<void> | void;
-	onSelectionEmpty?: (step: ValidatorDiscrepancyLoopStep) => Promise<void> | void;
-}): Promise<ValidatorDiscrepancyLoopResult> {
-	let validation = options.initialValidation;
-	let hasRemediated =
-		options.validationResolution.autoRemediationPasses > 0 || options.validationResolution.manualRemediationPasses > 0;
-	let lastSelectedActionableIds: string[] = [];
-	const attemptedAutoSignatures = options.attemptedAutoSignatures ?? new Set<string>();
-
-	while (true) {
-		const stage = hasRemediated ? "post-remediation" : "initial";
-		const handling = decideValidatorDiscrepancyHandling({
-			validation,
-			hasUI: options.hasUI,
-			discrepanciesAccepted: options.validationResolution.acceptedRemainingDiscrepancies,
-			attemptedAutoSignatures,
-			stage,
-		});
-		const step: ValidatorDiscrepancyLoopStep = {
-			validation,
-			handling,
-			stage,
-			lastSelectedActionableIds: [...lastSelectedActionableIds],
-		};
-
-		if (handling.action === "continue") return { decision: "continue", validation };
-		if (handling.action === "fail") {
-			throw new Error(handling.message || "Validator reported unresolved actionable discrepancies.");
-		}
-		if (handling.action === "auto-remediate") {
-			const passNumber = options.validationResolution.autoRemediationPasses + 1;
-			for (const discrepancy of handling.autoDiscrepancies) {
-				attemptedAutoSignatures.add(discrepancyAttemptSignature(discrepancy));
-			}
-			await options.onAutoRemediationPlanned?.({ ...step, passNumber });
-			validation = await options.runRemediation({
-				kind: "auto",
-				discrepancies: handling.autoDiscrepancies,
-				passNumber,
-				step,
-			});
-			hasRemediated = true;
-			options.validationResolution.autoRemediationPasses += 1;
-			recordDiscrepancyIds(options.validationResolution.autoRemediatedDiscrepancyIds, handling.autoDiscrepancies);
-			continue;
-		}
-
-		await options.onPromptRequired?.(step);
-		const choice = await options.promptForChoice(step);
-		if (choice === "Reformulate in discovery mode") return { decision: "reformulate", validation };
-		if (choice === "Accept the discrepancies and finish") {
-			options.validationResolution.acceptedRemainingDiscrepancies = true;
-			return { decision: "continue", validation };
-		}
-
-		const remainingActionableIds = new Set(
-			discrepancyIdsInOrder(handling.remainingActionableDiscrepancies, validation.discrepancies),
-		);
-		const initialSelectedIds = lastSelectedActionableIds.filter((id) => remainingActionableIds.has(id));
-		const selectedManualDiscrepancies = await options.selectDiscrepancies({
-			...step,
-			initialSelectedIds,
-		});
-		if (selectedManualDiscrepancies === undefined) {
-			await options.onSelectionCancelled?.(step);
-			continue;
-		}
-		if (selectedManualDiscrepancies.length === 0) {
-			await options.onSelectionEmpty?.(step);
-			continue;
-		}
-
-		const passNumber = options.validationResolution.manualRemediationPasses + 1;
-		lastSelectedActionableIds = discrepancyIdsInOrder(selectedManualDiscrepancies, validation.discrepancies);
-		validation = await options.runRemediation({
-			kind: "manual",
-			discrepancies: selectedManualDiscrepancies,
-			passNumber,
-			step,
-		});
-		hasRemediated = true;
-		options.validationResolution.manualRemediationPasses += 1;
-		recordDiscrepancyIds(options.validationResolution.manuallyTargetedDiscrepancyIds, selectedManualDiscrepancies);
-	}
-}
-
-async function promptForValidatorDiscrepancyChoice(
-	ctx: ExtensionContext,
-	validation: ValidationReport,
-	options: { heading: string; attemptedAutoSignatures?: Iterable<string> },
-): Promise<ValidatorDiscrepancyChoice> {
-	const triage = partitionValidationDiscrepancies({
-		discrepancies: validation.discrepancies,
-		attemptedAutoSignatures: options.attemptedAutoSignatures,
-	});
-	const discrepancySummary = triage.remainingActionableDiscrepancies
-		.slice(0, 5)
-		.map((item) => `- ${item.id ? `${item.id} — ` : ""}${item.status}: ${item.item}`)
-		.join("\n");
-	return (await ctx.ui.select(
-		[
-			options.heading,
-			validation.summary,
-			triage.attemptedAutoDiscrepancies.length > 0
-				? `${triage.attemptedAutoDiscrepancies.length} worthwhile item(s) were already attempted automatically and still remain.`
-				: "",
-			discrepancySummary,
-		].filter(Boolean).join("\n\n"),
-		[
-			"Select items to implement now",
-			"Reformulate in discovery mode",
-			"Accept the discrepancies and finish",
-		],
-	)) as ValidatorDiscrepancyChoice;
-}
 
 class QualitySuiteReformulateError extends Error {
 	summary: string;
@@ -4279,8 +3961,6 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 		blockingHardFindings = verificationPass.blockingHardFindings;
 		let checkPass = verificationPass.checkerRun;
 
-		const validationResolution = createValidationResolutionSummary();
-		const autoAttemptedDiscrepancySignatures = new Set<string>();
 		let validation!: ValidationReport;
 		let discrepancySummaryItems: string[] = [];
 		const runValidatorPass = async (validatorPass: {
@@ -4337,187 +4017,6 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 				},
 			});
 		};
-		const runTargetedValidatorRemediation = async (remediation: {
-			kind: "auto" | "manual";
-			discrepancies: ValidationDiscrepancy[];
-			suiteId: string;
-			title: string;
-			goal: string;
-			instruction: string;
-			loopNote: string;
-			completionNote: string;
-		}): Promise<void> => {
-			const targetedSummaryItems = summarizeDiscrepancies(remediation.discrepancies);
-			const remediationScopeLabel = remediation.kind === "auto" ? "targeted" : "selected";
-			const finishContextText = renderTargetedDiscrepancyContext({
-				selectedDiscrepancies: remediation.discrepancies,
-				allDiscrepancies: validation.discrepancies,
-				summary: validation.summary,
-				recommendation: validation.recommendation,
-			});
-			const finishPromptSelection = pickRemediationPrompt({
-				workerPrompt,
-				designWorkerPrompt,
-				phases: workerResults.map((result) => result.phase),
-				changedFiles,
-				discrepancyText: finishContextText,
-			});
-			emitLoopTraversal(
-				options.onUpdate,
-				"validator->finish",
-				"finish",
-				[
-					`${remediation.kind === "auto" ? "Automatically remediating" : "Implementing"} ${remediation.discrepancies.length} ${remediationScopeLabel} validator discrepancy(s).`,
-					...(targetedSummaryItems.length > 0 ? [`Discrepancies: ${targetedSummaryItems.join(" • ")}`] : []),
-					`Worker: ${finishPromptSelection.promptLabel}`,
-				],
-				{
-					changedFiles,
-					changedFilesSummary: summarizePaths(changedFiles),
-					discrepancyCount: remediation.discrepancies.length,
-					discrepancySummary: targetedSummaryItems,
-					recommendation: validation.recommendation,
-					workerKind: finishPromptSelection.kind,
-					note: remediation.loopNote,
-				},
-			);
-			activeNode = "finish";
-			emitWorkflowUpdate(options.onUpdate, {
-				type: "finish-started",
-				stage: "finish",
-				lines: [
-					`${remediation.kind === "auto" ? "Automatically remediating" : "Implementing"} ${remediation.discrepancies.length} ${remediationScopeLabel} validator discrepancy(s).`,
-					`Changed files: ${summarizePaths(changedFiles)}`,
-					`Worker: ${finishPromptSelection.promptLabel}`,
-				],
-				context: {
-					changedFiles,
-					changedFilesSummary: summarizePaths(changedFiles),
-					discrepancyCount: remediation.discrepancies.length,
-					discrepancySummary: targetedSummaryItems,
-					recommendation: validation.recommendation,
-					workerKind: finishPromptSelection.kind,
-					note: finishPromptSelection.reason,
-				},
-			});
-			const finishSummary = await runWorkerFixPass({
-				cwd: workflowCwd,
-				tempDir,
-				planPath,
-				agentFiles,
-				touchedPaths: changedFiles,
-				systemPrompt: finishPromptSelection.systemPrompt,
-				contextTitle: `${remediation.suiteId}-validator-pass`,
-				contextMarkdown: finishContextText,
-				prompt:
-					"Implement only the selected validator discrepancies in the attached context. Do not implement other unresolved validator discrepancies unless they are a direct dependency of a selected fix. Stay within PLAN.md, avoid extra scope, and then summarize what you finished.",
-				model: primaryModel,
-				thinkingLevel,
-			});
-			const remediationPhase: DecompositionPhase = {
-				id: `${remediation.suiteId}-validator-pass`,
-				title: remediation.title,
-				goal: remediation.goal,
-				instructions: [remediation.instruction],
-				dependsOn: [],
-				touchedPaths: changedFiles,
-				parallelSafe: false,
-				designSensitive: finishPromptSelection.designSensitive,
-			};
-			workerResults.push({
-				phase: remediationPhase,
-				summary: finishSummary,
-			});
-			emitWorkflowUpdate(options.onUpdate, {
-				type: "finish-completed",
-				stage: "finish",
-				lines: [
-					`${remediation.kind === "auto" ? "Completed automatic" : "Completed selected"} validator remediation pass.`,
-					`Changed files: ${summarizePaths(changedFiles)}`,
-					`Worker: ${finishPromptSelection.promptLabel}`,
-				],
-				context: {
-					changedFiles,
-					changedFilesSummary: summarizePaths(changedFiles),
-					discrepancyCount: remediation.discrepancies.length,
-					discrepancySummary: targetedSummaryItems,
-					recommendation: validation.recommendation,
-					workerKind: finishPromptSelection.kind,
-					note: finishPromptSelection.reason,
-				},
-			});
-			changedFiles = await detectChangedFiles(workflowCwd, exec);
-			emitLoopTraversal(
-				options.onUpdate,
-				"finish->cleanup",
-				"cleanup",
-				[
-					`Running targeted follow-through and final verification after ${remediation.kind === "auto" ? "automatic" : "selected-item"} validator remediation.`,
-					`Changed files: ${summarizePaths(changedFiles)}`,
-				],
-				{
-					changedFiles,
-					changedFilesSummary: summarizePaths(changedFiles),
-					discrepancyCount: remediation.discrepancies.length,
-					discrepancySummary: targetedSummaryItems,
-					recommendation: validation.recommendation,
-					note: remediation.completionNote,
-				},
-			);
-			const followThrough = await runPhaseFollowThroughLoop({
-				cwd: workflowCwd,
-				tempDir,
-				planPath,
-				agentFiles,
-				workerPrompt,
-				designWorkerPrompt,
-				cleanupPrompt,
-				designReviewPrompt,
-				decomposition,
-				workerResults,
-				phase: remediationPhase,
-				changedFiles,
-				exec,
-				primaryModel,
-				thinkingLevel,
-				onUpdate: options.onUpdate,
-				onStageChange: setActiveNode,
-				discrepancyContextText: finishContextText,
-			});
-			mergeWorkflowQualityStats(workflowQualityStats, followThrough.stats);
-			changedFiles = followThrough.changedFiles;
-			verificationPass = await runMergedResultVerification({
-				cwd: workflowCwd,
-				tempDir,
-				planPath,
-				agentFiles,
-				workerPrompt,
-				designWorkerPrompt,
-				cleanupPrompt,
-				designReviewPrompt,
-				checkerPrompt,
-				decomposition,
-				workerResults,
-				changedFiles,
-				exec,
-				primaryModel,
-				checkerModels: reviewModels,
-				thinkingLevel,
-				onUpdate: options.onUpdate,
-				onStageChange: setActiveNode,
-				verificationReason:
-					remediation.kind === "auto"
-						? "merged result after automatic validator remediation"
-						: "merged result after selected validator remediation",
-				designContextText: finishContextText,
-				resolveAgentsCheckExecutionPolicy,
-			});
-			mergeWorkflowQualityStats(workflowQualityStats, verificationPass.stats);
-			changedFiles = verificationPass.changedFiles;
-			acceptedResidualSoftFindings = verificationPass.acceptedResidualSoftFindings;
-			blockingHardFindings = verificationPass.blockingHardFindings;
-			checkPass = verificationPass.checkerRun;
-		};
 
 		await runValidatorPass({
 			startLine: "Comparing the implementation against PLAN.md.",
@@ -4551,7 +4050,6 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 			validation,
 			checkPass.report,
 			summarizeWorkflowQualityStats(workflowQualityStats),
-			validationResolution,
 			{
 				acceptedResidualSoftFindings,
 				blockingHardFindings,

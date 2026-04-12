@@ -141,23 +141,6 @@ test("design-skipped marks the design node explicitly instead of leaving it pend
 	assert.equal(state.nodes.design.visits, 1);
 });
 
-test("finish pass re-enters cleanup for post-finish merged-result verification", () => {
-	let state = createImplementationProgressState();
-	state = reduceImplementationProgress(state, { type: "validator-started" });
-	state = reduceImplementationProgress(state, { type: "validator-completed" });
-	state = reduceImplementationProgress(state, { type: "loop-traversed", edge: "validator->finish" });
-	state = reduceImplementationProgress(state, { type: "finish-started" });
-	state = reduceImplementationProgress(state, { type: "finish-completed" });
-	state = reduceImplementationProgress(state, { type: "loop-traversed", edge: "finish->cleanup" });
-	state = reduceImplementationProgress(state, { type: "cleanup-started" });
-
-	assert.equal(state.nodes.finish.status, "done");
-	assert.equal(state.nodes.cleanup.status, "active");
-	assert.equal(state.nodes.cleanup.visits, 1);
-	assert.equal(state.edgeTraversalCounts["finish->cleanup"], 1);
-	assert.deepEqual(state.activeLocations, [{ nodeId: "cleanup" }]);
-});
-
 test("describeLoopLanes caps visible lanes at three and preserves total traversal counts", () => {
 	assert.deepEqual(describeLoopLanes(0), {
 		totalTraversals: 0,
@@ -244,7 +227,7 @@ test("snapshot layout keeps the active batch expanded and abbreviates labels in 
 	assert.equal(expandedBatch?.phases[0]?.label.endsWith("…"), true);
 });
 
-test("snapshot hides unused fix and follow-up nodes until the workflow actually touches them", () => {
+test("snapshot hides unused fix nodes until the workflow actually touches them", () => {
 	const phases = [phase("phase-1", "Implement billing flow", ["src/billing"], true)];
 
 	let state = reduceImplementationProgress(createImplementationProgressState(), {

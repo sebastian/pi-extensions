@@ -73,7 +73,7 @@ The workflow is intentionally bounded:
 3. **final code review loop** — the only looping end-stage reviewer, bounded to 2 passes, focused on logic, regressions, side effects, security, and guidance
 4. **single advisory validator pass** — compare the final result to the approved plan once, report any remaining gaps, and stop there
 
-In interactive TUI sessions, it also renders a persistent progress widget above the editor. The widget keeps the workflow spine visible, expands worker batches after decomposition, highlights the current active phase, and hides unused branches like fix/follow-up unless they are actually touched. In RPC or non-interactive flows, the extension falls back to concise text progress instead.
+In interactive TUI sessions, it also renders a persistent progress widget above the editor. The widget keeps the workflow spine visible, expands worker batches after decomposition, highlights the current active phase, and hides unused branches like fix unless they are actually touched. In RPC or non-interactive flows, the extension falls back to concise text progress instead.
 
 ### Stages
 

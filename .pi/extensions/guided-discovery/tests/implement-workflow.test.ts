@@ -9,22 +9,16 @@ import {
 	buildSummary,
 	collectWorkerAgentFiles,
 	decideQualitySuiteRound,
-	decideValidatorDiscrepancyHandling,
-	discrepancyAttemptSignature,
 	hasVerifiedLegacyCleanupRemoval,
 	materializeWorkflowPlan,
 	parseImplementationRequest,
 	runGuidedDiscoveryImplementationWorkflow,
-	partitionValidationDiscrepancies,
 	pickRemediationPrompt,
 	pickWorkerPromptForPhase,
-	renderTargetedDiscrepancyContext,
 	renderUnresolvedDiscrepancySummary,
 	resolveStandaloneSubagentRequest,
-	runValidatorDiscrepancyLoop,
 	shouldRunDesignReview,
 	summarizeAgentsCheckHistory,
-	type ValidationResolutionSummary,
 	type WorkflowQualitySummary,
 } from "../implement-workflow.ts";
 import type { CheckerReport, DecompositionPhase, ValidationDiscrepancy, ValidationReport } from "../structured-output.ts";
@@ -76,16 +70,6 @@ function validation(discrepancies: ValidationDiscrepancy[] = []): ValidationRepo
 	};
 }
 
-function validationResolution(): ValidationResolutionSummary {
-	return {
-		autoRemediationPasses: 0,
-		autoRemediatedDiscrepancyIds: [] as string[],
-		manualRemediationPasses: 0,
-		manuallyTargetedDiscrepancyIds: [] as string[],
-		acceptedRemainingDiscrepancies: false,
-	};
-}
-
 function qualitySummary(overrides: Partial<WorkflowQualitySummary> = {}): WorkflowQualitySummary {
 	return {
 		cleanupRuns: overrides.cleanupRuns ?? 1,
@@ -114,7 +98,7 @@ function qualitySummary(overrides: Partial<WorkflowQualitySummary> = {}): Workfl
 		mergedResultVerificationReasons:
 			overrides.mergedResultVerificationReasons ?? [
 				"merged implementation result after child-workspace conflict resolution",
-				"merged result after selected validator remediation",
+				"merged implementation result",
 			],
 	};
 }
@@ -426,92 +410,6 @@ test("decideQualitySuiteRound prompts instead of failing when only soft findings
 	assert.match(decision.message ?? "", /accept the remaining polish issues/i);
 });
 
-test("partitionValidationDiscrepancies separates automatic, manual, and informational items", () => {
-	const triage = partitionValidationDiscrepancies({
-		discrepancies: [
-			discrepancy({ id: "D1", item: "Add tests", worthImplementingNow: true }),
-			discrepancy({ id: "D2", item: "Update docs", status: "partial" }),
-			discrepancy({ id: "D3", item: "Remove obsolete branch", status: "superseded", worthImplementingNow: true }),
-		],
-	});
-
-	assert.deepEqual(triage.actionableDiscrepancies.map((item) => item.id), ["D1", "D2"]);
-	assert.deepEqual(triage.autoDiscrepancies.map((item) => item.id), ["D1"]);
-	assert.deepEqual(triage.remainingActionableDiscrepancies.map((item) => item.id), ["D2"]);
-	assert.deepEqual(triage.informationalDiscrepancies.map((item) => item.id), ["D3"]);
-});
-
-test("decideValidatorDiscrepancyHandling auto-remediates worthwhile items before prompting", () => {
-	const decision = decideValidatorDiscrepancyHandling({
-		validation: validation([
-			discrepancy({ id: "D1", item: "Add tests", worthImplementingNow: true }),
-			discrepancy({ id: "D2", item: "Update docs", status: "partial" }),
-		]),
-		hasUI: true,
-		stage: "initial",
-	});
-
-	assert.equal(decision.action, "auto-remediate");
-	assert.deepEqual(decision.autoDiscrepancies.map((item) => item.id), ["D1"]);
-	assert.deepEqual(decision.remainingActionableDiscrepancies.map((item) => item.id), ["D2"]);
-});
-
-test("decideValidatorDiscrepancyHandling does not auto-retry already-attempted worthwhile items", () => {
-	const worthwhile = discrepancy({
-		id: "D1",
-		item: "Add tests",
-		status: "missing",
-		worthImplementingNow: true,
-	});
-	const sameItemAfterPartialProgress = { ...worthwhile, status: "partial" as const };
-
-	assert.equal(discrepancyAttemptSignature(worthwhile), discrepancyAttemptSignature(sameItemAfterPartialProgress));
-
-	const decision = decideValidatorDiscrepancyHandling({
-		validation: validation([
-			sameItemAfterPartialProgress,
-			discrepancy({ id: "D2", item: "Update docs", status: "partial" }),
-		]),
-		hasUI: true,
-		attemptedAutoSignatures: [discrepancyAttemptSignature(worthwhile)],
-		stage: "post-remediation",
-	});
-
-	assert.equal(decision.action, "prompt");
-	assert.deepEqual(decision.autoDiscrepancies, []);
-	assert.deepEqual(decision.attemptedAutoDiscrepancies.map((item) => item.id), ["D1"]);
-	assert.deepEqual(decision.remainingActionableDiscrepancies.map((item) => item.id), ["D1", "D2"]);
-});
-
-test("renderTargetedDiscrepancyContext scopes remediation to the selected subset", () => {
-	const selected = discrepancy({
-		id: "D1",
-		item: "Add validator tests",
-		worthImplementingNow: true,
-	});
-	const outOfScope = discrepancy({
-		id: "D2",
-		item: "Update README",
-		status: "partial",
-		reason: "Documentation was deferred until behavior settled.",
-		suggestedAction: "Document the final behavior after the runtime changes land.",
-	});
-
-	const context = renderTargetedDiscrepancyContext({
-		selectedDiscrepancies: [selected],
-		allDiscrepancies: [selected, outOfScope],
-		summary: "Two discrepancies remain.",
-		recommendation: "finish",
-	});
-
-	assert.match(context, /Implement only the selected discrepancies in this pass/);
-	assert.match(context, /Do not implement any other unresolved validator discrepancies/i);
-	assert.match(context, /## Selected discrepancies to implement now/);
-	assert.match(context, /D1 — missing: Add validator tests/);
-	assert.match(context, /## Other unresolved discrepancies not in scope for this pass/);
-	assert.match(context, /D2 — partial: Update README/);
-});
-
 test("renderUnresolvedDiscrepancySummary includes why-not-done and worthwhile judgments", () => {
 	const summary = renderUnresolvedDiscrepancySummary([
 		discrepancy({
@@ -540,168 +438,6 @@ test("renderUnresolvedDiscrepancySummary includes why-not-done and worthwhile ju
 	assert.match(summary, /worthwhile rationale: Small, low-risk, and directly improves the requested behavior\./);
 	assert.match(summary, /suggested action: Add focused workflow tests\./);
 	assert.match(summary, /D2 — superseded: Remove obsolete prompt path/);
-});
-
-test("decideValidatorDiscrepancyHandling fails clearly without UI when actionable discrepancies remain", () => {
-	const decision = decideValidatorDiscrepancyHandling({
-		validation: validation([
-			discrepancy({ id: "D1", item: "Add tests", worthImplementingNow: false }),
-			discrepancy({ id: "D2", item: "Update docs", status: "partial", worthImplementingNow: true }),
-		]),
-		hasUI: false,
-		attemptedAutoSignatures: [discrepancyAttemptSignature(discrepancy({ id: "D2", item: "Update docs", worthImplementingNow: true }))],
-		stage: "post-remediation",
-	});
-
-	assert.equal(decision.action, "fail");
-	assert.match(decision.message ?? "", /non-interactive mode/);
-	assert.match(decision.message ?? "", /no interactive selection path is available/);
-	assert.match(decision.message ?? "", /Automatic remediation was already attempted/);
-	assert.match(decision.message ?? "", /Remaining actionable discrepancies: missing: Add tests • partial: Update docs/);
-});
-
-test("decideValidatorDiscrepancyHandling continues for accepted or informational-only discrepancies", () => {
-	assert.equal(
-		decideValidatorDiscrepancyHandling({
-			validation: validation([discrepancy({ id: "D1", item: "Old fallback", status: "superseded" })]),
-			hasUI: false,
-			stage: "initial",
-		}).action,
-		"continue",
-	);
-	assert.equal(
-		decideValidatorDiscrepancyHandling({
-			validation: validation([discrepancy({ id: "D2", item: "Add tests" })]),
-			hasUI: false,
-			discrepanciesAccepted: true,
-			stage: "post-remediation",
-		}).action,
-		"continue",
-	);
-});
-
-test("runValidatorDiscrepancyLoop remediates a selected discrepancy instead of stalling after continue", async () => {
-	const initialValidation = validation([discrepancy({ id: "D1", item: "Add tests", worthImplementingNow: false })]);
-	const resolution = validationResolution();
-	const remediationKinds: string[] = [];
-
-	const result = await runValidatorDiscrepancyLoop({
-		initialValidation,
-		hasUI: true,
-		validationResolution: resolution,
-		promptForChoice: async () => "Select items to implement now",
-		selectDiscrepancies: async ({ handling, initialSelectedIds }) => {
-			assert.deepEqual(initialSelectedIds, []);
-			return [handling.remainingActionableDiscrepancies[0]];
-		},
-		runRemediation: async ({ kind, discrepancies, passNumber }) => {
-			remediationKinds.push(`${kind}:${passNumber}:${discrepancies.map((item) => item.id).join(",")}`);
-			return validation([]);
-		},
-	});
-
-	assert.equal(result.decision, "continue");
-	assert.equal(result.validation.discrepancies.length, 0);
-	assert.deepEqual(remediationKinds, ["manual:1:D1"]);
-	assert.equal(resolution.manualRemediationPasses, 1);
-	assert.deepEqual(resolution.manuallyTargetedDiscrepancyIds, ["D1"]);
-});
-
-test("runValidatorDiscrepancyLoop supports repeated continue cycles across auto and manual remediation", async () => {
-	const autoOnly = discrepancy({ id: "D1", item: "Add tests", worthImplementingNow: true });
-	const manualOne = discrepancy({ id: "D2", item: "Update docs", status: "partial" });
-	const manualTwo = discrepancy({ id: "D3", item: "Tighten examples", status: "partial" });
-	const resolution = validationResolution();
-	const remediationKinds: string[] = [];
-	const selectionStates: Array<{ pass: number; initialSelectedIds: string[]; ids: string[] }> = [];
-	let promptCount = 0;
-	let manualPass = 0;
-
-	const result = await runValidatorDiscrepancyLoop({
-		initialValidation: validation([autoOnly, manualOne]),
-		hasUI: true,
-		validationResolution: resolution,
-		promptForChoice: async () => {
-			promptCount += 1;
-			return "Select items to implement now";
-		},
-		selectDiscrepancies: async ({ handling, initialSelectedIds }) => {
-			manualPass += 1;
-			selectionStates.push({
-				pass: manualPass,
-				initialSelectedIds,
-				ids: handling.remainingActionableDiscrepancies.map((item) => item.id || ""),
-			});
-			return manualPass === 1 ? [handling.remainingActionableDiscrepancies[0]] : [handling.remainingActionableDiscrepancies[1]];
-		},
-		runRemediation: async ({ kind, discrepancies, passNumber }) => {
-			remediationKinds.push(`${kind}:${passNumber}:${discrepancies.map((item) => item.id).join(",")}`);
-			if (kind === "auto") {
-				return validation([
-					discrepancy({ id: "D2", item: "Update docs", status: "partial", worthImplementingNow: false }),
-					discrepancy({ id: "D3", item: "Tighten examples", status: "partial", worthImplementingNow: false }),
-				]);
-			}
-			if (discrepancies[0]?.id === "D2") {
-				return validation([
-					discrepancy({ id: "D2", item: "Update docs", status: "partial", worthImplementingNow: false }),
-					discrepancy({ id: "D3", item: "Tighten examples", status: "partial", worthImplementingNow: false }),
-				]);
-			}
-			return validation([]);
-		},
-	});
-
-	assert.equal(result.decision, "continue");
-	assert.equal(result.validation.discrepancies.length, 0);
-	assert.deepEqual(remediationKinds, ["auto:1:D1", "manual:1:D2", "manual:2:D3"]);
-	assert.equal(promptCount, 2);
-	assert.deepEqual(selectionStates, [
-		{ pass: 1, initialSelectedIds: [], ids: ["D2", "D3"] },
-		{ pass: 2, initialSelectedIds: ["D2"], ids: ["D2", "D3"] },
-	]);
-	assert.equal(resolution.autoRemediationPasses, 1);
-	assert.equal(resolution.manualRemediationPasses, 2);
-	assert.deepEqual(resolution.autoRemediatedDiscrepancyIds, ["D1"]);
-	assert.deepEqual(resolution.manuallyTargetedDiscrepancyIds, ["D2", "D3"]);
-});
-
-test("runValidatorDiscrepancyLoop distinguishes accept and reformulate outcomes", async () => {
-	const unresolved = validation([discrepancy({ id: "D1", item: "Add tests", worthImplementingNow: false })]);
-
-	const acceptedResolution = validationResolution();
-	const accepted = await runValidatorDiscrepancyLoop({
-		initialValidation: unresolved,
-		hasUI: true,
-		validationResolution: acceptedResolution,
-		promptForChoice: async () => "Accept the discrepancies and finish",
-		selectDiscrepancies: async () => {
-			throw new Error("selection should not run when accepting");
-		},
-		runRemediation: async () => {
-			throw new Error("remediation should not run when accepting");
-		},
-	});
-	assert.equal(accepted.decision, "continue");
-	assert.equal(accepted.validation.discrepancies.length, 1);
-	assert.equal(acceptedResolution.acceptedRemainingDiscrepancies, true);
-
-	const reformulateResolution = validationResolution();
-	const reformulated = await runValidatorDiscrepancyLoop({
-		initialValidation: unresolved,
-		hasUI: true,
-		validationResolution: reformulateResolution,
-		promptForChoice: async () => "Reformulate in discovery mode",
-		selectDiscrepancies: async () => {
-			throw new Error("selection should not run when reformulating");
-		},
-		runRemediation: async () => {
-			throw new Error("remediation should not run when reformulating");
-		},
-	});
-	assert.equal(reformulated.decision, "reformulate");
-	assert.equal(reformulated.validation.discrepancies.length, 1);
-	assert.equal(reformulateResolution.acceptedRemainingDiscrepancies, false);
 });
 
 test("hasVerifiedLegacyCleanupRemoval requires a legacy cleanup finding to disappear", () => {
@@ -811,7 +547,6 @@ test("buildSummary distinguishes fixed issues, accepted residual soft issues, an
 			},
 		]),
 		qualitySummary(),
-		validationResolution(),
 		{
 			acceptedResidualSoftFindings: [
 				{

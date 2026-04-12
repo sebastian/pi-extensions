@@ -224,8 +224,6 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 				return "review";
 			case "validator":
 				return "coverage";
-			case "finish":
-				return "follow-up";
 			case "complete":
 			case "failed":
 				return baseStage;

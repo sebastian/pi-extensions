@@ -34,15 +34,7 @@ export interface ImplementationProgressWidgetOptions extends ImplementationProgr
 const DEFAULT_TITLE = "Guided implementation";
 const MAX_DETAIL_LINES = 4;
 const NARROW_LAYOUT_WIDTH = 78;
-const LOOP_OVERLAY_EDGES = new Set([
-	"cleanup->fix",
-	"design->fix",
-	"checker->fix",
-	"fix->cleanup",
-	"fix->checker",
-	"validator->finish",
-	"finish->cleanup",
-]);
+const LOOP_OVERLAY_EDGES = new Set(["cleanup->fix", "design->fix", "checker->fix", "fix->cleanup", "fix->checker"]);
 
 function statusColor(status: ProgressStatus): ThemeColor {
 	switch (status) {
