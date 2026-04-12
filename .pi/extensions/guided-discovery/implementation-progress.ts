@@ -320,10 +320,10 @@ const NODE_META: Record<WorkflowNodeId, { label: string; shortLabel: string }> =
 	implementation: { label: "Implementation", shortLabel: "Implement" },
 	cleanup: { label: "Cleanup", shortLabel: "Clean" },
 	design: { label: "Design review", shortLabel: "Design" },
-	checker: { label: "Checker", shortLabel: "Check" },
+	checker: { label: "Code review", shortLabel: "Review" },
 	fix: { label: "Fix", shortLabel: "Fix" },
-	validator: { label: "Validator", shortLabel: "Validate" },
-	finish: { label: "Finish", shortLabel: "Finish" },
+	validator: { label: "Plan check", shortLabel: "Plan" },
+	finish: { label: "Follow-up", shortLabel: "Follow" },
 };
 
 function createNodes(): Record<WorkflowNodeId, ProgressNodeState> {
@@ -845,8 +845,21 @@ export function buildImplementationProgressSnapshot(
 		};
 	});
 
+	const designVisible =
+		state.nodes.design.status !== "pending" ||
+		state.nodes.design.visits > 0 ||
+		state.implementation.batches.some((batch) => batch.phases.some((phase) => phase.designSensitive));
+	const fixVisible = state.nodes.fix.status !== "pending" || state.nodes.fix.visits > 0;
+	const finishVisible = state.nodes.finish.status !== "pending" || state.nodes.finish.visits > 0;
+	const pipelineNodeIds = WORKFLOW_NODE_ORDER.filter((id) => {
+		if (id === "design") return designVisible;
+		if (id === "fix") return fixVisible;
+		if (id === "finish") return finishVisible;
+		return true;
+	});
+
 	return {
-		pipeline: WORKFLOW_NODE_ORDER.map((id) => ({
+		pipeline: pipelineNodeIds.map((id) => ({
 			id,
 			label: nodeLabel(state.nodes[id]),
 			fullLabel: state.nodes[id].label,

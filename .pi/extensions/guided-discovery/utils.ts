@@ -98,14 +98,25 @@ const SAFE_PATTERNS = [
 	/^\s*exa\b/,
 ];
 
-const FINAL_PLAN_SECTION_PATTERNS = [
-	/^## Problem$/im,
-	/^## What I learned$/im,
-	/^## Decision log$/im,
-	/^## Recommended approach$/im,
-	/^## Implementation plan$/im,
-	/^## Acceptance criteria$/im,
-	/^## Risks \/ follow-ups$/im,
+const FINAL_PLAN_SECTION_FORMATS = [
+	[
+		/^## Problem$/im,
+		/^## Key findings$/im,
+		/^## Options and trade-offs$/im,
+		/^## Recommended approach$/im,
+		/^## Build plan$/im,
+		/^## Acceptance checks$/im,
+		/^## Risks \/ follow-ups$/im,
+	],
+	[
+		/^## Problem$/im,
+		/^## What I learned$/im,
+		/^## Decision log$/im,
+		/^## Recommended approach$/im,
+		/^## Implementation plan$/im,
+		/^## Acceptance criteria$/im,
+		/^## Risks \/ follow-ups$/im,
+	],
 ];
 
 export function isSafeCommand(command: string): boolean {
@@ -116,7 +127,7 @@ export function isSafeCommand(command: string): boolean {
 
 export function isFinalPlanResponse(text: string): boolean {
 	const normalized = text.trim();
-	return normalized.length > 0 && FINAL_PLAN_SECTION_PATTERNS.every((pattern) => pattern.test(normalized));
+	return normalized.length > 0 && FINAL_PLAN_SECTION_FORMATS.some((format) => format.every((pattern) => pattern.test(normalized)));
 }
 
 export function hashText(text: string): string {

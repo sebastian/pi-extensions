@@ -841,6 +841,10 @@ test("buildSummary distinguishes fixed issues, accepted residual soft issues, an
 	assert.match(summary, /Blocking hard quality issues: 1/);
 	assert.match(summary, /Merged-result verification passes: 2/);
 	assert.match(summary, /child-workspace conflict resolution/);
+	assert.match(summary, /Final code review findings: 1/);
+	assert.match(summary, /Checks run in final code review: 1 passed, 1 flagged findings, 0 blocked, 0 errored/);
+	assert.match(summary, /Validator follow-through: disabled by design/);
+	assert.match(summary, /Remaining plan discrepancies: 1/);
 	assert.match(summary, /## Accepted residual soft quality issues/);
 	assert.match(summary, /design\/ui: Button copy could be clearer/);
 	assert.match(summary, /## Blocking hard quality issues/);

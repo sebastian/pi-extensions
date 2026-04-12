@@ -389,6 +389,7 @@ export async function createChildWorkspace(options: {
 	parentCwd: string;
 	label: string;
 	touchedPaths: string[];
+	beforeBaselineSnapshot?: (workspace: ManagedWorkspace) => Promise<void> | void;
 }): Promise<{ workspace: ManagedWorkspace; baseline: WorkspaceSnapshot; seededChangedFiles: string[] }> {
 	const { workspace, seededChangedFiles } = await createManagedWorkspace({
 		exec: options.exec,
@@ -396,6 +397,7 @@ export async function createChildWorkspace(options: {
 		label: options.label,
 	});
 	try {
+		await options.beforeBaselineSnapshot?.(workspace);
 		const baseline = await createWorkspaceSnapshot({
 			cwd: workspace.repoRoot,
 			touchedPaths: options.touchedPaths,

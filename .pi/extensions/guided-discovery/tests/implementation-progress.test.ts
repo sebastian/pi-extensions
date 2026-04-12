@@ -243,3 +243,26 @@ test("snapshot layout keeps the active batch expanded and abbreviates labels in 
 	assert.equal(checkerFixLoop?.badge, "×4");
 	assert.equal(expandedBatch?.phases[0]?.label.endsWith("…"), true);
 });
+
+test("snapshot hides unused fix and follow-up nodes until the workflow actually touches them", () => {
+	const phases = [phase("phase-1", "Implement billing flow", ["src/billing"], true)];
+
+	let state = reduceImplementationProgress(createImplementationProgressState(), {
+		type: "decomposer-completed",
+		phases,
+	});
+	state = reduceImplementationProgress(state, {
+		type: "batches-computed",
+		phases,
+		batches: [phases],
+	});
+	state = reduceImplementationProgress(state, { type: "batch-started", batchIndex: 0 });
+	state = reduceImplementationProgress(state, { type: "phase-started", phaseId: "phase-1" });
+
+	const snapshot = buildImplementationProgressSnapshot(state, { width: 120 });
+	const pipelineIds = snapshot.pipeline.map((node) => node.id);
+
+	assert.deepEqual(pipelineIds, ["decomposer", "implementation", "cleanup", "design", "checker", "validator"]);
+	assert.equal(snapshot.pipeline.find((node) => node.id === "checker")?.fullLabel, "Code review");
+	assert.equal(snapshot.pipeline.find((node) => node.id === "validator")?.fullLabel, "Plan check");
+});

@@ -985,17 +985,17 @@ export function buildSummary(
 				`Blocking hard quality issues: ${qualityOutcome.blockingHardFindings.length}`,
 				`Merged-result verification passes: ${quality.mergedResultVerificationRuns}${quality.mergedResultVerificationReasons.length > 0 ? ` (${quality.mergedResultVerificationReasons.join("; ")})` : ""}`,
 				`Legacy code/files removed (verified): ${quality.legacyCodeOrFilesRemoved ? "yes" : "no"}`,
-				`Final checker findings: ${checker.findings.length}`,
-				`Checks run in final verification: ${passedChecks} passed, ${failedChecks} flagged findings, ${blockedChecks} blocked, ${erroredChecks} errored`,
+				`Final code review findings: ${checker.findings.length}`,
+				`Checks run in final code review: ${passedChecks} passed, ${failedChecks} flagged findings, ${blockedChecks} blocked, ${erroredChecks} errored`,
 				quality.agentsChecks.trackedCommands > 0
 					? `AGENTS-required checks across verification passes: ${quality.agentsChecks.trackedCommands} tracked, ${quality.agentsChecks.finalPassed} passing in the final pass, ${quality.agentsChecks.failedThenFixed} failed then fixed, ${quality.agentsChecks.finalFailed} still failing, ${quality.agentsChecks.finalBlocked} blocked, ${quality.agentsChecks.finalErrored} errored`
 					: "AGENTS-required checks across verification passes: none discovered",
 				`Validator recommendation: ${validation.recommendation}`,
-				`Validator auto-remediation passes: ${validationResolution.autoRemediationPasses}`,
-				`Auto-targeted validator discrepancies: ${validationResolution.autoRemediatedDiscrepancyIds.length}`,
-				`Validator manual remediation passes: ${validationResolution.manualRemediationPasses}`,
-				`Manually targeted validator discrepancies: ${validationResolution.manuallyTargetedDiscrepancyIds.length}`,
-				`Remaining discrepancies accepted: ${validationResolution.acceptedRemainingDiscrepancies ? "yes" : "no"}`,
+				`Remaining plan discrepancies: ${validation.discrepancies.length}`,
+				"Validator follow-through: disabled by design (single advisory coverage pass only)",
+				validation.discrepancies.length > 0
+					? "Remaining plan discrepancies are reported below instead of triggering more remediation loops."
+					: "Validator found no remaining plan discrepancies.",
 				validation.summary || "",
 			].join("\n"),
 			renderQualityGateFindingsSection(
@@ -4525,205 +4525,24 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 			completedNote: "Validator completed",
 		});
 
-		const returnReformulation = async (): Promise<WorkflowSummary> => {
-			await integrateRunWorkspace();
-			const summary = buildSummary(
-				changedFiles,
-				checkPass.results,
-				validation,
-				checkPass.report,
-				summarizeWorkflowQualityStats(workflowQualityStats),
-				validationResolution,
-				{
-					acceptedResidualSoftFindings,
-					blockingHardFindings,
-				},
-			);
+		if (validation.discrepancies.length > 0) {
+			discrepancySummaryItems = summarizeDiscrepancies(validation.discrepancies);
 			emitWorkflowUpdate(options.onUpdate, {
-				type: "workflow-completed",
-				stage: "complete",
+				type: "detail-lines",
+				stage: "validator",
 				lines: [
-					"Implementation paused for discovery reformulation.",
-					`Validator recommendation: ${validation.recommendation}`,
+					`Validator reported ${validation.discrepancies.length} remaining plan discrepancy(s).`,
+					"Keeping the sub-agent workflow bounded: remaining discrepancies are reported in the final summary instead of triggering another implementation loop.",
+					...(discrepancySummaryItems.length > 0 ? [`Top discrepancies: ${discrepancySummaryItems.join(" • ")}`] : []),
 				],
 				context: {
 					discrepancyCount: validation.discrepancies.length,
 					discrepancySummary: discrepancySummaryItems,
 					recommendation: validation.recommendation,
-					note: "Workflow handed back to discovery mode",
+					note: "Validator discrepancies recorded for advisory follow-up",
 				},
 			});
-			cleanupReportStage = "complete";
-			return {
-				decision: "reformulate",
-				summary,
-				reformulationPrompt: buildReformulationPrompt(validation),
-			};
-		};
-
-		const validatorLoopResult = await runValidatorDiscrepancyLoop({
-			initialValidation: validation,
-			hasUI: ctx.hasUI,
-			validationResolution,
-			attemptedAutoSignatures: autoAttemptedDiscrepancySignatures,
-			onAutoRemediationPlanned: async (step) => {
-				emitWorkflowUpdate(options.onUpdate, {
-					type: "detail-lines",
-					stage: "validator",
-					lines: [
-						`Automatically remediating ${step.handling.autoDiscrepancies.length} worthwhile validator discrepancy(s).`,
-						...(summarizeDiscrepancies(step.handling.autoDiscrepancies).length > 0
-							? [`Discrepancies: ${summarizeDiscrepancies(step.handling.autoDiscrepancies).join(" • ")}`]
-							: []),
-					],
-					context: {
-						discrepancyCount: step.handling.autoDiscrepancies.length,
-						discrepancySummary: summarizeDiscrepancies(step.handling.autoDiscrepancies),
-						recommendation: step.validation.recommendation,
-						note: "Automatically remediating worthwhile discrepancies",
-					},
-				});
-			},
-			onPromptRequired: async (step) => {
-				emitWorkflowUpdate(options.onUpdate, {
-					type: "detail-lines",
-					stage: "validator",
-					lines: [
-						`Validator still found ${step.handling.remainingActionableDiscrepancies.length} actionable discrepancy(s).`,
-						...(step.handling.attemptedAutoDiscrepancies.length > 0
-							? [`Already auto-attempted: ${summarizeDiscrepancies(step.handling.attemptedAutoDiscrepancies).join(" • ")}`]
-							: []),
-						`Recommendation: ${step.validation.recommendation}`,
-						...(summarizeDiscrepancies(step.handling.remainingActionableDiscrepancies).length > 0
-							? [`Remaining actionable discrepancies: ${summarizeDiscrepancies(step.handling.remainingActionableDiscrepancies).join(" • ")}`]
-							: []),
-					],
-					context: {
-						discrepancyCount: step.handling.remainingActionableDiscrepancies.length,
-						discrepancySummary: summarizeDiscrepancies(step.handling.remainingActionableDiscrepancies),
-						recommendation: step.validation.recommendation,
-						note: "Awaiting validator discrepancy decision",
-					},
-				});
-			},
-			promptForChoice: async (step) =>
-				await promptForValidatorDiscrepancyChoice(ctx, step.validation, {
-					attemptedAutoSignatures: autoAttemptedDiscrepancySignatures,
-					heading:
-						step.stage === "post-remediation"
-							? "Validator still found unresolved plan discrepancies after targeted remediation. What next?"
-							: "Validator found unresolved plan discrepancies. What next?",
-				}),
-			selectDiscrepancies: async (step) => {
-				emitWorkflowUpdate(options.onUpdate, {
-					type: "detail-lines",
-					stage: "validator",
-					lines: [
-						`Waiting for selection of ${step.handling.remainingActionableDiscrepancies.length} actionable validator discrepancy(s).`,
-						"Select only the items you want to implement in this pass.",
-						...(step.handling.informationalDiscrepancies.length > 0
-							? [`Informational only: ${step.handling.informationalDiscrepancies.length} superseded discrepancy(s).`]
-							: []),
-					],
-					context: {
-						discrepancyCount: step.handling.remainingActionableDiscrepancies.length,
-						discrepancySummary: summarizeDiscrepancies(step.handling.remainingActionableDiscrepancies),
-						recommendation: step.validation.recommendation,
-						note: "Waiting for validator discrepancy selection",
-					},
-				});
-				return await selectRemainingActionableDiscrepancies(ctx, {
-					title: "Select validator discrepancies to implement",
-					actionableDiscrepancies: step.handling.remainingActionableDiscrepancies,
-					informationalDiscrepancies: step.handling.informationalDiscrepancies,
-					introLines: [
-						step.validation.summary || `${step.handling.remainingActionableDiscrepancies.length} actionable discrepancy(s) remain.`,
-						...(step.handling.attemptedAutoDiscrepancies.length > 0
-							? [
-								`${step.handling.attemptedAutoDiscrepancies.length} worthwhile item(s) were already auto-attempted and still remain unresolved.`,
-							]
-							: []),
-					],
-					initialSelectedIds: step.initialSelectedIds,
-				});
-			},
-			onSelectionCancelled: async (step) => {
-				emitWorkflowUpdate(options.onUpdate, {
-					type: "detail-lines",
-					stage: "validator",
-					lines: [
-						"Validator discrepancy selection was cancelled.",
-						"Choose whether to select items, reformulate, or accept the remaining discrepancies.",
-					],
-					context: {
-						discrepancyCount: step.handling.remainingActionableDiscrepancies.length,
-						discrepancySummary: summarizeDiscrepancies(step.handling.remainingActionableDiscrepancies),
-						recommendation: step.validation.recommendation,
-						note: "Validator discrepancy selection cancelled",
-					},
-				});
-			},
-			onSelectionEmpty: async (step) => {
-				emitWorkflowUpdate(options.onUpdate, {
-					type: "detail-lines",
-					stage: "validator",
-					lines: [
-						"No validator discrepancies were selected for manual remediation.",
-						"Choose whether to select items, reformulate, or accept the remaining discrepancies.",
-					],
-					context: {
-						discrepancyCount: step.handling.remainingActionableDiscrepancies.length,
-						discrepancySummary: summarizeDiscrepancies(step.handling.remainingActionableDiscrepancies),
-						recommendation: step.validation.recommendation,
-						note: "No validator discrepancies selected",
-					},
-				});
-			},
-			runRemediation: async ({ kind, discrepancies, passNumber }) => {
-				await runTargetedValidatorRemediation({
-					kind,
-					discrepancies,
-					suiteId: kind === "auto" ? `post-auto-${passNumber}` : `post-manual-${passNumber}`,
-					title:
-						kind === "auto"
-							? `Validator auto-remediation pass ${passNumber}`
-							: `Validator selected-item remediation pass ${passNumber}`,
-					goal:
-						kind === "auto"
-							? "Implement only the worthwhile validator discrepancies selected for automatic remediation"
-							: "Implement only the selected actionable validator discrepancies",
-					instruction:
-						kind === "auto"
-							? "Implement only the selected worthwhile validator discrepancies."
-							: "Implement only the selected validator discrepancies.",
-					loopNote:
-						kind === "auto"
-							? "Validator triggered automatic worthwhile-item remediation"
-							: "Validator requested selected-item remediation",
-					completionNote:
-						kind === "auto"
-							? "Returning to cleanup after automatic validator remediation"
-							: "Returning to cleanup after selected validator remediation",
-				});
-				await runValidatorPass({
-					startLine:
-						kind === "auto"
-							? "Re-running validator after targeted validator remediation."
-							: "Re-running validator after selected validator remediation.",
-					startedNote:
-						kind === "auto"
-							? "Validator restarted after targeted remediation"
-							: "Validator restarted after selected-item remediation",
-					completedNote:
-						kind === "auto"
-							? "Validator completed after targeted remediation"
-							: "Validator completed after selected-item remediation",
-				});
-				return validation;
-			},
-		});
-		validation = validatorLoopResult.validation;
-		if (validatorLoopResult.decision === "reformulate") return await returnReformulation();
+		}
 
 		await integrateRunWorkspace();
 		const summary = buildSummary(
@@ -4763,13 +4582,15 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 		};
 	} catch (error) {
 		if (error instanceof QualitySuiteReformulateError) {
-			await handleRunWorkspaceIntegration?.();
 			emitWorkflowUpdate(options.onUpdate, {
 				type: "workflow-completed",
 				stage: "complete",
-				lines: ["Implementation paused for discovery reformulation after merged-result quality review."],
+				lines: [
+					"Implementation paused for discovery reformulation after merged-result quality review.",
+					"The isolated workspace result was not applied to the original checkout.",
+				],
 				context: {
-					note: "Workflow handed back to discovery mode after quality-suite reformulation choice",
+					note: "Workflow handed back to discovery mode without integrating the isolated workspace",
 				},
 			});
 			cleanupReportStage = "complete";

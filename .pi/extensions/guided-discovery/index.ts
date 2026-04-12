@@ -37,29 +37,27 @@ const WIDGET_KEY = "guided-discovery";
 
 const DISCOVERY_PROMPT_APPEND = `
 [Guided discovery mode]
-You are in a planning-first workflow that turns loose ideas into an implementation-ready plan.
+You are in a research-first planning workflow that should stay concise, decisive, and implementation-oriented.
 
 Your job in this mode:
-1. Research the repository first using read-only tools. Inspect the existing code, conventions, architecture, tests, and docs before proposing implementation details.
-2. When external knowledge materially matters, use web_research for official docs, vendor docs, API references, competitor/market context, and current best practices.
-3. Infer the real decision tree. Look for product/business decisions, UX choices, data model and API decisions, migration concerns, rollout constraints, testing strategy, and non-functional requirements.
-4. Ask clarifying questions with the questionnaire tool whenever an unresolved decision materially affects the plan.
-5. Prefer 1-4 focused questions per batch, mostly multiple choice. Options should be concrete, mutually useful, and include likely defaults. Keep allowOther enabled unless a free-form answer would be harmful.
-6. Prefer first-party sources when doing external research. Summarize what the sources imply instead of dumping raw excerpts.
-7. Balance state-of-the-art practice with simplicity and robustness. Do not recommend fashionable complexity when a simpler proven approach fits the problem.
-8. After each answer batch, briefly summarize what changed, what remains uncertain, and whether more research is needed.
-9. Avoid unnecessary questions. If the repository or common practice strongly suggests a good default, recommend it explicitly instead of asking for permission on every minor choice.
-10. Focus on creating a plan that is as simple and robust as possible.
-11. Do not implement or modify files while this mode is active.
-12. Once the plan is implementation-ready, respond with these exact sections:
+1. Start with a fast repo scan using read-only tools. Inspect the existing code, architecture, tests, docs, and conventions before proposing changes.
+2. If the request references an existing product, third-party API, external ecosystem, market pattern, or greenfield product behavior, proactively use web_research early. Prefer official docs and first-party sources.
+3. Research enough to make good decisions yourself. Do not wait for the user to explicitly ask for obvious state-of-the-art or product-context research.
+4. Surface the real trade-offs. Recommend a concrete default when the repo and research point to one. Do not expand into a broad option dump.
+5. Ask clarifying questions only when a missing answer would materially change what should be built. Usually ask at most one focused batch at a time, and often ask none.
+6. Keep interim summaries short. Do not narrate every micro-step of planning or research.
+7. For remote websites and product references, prefer web_research over ad-hoc scraping.
+8. Favor simple, proven approaches over elaborate agent-generated architecture.
+9. Do not implement or modify files while this mode is active.
+10. Once the plan is implementation-ready, respond with these exact sections:
     ## Problem
-    ## What I learned
-    ## Decision log
+    ## Key findings
+    ## Options and trade-offs
     ## Recommended approach
-    ## Implementation plan
-    ## Acceptance criteria
+    ## Build plan
+    ## Acceptance checks
     ## Risks / follow-ups
-13. If the user clearly wants to start coding, tell them to run /discover-implement, /implement-subagents, or /discover-off first.
+11. If the user clearly wants to start coding, tell them to run /discover-implement, /implement-subagents, or /discover-off first.
 `;
 
 interface SavedState {
@@ -155,7 +153,7 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 			ctx.ui.theme.fg("accent", "Guided discovery mode active"),
 			ctx.ui.theme.fg(
 				"dim",
-				"Read-only repo + web research • structured questions • PLAN.md auto-saves • /discover-implement or /implement-subagents to start coding",
+				"Read-only repo + active web research • focused trade-offs • concise PLAN.md • /discover-implement or /implement-subagents to start coding",
 			),
 		];
 
@@ -200,9 +198,9 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 			`Feature idea: ${goal}`,
 			"",
 			"Start guided discovery for this request.",
-			"Research the codebase first.",
-			"If external docs, API details, competitor patterns, or market context matter, use web_research after you understand the repository.",
-			"Then identify the key decisions and trade-offs, and ask the first batch of clarifying questions with the questionnaire tool.",
+			"Do a fast repo scan first.",
+			"If the request references an external product, API, ecosystem, or greenfield workflow, proactively do web research before planning.",
+			"Make concrete recommendations, keep the plan concise, and ask only the highest-leverage questions if something truly blocks a good decision.",
 		].join("\n");
 	}
 
@@ -214,12 +212,20 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 		const [baseStage] = stage.split(":");
 		switch (baseStage) {
 			case "starting":
+				return "starting";
 			case "decomposer":
+				return "decompose";
 			case "worker":
+				return "implement";
+			case "cleanup":
+			case "design":
 			case "checker":
 			case "fix":
+				return "review";
 			case "validator":
+				return "coverage";
 			case "finish":
+				return "follow-up";
 			case "complete":
 			case "failed":
 				return baseStage;

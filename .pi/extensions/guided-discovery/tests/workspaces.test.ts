@@ -422,37 +422,6 @@ test("createChildWorkspace cleans up its jj workspace when baseline snapshot cre
 
 	const calls: Array<{ command: string; args: string[]; cwd?: string }> = [];
 	let workspacePath = "";
-	let mutationScheduled = false;
-	let mutationResolved = false;
-	let resolveMutation!: () => void;
-	let rejectMutation!: (error: unknown) => void;
-	const mutationDone = new Promise<void>((resolve, reject) => {
-		resolveMutation = resolve;
-		rejectMutation = reject;
-	});
-	const mutateWorkspaceAfterSeed = async (attempt = 0): Promise<void> => {
-		if (mutationResolved) return;
-		try {
-			if (attempt > 200) {
-				throw new Error("Timed out waiting to sabotage the child workspace baseline snapshot.");
-			}
-			const targetFile = join(workspacePath, "src", "changed.ts");
-			const targetContents = await readFile(targetFile, "utf8").catch(() => "");
-			if (targetContents !== "source-change\n") {
-				setImmediate(() => {
-					void mutateWorkspaceAfterSeed(attempt + 1);
-				});
-				return;
-			}
-			mutationResolved = true;
-			await rm(join(workspacePath, "src"), { recursive: true, force: true });
-			await symlink(outside, join(workspacePath, "src"), "dir");
-			resolveMutation();
-		} catch (error) {
-			mutationResolved = true;
-			rejectMutation(error);
-		}
-	};
 	const exec: ExecLike = async (command, args, options) => {
 		calls.push({ command, args, cwd: options?.cwd });
 		if (command === "jj" && args[0] === "workspace" && args[1] === "add") {
@@ -464,12 +433,6 @@ test("createChildWorkspace cleans up its jj workspace when baseline snapshot cre
 		}
 		if (command === "jj" && args[0] === "new") return { stdout: "", stderr: "", code: 0 };
 		if (command === "jj" && args[0] === "diff" && args[1] === "--summary" && options?.cwd === root) {
-			if (!mutationScheduled) {
-				mutationScheduled = true;
-				setImmediate(() => {
-					void mutateWorkspaceAfterSeed();
-				});
-			}
 			return { stdout: "M src/changed.ts\n", stderr: "", code: 0 };
 		}
 		if (command === "jj" && args[0] === "workspace" && args[1] === "forget") {
@@ -484,9 +447,14 @@ test("createChildWorkspace cleans up its jj workspace when baseline snapshot cre
 			parentCwd: root,
 			label: "phase-1",
 			touchedPaths: ["missing"],
+			beforeBaselineSnapshot: async (workspace) => {
+				const targetFile = join(workspace.repoRoot, "src", "changed.ts");
+				assert.equal(await readFile(targetFile, "utf8"), "source-change\n");
+				await rm(join(workspace.repoRoot, "src"), { recursive: true, force: true });
+				await symlink(outside, join(workspace.repoRoot, "src"), "dir");
+			},
 		}),
 	);
-	await mutationDone;
 
 	assert.ok(workspacePath);
 	const workspaceName = basename(workspacePath);
