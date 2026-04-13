@@ -23,6 +23,7 @@
     "tui-compat.ts",
     "usage-display.ts",
     "utils.ts",
+    "widget-support.ts",
     "workspaces.ts",
     "web-research.ts",
     "README.md"

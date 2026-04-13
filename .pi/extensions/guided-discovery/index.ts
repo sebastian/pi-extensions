@@ -23,6 +23,7 @@ import { createImplementationProgressWidget } from "./implementation-progress-wi
 import type { SubagentUsageTotals } from "./subagent-runner.ts";
 import registerQuestionnaire from "./questionnaire.ts";
 import { buildUsageDisplay, formatTokens, hasUsageTotals } from "./usage-display.ts";
+import { supportsStructuredImplementationWidget } from "./widget-support.ts";
 import {
 	type ResearchSource,
 	hashText,
@@ -606,10 +607,6 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 			"If the request references an external product, API, ecosystem, or greenfield workflow, proactively do web research before planning.",
 			"Make concrete recommendations, keep the plan concise, and ask only the highest-leverage questions if something truly blocks a good decision.",
 		].join("\n");
-	}
-
-	function supportsStructuredImplementationWidget(ctx: ExtensionContext): boolean {
-		return ctx.hasUI;
 	}
 
 	function summarizeImplementationStage(stage: string): string {
