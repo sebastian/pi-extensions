@@ -29,6 +29,7 @@ interface HorizontalPipelineLayout {
 export interface ImplementationProgressWidgetOptions extends ImplementationProgressSnapshotOptions {
 	maxDetailLines?: number;
 	title?: string;
+	usageSummaryLines?: string[];
 }
 
 const DEFAULT_TITLE = "Guided implementation";
@@ -303,6 +304,12 @@ function renderTelemetry(theme: Theme, snapshot: ImplementationProgressSnapshot,
 	return [truncateToWidth(summaryParts.join(theme.fg("dim", "  •  ")), innerWidth, "…")];
 }
 
+function renderUsageSummaryLines(theme: Theme, usageSummaryLines: string[] | undefined, innerWidth: number): string[] {
+	return (usageSummaryLines ?? []).map((line, index) =>
+		truncateToWidth(theme.fg(index === 0 ? "muted" : "dim", line), innerWidth, "…"),
+	);
+}
+
 function renderDetailLines(
 	theme: Theme,
 	snapshot: ImplementationProgressSnapshot,
@@ -443,6 +450,7 @@ export function renderImplementationProgressSnapshot(
 		...graphLines,
 		"",
 		...renderTelemetry(theme, snapshot, innerWidth),
+		...renderUsageSummaryLines(theme, options.usageSummaryLines, innerWidth),
 		...renderDetailLines(theme, snapshot, innerWidth, maxDetailLines),
 	];
 	if (snapshot.failure?.message) {

@@ -27,7 +27,12 @@ test("implementation progress widget keeps framed lines aligned when the theme e
 	state = reduceImplementationProgress(state, { type: "decomposer-started" });
 
 	const width = 80;
-	const lines = renderImplementationProgressWidget(theme as Theme, state, width);
+	const lines = renderImplementationProgressWidget(theme as Theme, state, width, {
+		usageSummaryLines: [
+			"Cost ▸ total $0.123 • session $0.078 • subagents $0.045",
+			"Tokens ▸ ↑12k • ↓4.5k • R900 • W50",
+		],
+	});
 	assert.ok(lines.length > 3);
 	for (const line of lines) {
 		assert.equal(visibleWidth(line), width);

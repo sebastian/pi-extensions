@@ -22,6 +22,7 @@ import {
 import { createImplementationProgressWidget } from "./implementation-progress-widget.ts";
 import type { SubagentUsageTotals } from "./subagent-runner.ts";
 import registerQuestionnaire from "./questionnaire.ts";
+import { buildUsageDisplay, formatTokens, hasUsageTotals } from "./usage-display.ts";
 import {
 	type ResearchSource,
 	hashText,
@@ -96,18 +97,6 @@ function addSubagentUsageTotals(total: SubagentUsageTotals, delta: SubagentUsage
 		cost: total.cost + delta.cost,
 		turns: total.turns + delta.turns,
 	};
-}
-
-function hasSubagentUsageTotals(usage: SubagentUsageTotals): boolean {
-	return Boolean(usage.input || usage.output || usage.cacheRead || usage.cacheWrite || usage.cost || usage.turns);
-}
-
-function formatTokens(count: number): string {
-	if (count < 1000) return count.toString();
-	if (count < 10000) return (count / 1000).toFixed(1) + "k";
-	if (count < 1000000) return Math.round(count / 1000) + "k";
-	if (count < 10000000) return (count / 1000000).toFixed(1) + "M";
-	return Math.round(count / 1000000) + "M";
 }
 
 function normalizeToolList(names: string[] | null | undefined): string[] | null {
@@ -393,6 +382,20 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 		return total;
 	}
 
+	function buildCurrentUsageDisplay(ctx: ExtensionContext) {
+		const sessionUsage = collectSessionAssistantUsage(ctx);
+		const totalUsage = addSubagentUsageTotals(sessionUsage, subagentUsageTotals);
+		return buildUsageDisplay({
+			sessionUsage,
+			subagentUsage: subagentUsageTotals,
+			totalUsage,
+		});
+	}
+
+	function styleUsageSummaryLines(ctx: ExtensionContext, lines: string[]): string[] {
+		return lines.map((line, index) => ctx.ui.theme.fg(index === 0 ? "muted" : "dim", line));
+	}
+
 	function sanitizeFooterText(text: string): string {
 		const controlChars = [String.fromCharCode(13), String.fromCharCode(10), String.fromCharCode(9)];
 		let value = text;
@@ -421,7 +424,7 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 	function syncUsageFooter(ctx: ExtensionContext): void {
 		if (!ctx.hasUI) return;
 		const guidedFooterLines = buildGuidedFooterLines();
-		if (!subagentWorkflowActive && !hasSubagentUsageTotals(subagentUsageTotals) && guidedFooterLines.length === 0) {
+		if (!subagentWorkflowActive && !hasUsageTotals(subagentUsageTotals) && guidedFooterLines.length === 0) {
 			if (ownsFooter) {
 				ctx.ui.setFooter(undefined);
 				ownsFooter = false;
@@ -438,8 +441,7 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 				dispose,
 				invalidate() {},
 				render(width: number): string[] {
-					const sessionUsage = collectSessionAssistantUsage(ctx);
-					const totalUsage = addSubagentUsageTotals(sessionUsage, subagentUsageTotals);
+					const usageDisplay = buildCurrentUsageDisplay(ctx);
 					const contextUsage = ctx.getContextUsage();
 					const contextWindow = contextUsage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
 					const contextPercentValue = contextUsage?.percent ?? 0;
@@ -453,16 +455,7 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 					const sessionName = ctx.sessionManager.getSessionName();
 					if (sessionName) pwd += " • " + sessionName;
 
-					const statsParts: string[] = [];
-					if (totalUsage.input) statsParts.push("↑" + formatTokens(totalUsage.input));
-					if (totalUsage.output) statsParts.push("↓" + formatTokens(totalUsage.output));
-					if (totalUsage.cacheRead) statsParts.push("R" + formatTokens(totalUsage.cacheRead));
-					if (totalUsage.cacheWrite) statsParts.push("W" + formatTokens(totalUsage.cacheWrite));
-					if (totalUsage.cost || hasSubagentUsageTotals(subagentUsageTotals)) {
-						let costPart = "$" + totalUsage.cost.toFixed(3);
-						if (hasSubagentUsageTotals(subagentUsageTotals)) costPart += " +subagents";
-						statsParts.push(costPart);
-					}
+					const statsParts = [...usageDisplay.footerParts];
 
 					let contextDisplay = contextPercent === "?" ? "?/" + formatTokens(contextWindow) : contextPercent + "%/" + formatTokens(contextWindow);
 					if (contextPercentValue < 70) {
@@ -558,6 +551,7 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 				),
 			);
 		}
+		lines.push(...styleUsageSummaryLines(ctx, buildCurrentUsageDisplay(ctx).widgetLines));
 
 		ctx.ui.setStatus(
 			STATUS_KEY,
@@ -649,6 +643,7 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 		fallbackLines: string[],
 	): void {
 		const stageLabel = summarizeImplementationStage(stage);
+		const usageSummaryLines = buildCurrentUsageDisplay(ctx).widgetLines;
 		ctx.ui.setStatus(
 			STATUS_KEY,
 			state.failure
@@ -659,7 +654,11 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 		);
 
 		if (supportsStructuredImplementationWidget(ctx)) {
-			ctx.ui.setWidget(WIDGET_KEY, createImplementationProgressWidget(() => state), { placement: "aboveEditor" });
+			ctx.ui.setWidget(
+				WIDGET_KEY,
+				createImplementationProgressWidget(() => state, { usageSummaryLines }),
+				{ placement: "aboveEditor" },
+			);
 			return;
 		}
 
@@ -668,6 +667,7 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 			WIDGET_KEY,
 			[
 				ctx.ui.theme.fg("accent", `Guided implementation • ${stageLabel}`),
+				...styleUsageSummaryLines(ctx, usageSummaryLines),
 				...detailLines.map((line) => ctx.ui.theme.fg("dim", line)),
 			],
 			{ placement: "aboveEditor" },
@@ -816,8 +816,10 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 					: `${options.workflowMode} sub-agent implementation workflow starting`,
 			},
 		});
+		let latestImplementationWidgetInput: { stage: string; fallbackLines: string[] } | null = null;
 		let lastPrintedProgress: string | null = null;
 		const handleImplementationProgress = (update: WorkflowProgressUpdate): void => {
+			latestImplementationWidgetInput = { stage: update.stage, fallbackLines: update.lines };
 			implementationProgress = reduceImplementationProgress(implementationProgress, update);
 			if (ctx.hasUI) {
 				setImplementationProgress(ctx, update.stage, implementationProgress, update.lines);
@@ -840,11 +842,25 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 			runUsageTotals.totalTokens += usage.totalTokens;
 			runUsageTotals.cost += usage.cost;
 			runUsageTotals.turns += usage.turns;
-			if (ctx.hasUI) syncUsageFooter(ctx);
+			if (ctx.hasUI) {
+				syncUsageFooter(ctx);
+				if (latestImplementationWidgetInput) {
+					setImplementationProgress(
+						ctx,
+						latestImplementationWidgetInput.stage,
+						implementationProgress,
+						latestImplementationWidgetInput.fallbackLines,
+					);
+				}
+			}
 		};
 
 		if (ctx.hasUI) {
-			setImplementationProgress(ctx, "starting", implementationProgress, [...progressIntro, `Workflow mode: ${options.workflowMode}`]);
+			latestImplementationWidgetInput = {
+				stage: "starting",
+				fallbackLines: [...progressIntro, `Workflow mode: ${options.workflowMode}`],
+			};
+			setImplementationProgress(ctx, "starting", implementationProgress, latestImplementationWidgetInput.fallbackLines);
 		}
 		const previousResumableState = resumableImplementationState;
 		try {
@@ -940,7 +956,7 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 			return false;
 		} finally {
 			subagentWorkflowActive = false;
-			if (hasSubagentUsageTotals(runUsageTotals)) persistState();
+			if (hasUsageTotals(runUsageTotals)) persistState();
 			if (ctx.hasUI) {
 				syncUsageFooter(ctx);
 				clearImplementationProgress(ctx);
@@ -1306,7 +1322,9 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 		const saved = await maybeSaveFinalPlan(assistantText, ctx);
 		if (saved) {
 			await promptForPlanApproval(ctx);
+			return;
 		}
+		updateUi(ctx);
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {

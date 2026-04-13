@@ -249,3 +249,24 @@ test("snapshot hides unused fix nodes until the workflow actually touches them",
 	assert.equal(snapshot.pipeline.find((node) => node.id === "checker")?.fullLabel, "Code review");
 	assert.equal(snapshot.pipeline.find((node) => node.id === "validator")?.fullLabel, "Plan check");
 });
+
+test("widget renders usage summary lines between telemetry and detail lines", () => {
+	const theme = {
+		fg: (_color: string, text: string) => text,
+		bold: (text: string) => text,
+	} as const;
+
+	let state = createImplementationProgressState({ detailLines: ["Queued worker batches"] });
+	state = reduceImplementationProgress(state, { type: "decomposer-started" });
+
+	const rendered = renderImplementationProgressWidget(theme as Theme, state, 110, {
+		usageSummaryLines: [
+			"Cost ▸ total $0.123 • session $0.078 • subagents $0.045",
+			"Tokens ▸ ↑12k • ↓4.5k",
+		],
+	}).join("\n");
+
+	assert.match(rendered, /Cost ▸ total \$0\.123 • session \$0\.078 • subagents \$0\.045/);
+	assert.match(rendered, /Tokens ▸ ↑12k • ↓4\.5k/);
+	assert.ok(rendered.indexOf("Cost ▸") < rendered.indexOf("· Queued worker batches"));
+});

@@ -21,6 +21,7 @@
     "structured-output.ts",
     "subagent-runner.ts",
     "tui-compat.ts",
+    "usage-display.ts",
     "utils.ts",
     "workspaces.ts",
     "web-research.ts",
