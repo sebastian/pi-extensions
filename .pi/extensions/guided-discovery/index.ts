@@ -3,13 +3,14 @@ import type { AssistantMessage, TextContent } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Key } from "@mariozechner/pi-tui";
 import { padToWidth, truncateToWidth, visibleWidth } from "./tui-compat.ts";
-import { access, writeFile } from "node:fs/promises";
+import { access, readFile, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import type { ExecLike } from "./changes.ts";
 import {
 	parseImplementationRequest,
-	resolveStandaloneSubagentRequest,
 	runGuidedDiscoveryImplementationWorkflow,
 	type ImplementationMode,
+	type SubagentWorkflowMode,
 } from "./implement-workflow.ts";
 import {
 	createImplementationProgressState,
@@ -29,6 +30,13 @@ import {
 	renderPlanDocument,
 } from "./utils.ts";
 import registerWebResearch from "./web-research.ts";
+import {
+	createManagedWorkspace,
+	reviveManagedWorkspace,
+	serializeManagedWorkspace,
+	type ManagedWorkspace,
+	type SerializedManagedWorkspace,
+} from "./workspaces.ts";
 
 const DISCOVERY_MODE_TOOLS = ["read", "bash", "grep", "find", "ls", "questionnaire", "web_research"];
 const DEFAULT_IMPLEMENTATION_TOOLS = ["read", "bash", "edit", "write"];
@@ -66,8 +74,10 @@ interface SavedState {
 	enabled?: boolean;
 	previousActiveTools?: string[] | null;
 	lastSavedPlanSignature?: string | null;
+	lastSavedPlanDocument?: string | null;
 	researchSources?: ResearchSource[] | null;
 	subagentUsageTotals?: SubagentUsageTotals | null;
+	discoveryWorkspace?: SerializedManagedWorkspace | null;
 }
 
 function emptySubagentUsageTotals(): SubagentUsageTotals {
@@ -155,6 +165,16 @@ function isPrintModeProcess(): boolean {
 	return process.argv.includes("-p") || process.argv.includes("--print");
 }
 
+function displayPath(path: string): string {
+	const home = process.env.HOME || process.env.USERPROFILE;
+	if (home && path.startsWith(home)) return `~${path.slice(home.length)}`;
+	return path;
+}
+
+function shellQuote(value: string): string {
+	return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
 export default function guidedDiscovery(pi: ExtensionAPI): void {
 	registerQuestionnaire(pi);
 	registerWebResearch(pi);
@@ -163,18 +183,152 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 	let previousActiveTools: string[] | null = null;
 	let researchSources: ResearchSource[] = [];
 	let lastSavedPlanSignature: string | null = null;
+	let lastSavedPlanDocument: string | null = null;
 	let subagentUsageTotals = emptySubagentUsageTotals();
 	let subagentWorkflowActive = false;
 	let ownsFooter = false;
+	let discoveryWorkspace: ManagedWorkspace | null = null;
+	let discoveryWorkspaceState: SerializedManagedWorkspace | null = null;
+	let discoveryWorkspacePromise: Promise<ManagedWorkspace> | null = null;
 
 	function persistState(): void {
 		pi.appendEntry(STATE_TYPE, {
 			enabled,
 			previousActiveTools,
 			lastSavedPlanSignature,
+			lastSavedPlanDocument,
 			researchSources,
 			subagentUsageTotals,
+			discoveryWorkspace: discoveryWorkspace ? serializeManagedWorkspace(discoveryWorkspace) : discoveryWorkspaceState,
 		} satisfies SavedState);
+	}
+
+	function makeExec(): ExecLike {
+		return async (command, args, options) => {
+			const result = await pi.exec(command, args, options);
+			return {
+				stdout: result.stdout,
+				stderr: result.stderr,
+				code: result.code,
+			};
+		};
+	}
+
+	function getDiscoveryWorkflowCwd(workspace: ManagedWorkspace): string {
+		return resolve(workspace.repoRoot, workspace.sourceRelativeCwd);
+	}
+
+	function getDiscoveryPlanPath(workspace: ManagedWorkspace): string {
+		return resolve(getDiscoveryWorkflowCwd(workspace), PLAN_FILE);
+	}
+
+	function mapPathIntoDiscoveryWorkspace(rawPath: string, workspace: ManagedWorkspace): string {
+		const trimmedPath = rawPath.trim();
+		if (!trimmedPath) return getDiscoveryWorkflowCwd(workspace);
+		const workflowCwd = getDiscoveryWorkflowCwd(workspace);
+		const normalizedPath = trimmedPath.startsWith("@") ? trimmedPath.slice(1) : trimmedPath;
+		if (normalizedPath.startsWith(workspace.sourceRepoRoot)) {
+			const relativePath = normalizedPath.slice(workspace.sourceRepoRoot.length).replace(/^\/+/, "");
+			return resolve(workspace.repoRoot, relativePath);
+		}
+		if (normalizedPath.startsWith(workspace.sourceCwd)) {
+			const relativePath = normalizedPath.slice(workspace.sourceCwd.length).replace(/^\/+/, "");
+			return resolve(workflowCwd, relativePath);
+		}
+		if (normalizedPath.startsWith("/")) return normalizedPath;
+		return resolve(workflowCwd, normalizedPath);
+	}
+
+	async function restorePlanIntoWorkspace(workspace: ManagedWorkspace): Promise<void> {
+		if (!lastSavedPlanDocument?.trim()) return;
+		await writeFile(getDiscoveryPlanPath(workspace), lastSavedPlanDocument, "utf8");
+	}
+
+	async function ensureDiscoveryWorkspace(ctx: ExtensionContext): Promise<ManagedWorkspace> {
+		if (discoveryWorkspace) return discoveryWorkspace;
+		if (discoveryWorkspacePromise) return await discoveryWorkspacePromise;
+		discoveryWorkspacePromise = (async () => {
+			const exec = makeExec();
+			if (discoveryWorkspaceState) {
+				try {
+					const revived = await reviveManagedWorkspace({ exec, state: discoveryWorkspaceState });
+					discoveryWorkspace = revived;
+					await restorePlanIntoWorkspace(revived);
+					persistState();
+					return revived;
+				} catch {
+					discoveryWorkspace = null;
+					discoveryWorkspaceState = null;
+				}
+			}
+			const { workspace } = await createManagedWorkspace({
+				exec,
+				sourceCwd: ctx.cwd,
+				label: "discover",
+			});
+			discoveryWorkspace = workspace;
+			discoveryWorkspaceState = serializeManagedWorkspace(workspace);
+			await restorePlanIntoWorkspace(workspace);
+			persistState();
+			return workspace;
+		})().finally(() => {
+			discoveryWorkspacePromise = null;
+		});
+		const workspace = await discoveryWorkspacePromise;
+		updateUi(ctx);
+		return workspace;
+	}
+
+	async function cleanupDiscoveryWorkspace(
+		ctx: ExtensionContext,
+		options?: { clearSavedPlan?: boolean; cleanupOriginalPlanFile?: boolean },
+	): Promise<void> {
+		const shouldCleanupOriginalPlan = options?.cleanupOriginalPlanFile === true;
+		const shouldClearSavedPlan = options?.clearSavedPlan === true;
+		try {
+			if (shouldCleanupOriginalPlan && lastSavedPlanSignature) {
+				const originalPlanPath = resolve(ctx.cwd, PLAN_FILE);
+				if (await fileExists(originalPlanPath)) {
+					const currentPlan = await readFile(originalPlanPath, "utf8").catch(() => "");
+					if (currentPlan && hashText(currentPlan) === lastSavedPlanSignature) {
+						await rm(originalPlanPath, { force: true });
+					}
+				}
+			}
+			if (discoveryWorkspace) {
+				await discoveryWorkspace.cleanup().catch(() => {});
+			}
+		} finally {
+			discoveryWorkspace = null;
+			discoveryWorkspaceState = null;
+			if (shouldClearSavedPlan) {
+				lastSavedPlanSignature = null;
+				lastSavedPlanDocument = null;
+			}
+			persistState();
+			updateUi(ctx);
+		}
+	}
+
+	async function getApprovedPlanSource(ctx: ExtensionContext): Promise<
+		| { hasPlan: true; path: string; displayPath: string; source: "workspace" | "cwd" }
+		| { hasPlan: false; source: "none" }
+	> {
+		if (lastSavedPlanSignature || lastSavedPlanDocument || discoveryWorkspace || discoveryWorkspaceState) {
+			const workspace = await ensureDiscoveryWorkspace(ctx);
+			const planPath = getDiscoveryPlanPath(workspace);
+			if (lastSavedPlanDocument?.trim() && !(await fileExists(planPath))) {
+				await writeFile(planPath, lastSavedPlanDocument, "utf8");
+			}
+			if (await fileExists(planPath)) {
+				return { hasPlan: true, path: planPath, displayPath: displayPath(planPath), source: "workspace" };
+			}
+		}
+		const cwdPlanPath = resolve(ctx.cwd, PLAN_FILE);
+		if (await fileExists(cwdPlanPath)) {
+			return { hasPlan: true, path: cwdPlanPath, displayPath: PLAN_FILE, source: "cwd" };
+		}
+		return { hasPlan: false, source: "none" };
 	}
 
 	function collectSessionAssistantUsage(ctx: ExtensionContext): SubagentUsageTotals {
@@ -197,13 +351,13 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 	}
 
 	function sanitizeFooterText(text: string): string {
-	const controlChars = [String.fromCharCode(13), String.fromCharCode(10), String.fromCharCode(9)];
-	let value = text;
-	for (const controlChar of controlChars) value = value.split(controlChar).join(" ");
-	return value.replace(/ +/g, " ").trim();
-}
+		const controlChars = [String.fromCharCode(13), String.fromCharCode(10), String.fromCharCode(9)];
+		let value = text;
+		for (const controlChar of controlChars) value = value.split(controlChar).join(" ");
+		return value.replace(/ +/g, " ").trim();
+	}
 
-function syncUsageFooter(ctx: ExtensionContext): void {
+	function syncUsageFooter(ctx: ExtensionContext): void {
 		if (!ctx.hasUI) return;
 		if (!subagentWorkflowActive && !hasSubagentUsageTotals(subagentUsageTotals)) {
 			if (ownsFooter) {
@@ -296,15 +450,30 @@ function syncUsageFooter(ctx: ExtensionContext): void {
 			ctx.ui.theme.fg("accent", "Guided discovery mode active"),
 			ctx.ui.theme.fg(
 				"dim",
-				"Read-only repo + active web research • focused trade-offs • concise PLAN.md • /discover-implement or /implement-subagents to start coding",
+				"Read-only isolated workspace + active web research • focused trade-offs • concise PLAN.md • /discover-implement or /implement-subagents to start coding",
 			),
 		];
 
+		if (discoveryWorkspace) {
+			lines.push(
+				ctx.ui.theme.fg(
+					"muted",
+					`Discovery workspace: ${displayPath(getDiscoveryWorkflowCwd(discoveryWorkspace))}`,
+				),
+			);
+		}
 		if (researchSources.length > 0) {
 			lines.push(ctx.ui.theme.fg("muted", `Captured external sources: ${researchSources.length}`));
 		}
 		if (lastSavedPlanSignature) {
-			lines.push(ctx.ui.theme.fg("success", "Latest final plan saved to PLAN.md"));
+			lines.push(
+				ctx.ui.theme.fg(
+					"success",
+					discoveryWorkspace
+						? `Latest final plan saved to ${displayPath(getDiscoveryPlanPath(discoveryWorkspace))}`
+						: "Latest final plan saved to PLAN.md",
+				),
+			);
 		}
 
 		ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("accent", "🧭 discover"));
@@ -320,19 +489,28 @@ function syncUsageFooter(ctx: ExtensionContext): void {
 		pi.setActiveTools(normalizeToolList(previousActiveTools) ?? DEFAULT_IMPLEMENTATION_TOOLS);
 	}
 
-	function enableDiscovery(ctx: ExtensionContext): void {
+	async function enableDiscovery(ctx: ExtensionContext): Promise<void> {
 		if (!enabled) {
 			previousActiveTools = normalizeToolList(pi.getActiveTools().map((tool) => tool.name));
 		}
 		enabled = true;
 		applyDiscoveryTools();
-		updateUi(ctx);
 		persistState();
+		updateUi(ctx);
+		await ensureDiscoveryWorkspace(ctx).catch((error) => {
+			const message = `Failed to prepare the isolated discovery workspace: ${error instanceof Error ? error.message : String(error)}`;
+			surfaceWorkflowWarning(ctx, message);
+		});
+		updateUi(ctx);
 	}
 
-	function disableDiscovery(ctx: ExtensionContext): void {
+	async function disableDiscovery(ctx: ExtensionContext): Promise<void> {
 		enabled = false;
 		restoreTools();
+		if (!lastSavedPlanSignature && !lastSavedPlanDocument) {
+			await cleanupDiscoveryWorkspace(ctx, { clearSavedPlan: false, cleanupOriginalPlanFile: false });
+			return;
+		}
 		updateUi(ctx);
 		persistState();
 	}
@@ -416,38 +594,54 @@ function syncUsageFooter(ctx: ExtensionContext): void {
 		}
 	}
 
-	async function chooseImplementationMode(ctx: ExtensionContext, hasPlanFile: boolean): Promise<ImplementationMode | null> {
+	type ImplementationSelection = { mode: "direct" } | { mode: "subagents"; workflowMode: SubagentWorkflowMode };
+
+	async function chooseImplementationMode(
+		ctx: ExtensionContext,
+		planSource: Awaited<ReturnType<typeof getApprovedPlanSource>>,
+	): Promise<ImplementationSelection | null> {
 		if (!ctx.hasUI) return null;
-		if (!hasPlanFile) {
+		if (!planSource.hasPlan) {
 			const choice = await ctx.ui.select(
-				`No ${PLAN_FILE} detected. Direct mode will rely on the conversation history. Use /implement-subagents with a raw prompt if you want the isolated sub-agent workflow instead.`,
+				`No approved ${PLAN_FILE} is available yet. Direct mode will rely on the conversation history. Use /implement-subagents with a raw prompt if you want an isolated implementation workflow without a saved plan.`,
 				["Implement directly", "Cancel"],
 			);
-			return choice === "Implement directly" ? "direct" : null;
+			return choice === "Implement directly" ? { mode: "direct" } : null;
 		}
-		const choice = await ctx.ui.select(`Latest approved plan saved to ${PLAN_FILE}. Choose an implementation mode.`, [
+		const choice = await ctx.ui.select(`Latest approved plan saved to ${planSource.displayPath}. Choose an implementation mode.`, [
 			"Implement directly",
-			"Implement with sub-agents",
+			"Implement with sub-agents (fast)",
+			"Implement with sub-agents (strict)",
 			"Cancel",
 		]);
-		if (choice === "Implement directly") return "direct";
-		if (choice === "Implement with sub-agents") return "subagents";
+		if (choice === "Implement directly") return { mode: "direct" };
+		if (choice === "Implement with sub-agents (fast)") return { mode: "subagents", workflowMode: "fast" };
+		if (choice === "Implement with sub-agents (strict)") return { mode: "subagents", workflowMode: "strict" };
 		return null;
 	}
 
-	function buildImplementationPrompt(extraInstructions: string, hasPlanFile: boolean): string {
-		const instructions = [
-			"Implement the approved plan from this session.",
-			hasPlanFile
-				? `Use ${PLAN_FILE} as the source of truth for the latest approved plan.`
-				: "Use the approved conversation context from this session as the source of truth; no PLAN.md file is available yet.",
+	function buildImplementationPrompt(options: {
+		extraInstructions: string;
+		planPath?: string;
+		inlinePlanText?: string;
+	}): string {
+		const instructions = ["Implement the approved plan from this session."];
+		if (options.inlinePlanText?.trim()) {
+			instructions.push("Use the approved plan below as the source of truth.");
+			instructions.push("", options.inlinePlanText.trim());
+		} else if (options.planPath) {
+			instructions.push(`Use ${options.planPath} as the source of truth for the latest approved plan.`);
+		} else {
+			instructions.push("Use the approved conversation context from this session as the source of truth; no PLAN.md file is available yet.");
+		}
+		instructions.push(
 			"Follow the decision log and recommended approach established during discovery.",
 			"If anything still feels ambiguous and high-risk, ask before making the change.",
-		];
-		if (extraInstructions.trim()) {
-			instructions.push(`Additional instructions: ${extraInstructions.trim()}`);
+		);
+		if (options.extraInstructions.trim()) {
+			instructions.push(`Additional instructions: ${options.extraInstructions.trim()}`);
 		}
-		return instructions.join(" ");
+		return instructions.join("\n");
 	}
 
 	function surfaceWorkflowWarning(ctx: ExtensionContext, message: string): void {
@@ -474,16 +668,19 @@ function syncUsageFooter(ctx: ExtensionContext): void {
 		if (signature === lastSavedPlanSignature) return false;
 
 		try {
-			await writeFile(resolve(ctx.cwd, PLAN_FILE), renderedPlan, "utf8");
+			const workspace = await ensureDiscoveryWorkspace(ctx);
+			const planPath = getDiscoveryPlanPath(workspace);
+			await writeFile(planPath, renderedPlan, "utf8");
 			lastSavedPlanSignature = signature;
+			lastSavedPlanDocument = renderedPlan;
 			updateUi(ctx);
 			persistState();
-			if (ctx.hasUI) ctx.ui.notify(`Saved final plan to ${PLAN_FILE}`, "success");
+			if (ctx.hasUI) ctx.ui.notify(`Saved final plan to ${displayPath(planPath)}`, "success");
 			return true;
 		} catch (error) {
 			if (ctx.hasUI) {
 				ctx.ui.notify(
-					`Failed to save ${PLAN_FILE}: ${error instanceof Error ? error.message : String(error)}`,
+					`Failed to save ${PLAN_FILE} in the discovery workspace: ${error instanceof Error ? error.message : String(error)}`,
 					"error",
 				);
 			}
@@ -493,20 +690,26 @@ function syncUsageFooter(ctx: ExtensionContext): void {
 
 	async function runSubagentImplementation(
 		ctx: ExtensionContext,
-		options: { planPath?: string; rawPrompt?: string; extraInstructions: string },
+		options: {
+			planPath?: string;
+			rawPrompt?: string;
+			extraInstructions: string;
+			workflowMode: SubagentWorkflowMode;
+			cleanupPlanOnSuccess?: boolean;
+		},
 	): Promise<boolean> {
 		const progressIntro = options.rawPrompt?.trim()
 			? ["Synthesizing a lightweight plan from the provided request."]
-			: [`Using ${PLAN_FILE} as the approved source of truth.`];
+			: [`Using ${options.planPath ? displayPath(options.planPath) : PLAN_FILE} as the approved source of truth.`];
 		const runUsageTotals = emptySubagentUsageTotals();
 		subagentWorkflowActive = true;
 		if (ctx.hasUI) syncUsageFooter(ctx);
 		let implementationProgress = createImplementationProgressState({
-			detailLines: progressIntro,
+			detailLines: [...progressIntro, `Workflow mode: ${options.workflowMode}`],
 			context: {
 				note: options.rawPrompt?.trim()
-					? "Standalone sub-agent implementation workflow starting"
-					: "Sub-agent implementation workflow starting",
+					? `Standalone ${options.workflowMode} sub-agent implementation workflow starting`
+					: `${options.workflowMode} sub-agent implementation workflow starting`,
 			},
 		});
 		let lastPrintedProgress: string | null = null;
@@ -537,21 +740,31 @@ function syncUsageFooter(ctx: ExtensionContext): void {
 		};
 
 		if (ctx.hasUI) {
-			setImplementationProgress(ctx, "starting", implementationProgress, progressIntro);
+			setImplementationProgress(ctx, "starting", implementationProgress, [...progressIntro, `Workflow mode: ${options.workflowMode}`]);
 		}
 		try {
 			const result = await runGuidedDiscoveryImplementationWorkflow(pi, ctx, {
 				planPath: options.planPath,
 				rawPrompt: options.rawPrompt,
 				extraInstructions: options.extraInstructions,
+				workflowMode: options.workflowMode,
 				onUpdate: handleImplementationProgress,
-			onUsage: handleImplementationUsage,
+				onUsage: handleImplementationUsage,
 			});
 
 			if (ctx.hasUI) {
+				if (result.decision === "stopped") {
+					ctx.ui.notify(
+						"Sub-agent implementation stopped with hard blockers still remaining. Review the summary to decide whether to continue.",
+						"warning",
+					);
+				}
 				pi.sendMessage(
 					{
-						customType: "guided-discovery-implementation",
+						customType:
+							result.decision === "stopped"
+								? "guided-discovery-implementation-stopped"
+								: "guided-discovery-implementation",
 						content: result.summary,
 						display: true,
 					},
@@ -564,8 +777,11 @@ function syncUsageFooter(ctx: ExtensionContext): void {
 				}
 			}
 
+			if (result.decision === "done" && options.cleanupPlanOnSuccess) {
+				await cleanupDiscoveryWorkspace(ctx, { clearSavedPlan: true, cleanupOriginalPlanFile: true });
+			}
 			if (result.decision === "reformulate" && result.reformulationPrompt) {
-				enableDiscovery(ctx);
+				await enableDiscovery(ctx);
 				pi.sendUserMessage(result.reformulationPrompt);
 			}
 			return true;
@@ -601,21 +817,24 @@ function syncUsageFooter(ctx: ExtensionContext): void {
 	async function startImplementation(
 		ctx: ExtensionContext,
 		rawArgs: string,
-		options?: { skipConfirmation?: boolean; mode?: ImplementationMode },
+		options?: { skipConfirmation?: boolean; mode?: ImplementationMode; workflowMode?: SubagentWorkflowMode },
 	): Promise<boolean> {
 		const request = parseImplementationRequest(rawArgs);
-		const planPath = resolve(ctx.cwd, PLAN_FILE);
-		const hasPlanFile = await fileExists(planPath);
-		let mode = options?.mode ?? request.mode;
+		const planSource = await getApprovedPlanSource(ctx);
+		let selection: ImplementationSelection | null = options?.mode
+			? options.mode === "direct"
+				? { mode: "direct" }
+				: { mode: "subagents", workflowMode: options.workflowMode ?? "fast" }
+			: null;
 
-		if (!mode && ctx.hasUI) {
-			mode = await chooseImplementationMode(ctx, hasPlanFile);
-			if (!mode) return false;
-			options = { ...options, skipConfirmation: true };
+		if (!selection && ctx.hasUI) {
+			selection = await chooseImplementationMode(ctx, planSource);
+			if (!selection) return false;
+			options = { ...options, skipConfirmation: true, ...selection };
 		}
-		if (!mode) mode = "direct";
+		if (!selection) selection = { mode: "direct" };
 
-		if (mode === "subagents" && !hasPlanFile) {
+		if (selection.mode === "subagents" && !planSource.hasPlan) {
 			surfaceWorkflowWarning(
 				ctx,
 				`Sub-agent mode requires an approved ${PLAN_FILE}. Use /implement-subagents with a raw prompt, or create PLAN.md first.`,
@@ -623,33 +842,48 @@ function syncUsageFooter(ctx: ExtensionContext): void {
 			return false;
 		}
 
-		if (mode === "direct" && !options?.skipConfirmation && ctx.hasUI) {
-			const summary = hasPlanFile
-				? `Latest approved plan saved to ${PLAN_FILE}.${researchSources.length > 0 ? ` External sources captured: ${researchSources.length}.` : ""}`
-				: `No ${PLAN_FILE} was detected yet. Implementation will rely on the conversation history.`;
+		if (selection.mode === "direct" && !options?.skipConfirmation && ctx.hasUI) {
+			const summary = planSource.hasPlan
+				? `Latest approved plan saved to ${planSource.displayPath}.${researchSources.length > 0 ? ` External sources captured: ${researchSources.length}.` : ""}`
+				: `No approved ${PLAN_FILE} was detected yet. Implementation will rely on the conversation history.`;
 			const approved = await ctx.ui.confirm("Start implementing the plan directly?", summary);
 			if (!approved) return false;
 		}
 
-		if (enabled) disableDiscovery(ctx);
+		if (enabled) await disableDiscovery(ctx);
 
-		if (mode === "direct") {
-			pi.sendUserMessage(buildImplementationPrompt(request.extraInstructions, hasPlanFile));
+		if (selection.mode === "direct") {
+			const inlinePlanText =
+				planSource.hasPlan && planSource.source === "workspace"
+					? await readFile(planSource.path, "utf8").catch(() => lastSavedPlanDocument ?? undefined)
+					: undefined;
+			const prompt = buildImplementationPrompt({
+				extraInstructions: request.extraInstructions,
+				planPath: planSource.hasPlan && planSource.source === "cwd" ? planSource.path : undefined,
+				inlinePlanText,
+			});
+			if (planSource.hasPlan && planSource.source === "workspace") {
+				await cleanupDiscoveryWorkspace(ctx, { clearSavedPlan: true, cleanupOriginalPlanFile: true });
+			}
+			pi.sendUserMessage(prompt);
 			return true;
 		}
 
 		return await runSubagentImplementation(ctx, {
-			planPath,
+			planPath: planSource.hasPlan ? planSource.path : undefined,
 			extraInstructions: request.extraInstructions,
+			workflowMode: selection.workflowMode,
+			cleanupPlanOnSuccess: planSource.hasPlan && planSource.source === "workspace",
 		});
 	}
 
 	async function promptForPlanApproval(ctx: ExtensionContext): Promise<void> {
 		if (!ctx.hasUI) return;
-
-		const choice = await ctx.ui.select("Final plan saved to PLAN.md. What next?", [
+		const planSource = await getApprovedPlanSource(ctx);
+		const choice = await ctx.ui.select(`Final plan saved to ${planSource.hasPlan ? planSource.displayPath : PLAN_FILE}. What next?`, [
 			"Implement directly",
-			"Implement with sub-agents",
+			"Implement with sub-agents (fast)",
+			"Implement with sub-agents (strict)",
 			"Keep refining in discovery mode",
 			"Leave discovery mode with plan only",
 		]);
@@ -659,14 +893,19 @@ function syncUsageFooter(ctx: ExtensionContext): void {
 			return;
 		}
 
-		if (choice === "Implement with sub-agents") {
-			await startImplementation(ctx, "", { skipConfirmation: true, mode: "subagents" });
+		if (choice === "Implement with sub-agents (fast)") {
+			await startImplementation(ctx, "", { skipConfirmation: true, mode: "subagents", workflowMode: "fast" });
+			return;
+		}
+
+		if (choice === "Implement with sub-agents (strict)") {
+			await startImplementation(ctx, "", { skipConfirmation: true, mode: "subagents", workflowMode: "strict" });
 			return;
 		}
 
 		if (choice === "Leave discovery mode with plan only") {
-			disableDiscovery(ctx);
-			ctx.ui.notify("Discovery mode disabled. PLAN.md kept as the latest approved plan.", "info");
+			await disableDiscovery(ctx);
+			ctx.ui.notify("Discovery mode disabled. The latest approved plan stays in the isolated discovery workspace until you implement it.", "info");
 		}
 	}
 
@@ -680,7 +919,7 @@ function syncUsageFooter(ctx: ExtensionContext): void {
 		description: "Enable guided discovery mode and optionally start with a loose feature prompt",
 		handler: async (args, ctx) => {
 			if (!enabled) {
-				enableDiscovery(ctx);
+				await enableDiscovery(ctx);
 				ctx.ui.notify("Guided discovery mode enabled", "success");
 			}
 
@@ -703,13 +942,13 @@ function syncUsageFooter(ctx: ExtensionContext): void {
 				ctx.ui.notify("Guided discovery mode is already off", "info");
 				return;
 			}
-			disableDiscovery(ctx);
+			await disableDiscovery(ctx);
 			ctx.ui.notify("Guided discovery mode disabled", "success");
 		},
 	});
 
 	pi.registerCommand("discover-implement", {
-		description: "Exit guided discovery mode and start implementing the agreed plan",
+		description: "Exit guided discovery mode and start implementing the agreed plan (fast sub-agent mode by default)",
 		handler: async (args, ctx) => {
 			if (!ctx.isIdle()) {
 				ctx.ui.notify("Wait until the agent is idle before switching to implementation", "warning");
@@ -720,30 +959,83 @@ function syncUsageFooter(ctx: ExtensionContext): void {
 		},
 	});
 
+	pi.registerCommand("discover-implement-strict", {
+		description: "Exit guided discovery mode and start implementing the agreed plan with the strict sub-agent workflow",
+		handler: async (args, ctx) => {
+			if (!ctx.isIdle()) {
+				ctx.ui.notify("Wait until the agent is idle before switching to implementation", "warning");
+				return;
+			}
+			await startImplementation(ctx, args.trim(), { mode: "subagents", workflowMode: "strict" });
+		},
+	});
+
 	pi.registerCommand("implement-subagents", {
-		description: "Run the standalone sub-agent implementation workflow from PLAN.md or a raw prompt",
+		description: "Run the standalone fast sub-agent workflow from the approved plan or a raw prompt",
 		handler: async (args, ctx) => {
 			if (!ctx.isIdle()) {
 				ctx.ui.notify("Wait until the agent is idle before starting sub-agent implementation", "warning");
 				return;
 			}
 
-			const planPath = resolve(ctx.cwd, PLAN_FILE);
-			const request = resolveStandaloneSubagentRequest({
-				rawArgs: args,
-				planPath,
-				hasPlanFile: await fileExists(planPath),
-			});
-
-			if (request.kind === "missing-plan") {
-				surfaceWorkflowWarning(ctx, request.message);
+			const rawPrompt = args.trim();
+			if (rawPrompt) {
+				if (enabled) await disableDiscovery(ctx);
+				await runSubagentImplementation(ctx, {
+					rawPrompt,
+					extraInstructions: "",
+					workflowMode: "fast",
+					cleanupPlanOnSuccess: false,
+				});
 				return;
 			}
-			if (enabled) disableDiscovery(ctx);
 
+			const planSource = await getApprovedPlanSource(ctx);
+			if (!planSource.hasPlan) {
+				surfaceWorkflowWarning(ctx, "No PLAN.md found. Pass a raw prompt or create PLAN.md first.");
+				return;
+			}
+			if (enabled) await disableDiscovery(ctx);
 			await runSubagentImplementation(ctx, {
+				planPath: planSource.path,
 				extraInstructions: "",
-				...(request.kind === "raw-prompt" ? { rawPrompt: request.rawPrompt } : { planPath: request.planPath }),
+				workflowMode: "fast",
+				cleanupPlanOnSuccess: planSource.source === "workspace",
+			});
+		},
+	});
+
+	pi.registerCommand("implement-subagents-strict", {
+		description: "Run the strict sub-agent workflow from the approved plan or a raw prompt",
+		handler: async (args, ctx) => {
+			if (!ctx.isIdle()) {
+				ctx.ui.notify("Wait until the agent is idle before starting strict sub-agent implementation", "warning");
+				return;
+			}
+
+			const rawPrompt = args.trim();
+			if (rawPrompt) {
+				if (enabled) await disableDiscovery(ctx);
+				await runSubagentImplementation(ctx, {
+					rawPrompt,
+					extraInstructions: "",
+					workflowMode: "strict",
+					cleanupPlanOnSuccess: false,
+				});
+				return;
+			}
+
+			const planSource = await getApprovedPlanSource(ctx);
+			if (!planSource.hasPlan) {
+				surfaceWorkflowWarning(ctx, "No PLAN.md found. Pass a raw prompt or create PLAN.md first.");
+				return;
+			}
+			if (enabled) await disableDiscovery(ctx);
+			await runSubagentImplementation(ctx, {
+				planPath: planSource.path,
+				extraInstructions: "",
+				workflowMode: "strict",
+				cleanupPlanOnSuccess: planSource.source === "workspace",
 			});
 		},
 	});
@@ -752,29 +1044,43 @@ function syncUsageFooter(ctx: ExtensionContext): void {
 		description: "Toggle guided discovery mode",
 		handler: async (ctx) => {
 			if (enabled) {
-				disableDiscovery(ctx);
+				await disableDiscovery(ctx);
 				ctx.ui.notify("Guided discovery mode disabled", "success");
 			} else {
-				enableDiscovery(ctx);
+				await enableDiscovery(ctx);
 				ctx.ui.notify("Guided discovery mode enabled", "success");
 			}
 		},
 	});
 
-	pi.on("before_agent_start", async (event) => {
+	pi.on("before_agent_start", async (event, ctx) => {
 		if (!enabled) return;
+		const workspace = discoveryWorkspace ?? (await ensureDiscoveryWorkspace(ctx).catch(() => null));
+		const workspaceNote = workspace
+			? `\n\n[Guided discovery workspace]\nOperate against the isolated discovery workspace at ${getDiscoveryWorkflowCwd(workspace)}. Relative repo paths and read-only bash commands are routed there automatically. Save the approved PLAN.md there, not in the original checkout.`
+			: "";
 		return {
-			systemPrompt: `${event.systemPrompt}\n${DISCOVERY_PROMPT_APPEND}`,
+			systemPrompt: `${event.systemPrompt}\n${DISCOVERY_PROMPT_APPEND}${workspaceNote}`,
 		};
 	});
 
-	pi.on("tool_call", async (event) => {
+	pi.on("tool_call", async (event, ctx) => {
 		if (!enabled) return;
 
 		if (event.toolName === "edit" || event.toolName === "write") {
 			return {
 				block: true,
 				reason: "Guided discovery mode is read-only. Use /discover-implement, /implement-subagents, or /discover-off to start coding.",
+			};
+		}
+
+		const workspace = await ensureDiscoveryWorkspace(ctx).catch((error) => {
+			return error instanceof Error ? error.message : String(error);
+		});
+		if (typeof workspace === "string") {
+			return {
+				block: true,
+				reason: `Guided discovery could not prepare its isolated workspace: ${workspace}`,
 			};
 		}
 
@@ -787,6 +1093,18 @@ function syncUsageFooter(ctx: ExtensionContext): void {
 						"Guided discovery mode only allows read-only bash commands. Use /discover-implement, /implement-subagents, or /discover-off to start coding.",
 				};
 			}
+			event.input.command = `cd ${shellQuote(getDiscoveryWorkflowCwd(workspace))} && ${command}`;
+			return;
+		}
+
+		if (event.toolName === "read" && typeof event.input.path === "string") {
+			event.input.path = mapPathIntoDiscoveryWorkspace(event.input.path, workspace);
+			return;
+		}
+
+		if ((event.toolName === "grep" || event.toolName === "find" || event.toolName === "ls") && event.input) {
+			const currentPath = typeof event.input.path === "string" && event.input.path.trim() ? event.input.path : ".";
+			event.input.path = mapPathIntoDiscoveryWorkspace(currentPath, workspace);
 		}
 	});
 
@@ -809,6 +1127,12 @@ function syncUsageFooter(ctx: ExtensionContext): void {
 		}
 	});
 
+	pi.on("session_shutdown", async (_event, ctx) => {
+		if (enabled || lastSavedPlanSignature || lastSavedPlanDocument) return;
+		if (!discoveryWorkspace && !discoveryWorkspaceState) return;
+		await cleanupDiscoveryWorkspace(ctx, { clearSavedPlan: false, cleanupOriginalPlanFile: false });
+	});
+
 	pi.on("session_start", async (_event, ctx) => {
 		const branchEntries = ctx.sessionManager.getBranch() as Array<{
 			type: string;
@@ -822,11 +1146,15 @@ function syncUsageFooter(ctx: ExtensionContext): void {
 		enabled = savedState?.enabled === true || pi.getFlag("discover") === true;
 		previousActiveTools = normalizeToolList(savedState?.previousActiveTools) ?? previousActiveTools;
 		lastSavedPlanSignature = savedState?.lastSavedPlanSignature ?? null;
+		lastSavedPlanDocument = savedState?.lastSavedPlanDocument ?? null;
 		researchSources = mergeResearchSources(savedState?.researchSources ?? [], extractResearchSourcesFromEntries(branchEntries));
 		subagentUsageTotals = savedState?.subagentUsageTotals ?? emptySubagentUsageTotals();
+		discoveryWorkspaceState = savedState?.discoveryWorkspace ?? null;
+		discoveryWorkspace = null;
 
 		if (enabled) {
 			applyDiscoveryTools();
+			await ensureDiscoveryWorkspace(ctx).catch(() => {});
 		}
 		updateUi(ctx);
 	});

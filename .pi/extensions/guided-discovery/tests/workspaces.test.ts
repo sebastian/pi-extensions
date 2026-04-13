@@ -11,6 +11,8 @@ import {
 	detectWorkspaceRepoKind,
 	integrateWorkspaceChanges,
 	planWorkspaceIntegration,
+	reviveManagedWorkspace,
+	serializeManagedWorkspace,
 } from "../workspaces.ts";
 import type { ExecLike } from "../changes.ts";
 
@@ -112,6 +114,42 @@ test("createManagedWorkspace seeds source checkout changes into a jj workspace a
 	assert.deepEqual(forgetCall.args, ["workspace", "forget", workspace.workspaceName]);
 	assert.notEqual(forgetCall.args[2], workspace.cwd);
 	assert.equal(await pathExists(cleanupRoot), false);
+});
+
+test("reviveManagedWorkspace recreates a cleanup-capable handle from persisted metadata", async () => {
+	const root = await createRepoRoot("guided-discovery-jj-workspace-");
+	const calls: Array<{ command: string; args: string[]; cwd?: string }> = [];
+	const exec: ExecLike = async (command, args, options) => {
+		calls.push({ command, args, cwd: options?.cwd });
+		if (command === "jj" && args[0] === "workspace" && args[1] === "add") {
+			const workspacePath = args[2];
+			await mkdir(join(workspacePath, ".jj"), { recursive: true });
+			return { stdout: "", stderr: "", code: 0 };
+		}
+		if (command === "jj" && args[0] === "new") {
+			return { stdout: "", stderr: "", code: 0 };
+		}
+		if (command === "jj" && args[0] === "diff" && args[1] === "--summary" && options?.cwd === root) {
+			return { stdout: "", stderr: "", code: 0 };
+		}
+		if (command === "jj" && args[0] === "workspace" && args[1] === "update-stale") {
+			return { stdout: "Working copy is not stale.\n", stderr: "", code: 0 };
+		}
+		if (command === "jj" && args[0] === "workspace" && args[1] === "forget") {
+			return { stdout: "", stderr: "", code: 0 };
+		}
+		return { stdout: "", stderr: "", code: 0 };
+	};
+
+	const { workspace } = await createManagedWorkspace({ exec, sourceCwd: root, label: "discover" });
+	const revived = await reviveManagedWorkspace({ exec, state: serializeManagedWorkspace(workspace) });
+
+	assert.equal(revived.cwd, workspace.cwd);
+	await revived.refresh();
+	await revived.cleanup();
+	assert.ok(
+		calls.some((call) => call.command === "jj" && call.args[0] === "workspace" && call.args[1] === "forget" && call.args[2] === workspace.workspaceName),
+	);
 });
 
 test("createManagedWorkspace gives same-label jj workspaces distinct generated names", async () => {
@@ -233,6 +271,47 @@ test("createManagedWorkspace does not forget a jj workspace when add fails befor
 		false,
 	);
 	assert.equal(await pathExists(dirname(workspacePath)), false);
+});
+
+test("createManagedWorkspace forgets a registered jj workspace when jj new fails", async () => {
+	const root = await createRepoRoot("guided-discovery-jj-workspace-");
+
+	const calls: Array<{ command: string; args: string[]; cwd?: string }> = [];
+	let workspacePath = "";
+	const exec: ExecLike = async (command, args, options) => {
+		calls.push({ command, args, cwd: options?.cwd });
+		if (command === "jj" && args[0] === "workspace" && args[1] === "add") {
+			workspacePath = args[2];
+			await mkdir(join(workspacePath, ".jj"), { recursive: true });
+			return { stdout: "", stderr: "", code: 0 };
+		}
+		if (command === "jj" && args[0] === "new") {
+			return { stdout: "", stderr: "new failed\n", code: 1 };
+		}
+		if (command === "jj" && args[0] === "workspace" && args[1] === "forget") {
+			return { stdout: "", stderr: "", code: 0 };
+		}
+		return { stdout: "", stderr: "", code: 0 };
+	};
+
+	await assert.rejects(
+		createManagedWorkspace({
+			exec,
+			sourceCwd: root,
+			label: "run",
+		}),
+		/new failed/,
+	);
+
+	assert.ok(workspacePath);
+	const workspaceName = basename(workspacePath);
+	const cleanupRoot = dirname(workspacePath);
+	const forgetCall = calls.find(
+		(call) => call.command === "jj" && call.args[0] === "workspace" && call.args[1] === "forget" && call.cwd === root,
+	);
+	assert.ok(forgetCall);
+	assert.deepEqual(forgetCall.args, ["workspace", "forget", workspaceName]);
+	assert.equal(await pathExists(cleanupRoot), false);
 });
 
 test("createManagedWorkspace cleans up a jj workspace when setup fails after creation", async () => {

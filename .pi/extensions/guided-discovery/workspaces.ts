@@ -21,6 +21,18 @@ export interface ManagedWorkspace {
 	cleanup(): Promise<void>;
 }
 
+export interface SerializedManagedWorkspace {
+	kind: WorkspaceRepoKind;
+	workspaceName: string;
+	cwd: string;
+	repoRoot: string;
+	sourceRepoRoot: string;
+	sourceCwd: string;
+	sourceRelativeCwd: string;
+	cleanupRoot: string;
+	seededChangedFiles: string[];
+}
+
 export interface WorkspaceSnapshot {
 	baseCwd: string;
 	files: Record<string, string | null>;
@@ -312,6 +324,62 @@ async function cleanupManagedWorkspace(options: {
 	} finally {
 		await rm(options.cleanupRoot, { recursive: true, force: true });
 	}
+}
+
+export function serializeManagedWorkspace(workspace: ManagedWorkspace): SerializedManagedWorkspace {
+	return {
+		kind: workspace.kind,
+		workspaceName: workspace.workspaceName,
+		cwd: workspace.cwd,
+		repoRoot: workspace.repoRoot,
+		sourceRepoRoot: workspace.sourceRepoRoot,
+		sourceCwd: workspace.sourceCwd,
+		sourceRelativeCwd: workspace.sourceRelativeCwd,
+		cleanupRoot: workspace.cleanupRoot,
+		seededChangedFiles: [...workspace.seededChangedFiles],
+	};
+}
+
+export async function reviveManagedWorkspace(options: {
+	exec: ExecLike;
+	state: SerializedManagedWorkspace;
+}): Promise<ManagedWorkspace> {
+	const state = {
+		...options.state,
+		cwd: resolve(options.state.cwd),
+		repoRoot: resolve(options.state.repoRoot),
+		sourceRepoRoot: resolve(options.state.sourceRepoRoot),
+		sourceCwd: resolve(options.state.sourceCwd),
+		cleanupRoot: resolve(options.state.cleanupRoot),
+	};
+	if (!(await pathExists(state.cwd))) {
+		throw new Error(`Managed workspace no longer exists at ${state.cwd}`);
+	}
+	return {
+		kind: state.kind,
+		workspaceName: state.workspaceName,
+		cwd: state.cwd,
+		repoRoot: state.repoRoot,
+		sourceRepoRoot: state.sourceRepoRoot,
+		sourceCwd: state.sourceCwd,
+		sourceRelativeCwd: state.sourceRelativeCwd,
+		cleanupRoot: state.cleanupRoot,
+		seededChangedFiles: [...state.seededChangedFiles],
+		refresh: async () => {
+			await refreshManagedWorkspace({ kind: state.kind, repoRoot: state.repoRoot }, options.exec);
+		},
+		cleanup: async () => {
+			await cleanupManagedWorkspace({
+				exec: options.exec,
+				kind: state.kind,
+				repoRoot: state.sourceRepoRoot,
+				workspaceName: state.workspaceName,
+				workspacePath: state.cwd,
+				cleanupRoot: state.cleanupRoot,
+				jjWorkspaceRegistered: state.kind === "jj",
+			});
+		},
+	};
 }
 
 async function seedWorkspaceFromSource(exec: ExecLike, sourceCwd: string, targetRepoRoot: string): Promise<string[]> {

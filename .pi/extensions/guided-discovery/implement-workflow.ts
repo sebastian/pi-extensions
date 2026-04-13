@@ -50,7 +50,7 @@ import type {
 } from "./implementation-progress.ts";
 
 const READ_ONLY_SUBAGENT_TOOLS = ["read", "grep", "find", "ls"];
-const WORKER_SUBAGENT_TOOLS = ["read", "edit", "write", "grep", "find", "ls"];
+const WORKER_SUBAGENT_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 export const QUALITY_SUITE_MAX_ROUNDS = 3;
 export const QUALITY_SUITE_MAX_EXTRA_ROUNDS = 2;
 export const TARGETED_FOLLOW_THROUGH_MAX_ROUNDS = 2;
@@ -91,8 +91,9 @@ interface CheckerSuiteResult {
 	modelRuns: CheckerModelRun[];
 }
 
-type WorkflowDecision = "done" | "reformulate";
+type WorkflowDecision = "done" | "stopped" | "reformulate";
 export type ImplementationMode = "direct" | "subagents";
+export type SubagentWorkflowMode = "fast" | "strict";
 export type WorkerPromptKind = "worker" | "design-worker";
 export type QualityStageId = "cleanup" | "design" | "checker";
 
@@ -110,6 +111,7 @@ interface WorkflowOptions {
 	planPath?: string;
 	rawPrompt?: string;
 	extraInstructions: string;
+	workflowMode?: SubagentWorkflowMode;
 	onUpdate?: (update: WorkflowProgressUpdate) => void;
 	onUsage?: (usage: SubagentUsageTotals) => void;
 }
@@ -159,6 +161,22 @@ export interface QualityGateFindingSummary {
 	paths: string[];
 	classification: QualityGateClassification;
 }
+
+export interface FinalCheckerHardGateDecision {
+	round: number;
+	roundBudget: {
+		base: number;
+		extra: number;
+		total: number;
+	};
+	message: string;
+	changedFiles: string[];
+	hardGateFindings: QualityGateFindingSummary[];
+	softGateFindings: QualityGateFindingSummary[];
+	checkerRun: CheckerSuiteResult;
+}
+
+export type FinalCheckerHardGateChoice = "Continue remediation anyway" | "Stop and summarize current progress";
 
 export interface QualitySuiteRoundSnapshot {
 	round: number;
@@ -369,6 +387,7 @@ function renderFinalHolisticScopeContext(options: {
 
 function renderFinalCheckerScopeContext(options: {
 	round: number;
+	totalPasses: number;
 	changedFiles: string[];
 	softFindings: QualityGateFindingSummary[];
 }): string {
@@ -377,7 +396,7 @@ function renderFinalCheckerScopeContext(options: {
 			"## Review scope",
 			"",
 			"mode: final checker loop",
-			`checker pass: ${options.round}/${FINAL_CHECKER_MAX_PASSES}`,
+			`checker pass: ${options.round}/${options.totalPasses}`,
 			`changed files in scope: ${options.changedFiles.length > 0 ? options.changedFiles.join(", ") : "none detected"}`,
 			"",
 			"Checker focus:",
@@ -886,6 +905,81 @@ export function buildSummary(
 	);
 }
 
+function renderCompletedWorkSection(workerResults: WorkerPhaseResult[], maxItems = 10): string {
+	const completedEntries = [...new Set(workerResults.map((result) => `${result.phase.id} — ${result.phase.title}`.trim()).filter(Boolean))];
+	const lines = ["## Completed work", ""];
+	if (completedEntries.length === 0) {
+		lines.push("No implementation phases completed before the workflow stopped.");
+	} else {
+		lines.push(`Completed phase/result entries: ${workerResults.length}`);
+		lines.push("");
+		for (const entry of completedEntries.slice(0, maxItems)) lines.push(`- ${entry}`);
+		if (completedEntries.length > maxItems) lines.push(`- … ${completedEntries.length - maxItems} more`);
+	}
+	return trimBlock(lines.join("\n"));
+}
+
+export function buildStoppedSummary(options: {
+	reason: string;
+	changedFiles: string[];
+	checks: CheckRunSummary[];
+	checker: CheckerReport;
+	quality: WorkflowQualitySummary;
+	workerResults: WorkerPhaseResult[];
+	acceptedResidualSoftFindings: QualityGateFindingSummary[];
+	blockingHardFindings: QualityGateFindingSummary[];
+}): string {
+	const passedChecks = options.checks.filter((check) => check.status === "passed").length;
+	const failedChecks = options.checks.filter((check) => check.status === "failed").length;
+	const blockedChecks = options.checks.filter((check) => check.status === "blocked").length;
+	const erroredChecks = options.checks.filter((check) => check.status === "error").length;
+	return trimBlock(
+		[
+			[
+				"Sub-agent implementation workflow stopped before applying the isolated workspace result.",
+				`Reason: ${options.reason}`,
+				options.changedFiles.length > 0
+					? `Changed files (${options.changedFiles.length}): ${options.changedFiles.join(", ")}`
+					: "Changed files: none detected",
+				`Cleanup audits: ${options.quality.cleanupRuns}`,
+				`Design reviews: ${options.quality.designReviewRuns} run, ${options.quality.designReviewSkips} skipped`,
+				`Quality remediation passes: ${options.quality.remediationPasses}`,
+				`Fixed quality findings before stopping: cleanup ${options.quality.fixedFindings.cleanup}, design ${options.quality.fixedFindings.design}, checker ${options.quality.fixedFindings.checker}, total ${options.quality.fixedFindings.total}`,
+				`Accepted residual soft quality issues already surfaced: ${options.acceptedResidualSoftFindings.length}`,
+				`Blocking hard quality issues still remaining: ${options.blockingHardFindings.length}`,
+				`Merged-result verification passes: ${options.quality.mergedResultVerificationRuns}${options.quality.mergedResultVerificationReasons.length > 0 ? ` (${options.quality.mergedResultVerificationReasons.join("; ")})` : ""}`,
+				`Legacy code/files removed (verified): ${options.quality.legacyCodeOrFilesRemoved ? "yes" : "no"}`,
+				`Final code review findings at stop: ${options.checker.findings.length}`,
+				`Checks run in final code review: ${passedChecks} passed, ${failedChecks} flagged findings, ${blockedChecks} blocked, ${erroredChecks} errored`,
+				options.quality.agentsChecks.trackedCommands > 0
+					? `AGENTS-required checks across verification passes: ${options.quality.agentsChecks.trackedCommands} tracked, ${options.quality.agentsChecks.finalPassed} passing in the latest pass, ${options.quality.agentsChecks.failedThenFixed} failed then fixed, ${options.quality.agentsChecks.finalFailed} still failing, ${options.quality.agentsChecks.finalBlocked} blocked, ${options.quality.agentsChecks.finalErrored} errored`
+					: "AGENTS-required checks across verification passes: none discovered",
+				"Validator status: skipped because hard-blocking quality issues remained after the bounded final checker loop.",
+				"The isolated workspace result was not applied to the original checkout.",
+			].join("\n"),
+			renderCompletedWorkSection(options.workerResults),
+			renderQualityGateFindingsSection(
+				"Remaining hard quality issues",
+				options.blockingHardFindings,
+				"No blocking hard quality issues remain.",
+			),
+			renderQualityGateFindingsSection(
+				"Residual soft quality issues already surfaced",
+				options.acceptedResidualSoftFindings,
+				"No residual soft quality issues were recorded.",
+			),
+			trimBlock(
+				[
+					"## Next steps",
+					"",
+					"- Continue remediation by rerunning /implement-subagents if you want another bounded attempt from PLAN.md.",
+					"- Or switch back into discovery if the remaining blockers suggest the plan needs to change before more implementation work.",
+				].join("\n"),
+			),
+		].join("\n\n"),
+	);
+}
+
 function buildQualityReformulationPrompt(findings: QualityGateFindingSummary[]): string {
 	return trimBlock(
 		[
@@ -1012,6 +1106,26 @@ async function promptForQualitySuiteSoftGateChoice(
 			"Reformulate in discovery mode",
 		],
 	)) as QualitySuiteSoftGateChoice;
+}
+
+async function promptForFinalCheckerHardGateChoice(
+	ctx: ExtensionContext,
+	decision: FinalCheckerHardGateDecision,
+): Promise<FinalCheckerHardGateChoice> {
+	const hardFindingSummary = decision.hardGateFindings
+		.slice(0, 5)
+		.map((finding) => `- [${finding.severity}] ${finding.stage}/${finding.category}: ${finding.summary}`)
+		.join("\n");
+	return (await ctx.ui.select(
+		[
+			decision.message,
+			`${decision.hardGateFindings.length} hard-blocking finding(s) remain after ${decision.roundBudget.total} final checker pass(es).`,
+			`Changed files in the isolated workspace: ${summarizePaths(decision.changedFiles)}`,
+			"Choose whether to keep iterating inside the isolated workspace or stop gracefully with a summary of what was completed and what remains.",
+			hardFindingSummary,
+		].filter(Boolean).join("\n\n"),
+		["Continue remediation anyway", "Stop and summarize current progress"],
+	)) as FinalCheckerHardGateChoice;
 }
 
 function emitWorkflowUpdate(onUpdate: WorkflowOptions["onUpdate"], update: WorkflowProgressUpdate): void {
@@ -1760,6 +1874,69 @@ function summarizeWorkflowQualityStats(stats: WorkflowQualityStats): WorkflowQua
 	};
 }
 
+function emptyCheckerReport(): CheckerReport {
+	return {
+		findings: [],
+		checksRun: [],
+		unresolvedRisks: [],
+		overallAssessment: "Looks good",
+	};
+}
+
+interface RequiredChecksPassResult {
+	guidance: RelevantGuidanceResult;
+	commands: AgentsCheckCommand[];
+	results: CheckRunSummary[];
+	report: CheckerReport;
+}
+
+async function runRequiredChecksPass(options: {
+	cwd: string;
+	changedFiles: string[];
+	exec: ExecLike;
+	onUpdate?: (update: WorkflowProgressUpdate) => void;
+	resolveAgentsCheckExecutionPolicy?: (commands: AgentsCheckCommand[]) => Promise<AgentsCheckExecutionPolicy>;
+}): Promise<RequiredChecksPassResult> {
+	const guidance = discoverRelevantGuidance(options.cwd, options.changedFiles, "AGENTS.md");
+	const commands = collectAgentsCheckCommands(guidance.documents);
+	const policy =
+		commands.length > 0
+			? await (options.resolveAgentsCheckExecutionPolicy?.(commands) ?? Promise.resolve({ allowed: true }))
+			: { allowed: true };
+	if (commands.length > 0) {
+		emitWorkflowUpdate(options.onUpdate, {
+			type: "detail-lines",
+			stage: "checker",
+			lines: [
+				policy.allowed
+					? `Running ${commands.length} early AGENTS.md-required check command(s).`
+					: `Blocking ${commands.length} early AGENTS.md-required check command(s).`,
+				...summarizeAgentsCheckCommands(commands, 3),
+				...(policy.allowed || !policy.reason ? [] : [policy.reason]),
+			],
+			context: {
+				changedFiles: options.changedFiles,
+				changedFilesSummary: summarizePaths(options.changedFiles),
+				note: policy.allowed ? "Running early AGENTS.md-required checks" : "Early AGENTS.md checks blocked",
+			},
+		});
+	}
+	const runs = await runAgentsCheckCommands({
+		cwd: options.cwd,
+		exec: options.exec,
+		commands,
+		policy,
+	});
+	const results = runs.map((run) => ({
+		command: run.command,
+		source: run.source,
+		status: run.status,
+		summary: run.summary,
+	} satisfies CheckRunSummary));
+	const report = appendAgentsChecksToCheckerReport(emptyCheckerReport(), runs);
+	return { guidance, commands, results, report };
+}
+
 async function prepareReviewContextFiles(options: {
 	cwd: string;
 	tempDir: string;
@@ -2010,6 +2187,346 @@ async function runWorkerFixPass(options: {
 	return ensureSuccessfulSubagent(options.contextTitle, result);
 }
 
+function createFastModeDecomposition(planText: string): DecompositionPlan {
+	const designSensitive = textSuggestsDesignSensitivity(planText);
+	return {
+		phases: [
+			{
+				id: "implementation",
+				title: "Implement approved plan",
+				goal: "Deliver the approved plan as one coherent change in the isolated workspace.",
+				instructions: [
+					"Read PLAN.md, inspect the relevant files, and implement the approved plan end-to-end as one coherent change.",
+					"Prefer the smallest complete slice that satisfies the plan instead of broad speculative refactors.",
+					"Use bash for focused repo inspection and verification inside the isolated workspace when it helps you catch issues before handing off.",
+				],
+				dependsOn: [],
+				touchedPaths: [],
+				parallelSafe: false,
+				designSensitive,
+			},
+		],
+		notes: [
+			"Fast mode skips explicit decomposition and specialist review layers unless the user later asks for strict mode.",
+		],
+	};
+}
+
+async function runFastImplementationWorkflow(options: {
+	cwd: string;
+	tempDir: string;
+	planPath: string;
+	agentFiles: string[];
+	workerPrompt: string;
+	designWorkerPrompt: string;
+	checkerPrompt: string;
+	validatorPrompt: string;
+	extraInstructions: string;
+	exec: ExecLike;
+	primaryModel?: string;
+	checkerModels: string[];
+	thinkingLevel?: string;
+	onUpdate?: (update: WorkflowProgressUpdate) => void;
+	onStageChange?: (nodeId: WorkflowNodeId) => void;
+	resolveAgentsCheckExecutionPolicy?: (commands: AgentsCheckCommand[]) => Promise<AgentsCheckExecutionPolicy>;
+	promptForHardGateChoice?: (decision: FinalCheckerHardGateDecision) => Promise<FinalCheckerHardGateChoice>;
+}): Promise<{
+	decision: Extract<WorkflowDecision, "done" | "stopped">;
+	summary: string;
+}> {
+	const workflowQualityStats = createWorkflowQualityStats();
+	workflowQualityStats.mergedResultVerificationRuns += 1;
+	workflowQualityStats.mergedResultVerificationReasons.add("fast isolated implementation result");
+	const planText = await readFile(options.planPath, "utf8");
+	const decomposition = createFastModeDecomposition(planText);
+
+	options.onStageChange?.("decomposer");
+	emitWorkflowUpdate(options.onUpdate, {
+		type: "decomposer-started",
+		stage: "decomposer",
+		lines: [
+			"Fast mode selected: skipping explicit decomposition and preparing one whole-plan implementation phase.",
+			`Primary model: ${options.primaryModel ?? "default"}`,
+		],
+		context: {
+			checkerModels: options.checkerModels,
+			note: "Fast-mode phase preparation started",
+		},
+	});
+	emitWorkflowUpdate(options.onUpdate, {
+		type: "decomposer-completed",
+		phases: decomposition.phases,
+		stage: "decomposer",
+		lines: [
+			"Fast mode prepared a single whole-plan implementation phase.",
+			decomposition.notes[0] ?? "Fast mode uses one implementation phase.",
+		],
+		context: {
+			phaseCount: decomposition.phases.length,
+			note: "Fast-mode phase preparation completed",
+		},
+	});
+	const batches = computeExecutionBatches(decomposition.phases);
+	emitWorkflowUpdate(options.onUpdate, {
+		type: "batches-computed",
+		phases: decomposition.phases,
+		batches,
+		stage: "implementation",
+		lines: ["Prepared 1 implementation batch in fast mode.", "Batch 1: Implement approved plan"],
+		context: {
+			batchCount: batches.length,
+			phaseCount: decomposition.phases.length,
+			note: "Fast-mode implementation batch ready",
+		},
+	});
+
+	const workerResults: WorkerPhaseResult[] = [];
+	options.onStageChange?.("implementation");
+	const phaseResult = await runWorkerPhase({
+		cwd: options.cwd,
+		tempDir: options.tempDir,
+		planPath: options.planPath,
+		agentFiles: options.agentFiles,
+		workerPrompt: options.workerPrompt,
+		designWorkerPrompt: options.designWorkerPrompt,
+		phase: decomposition.phases[0]!,
+		batchIndex: 0,
+		batchCount: 1,
+		extraInstructions: options.extraInstructions,
+		model: options.primaryModel,
+		thinkingLevel: options.thinkingLevel,
+		onUpdate: options.onUpdate,
+	});
+	workerResults.push(phaseResult);
+	let changedFiles = await detectChangedFiles(options.cwd, options.exec);
+
+	let earlyChecks = await runRequiredChecksPass({
+		cwd: options.cwd,
+		changedFiles,
+		exec: options.exec,
+		onUpdate: options.onUpdate,
+		resolveAgentsCheckExecutionPolicy: options.resolveAgentsCheckExecutionPolicy,
+	});
+	workflowQualityStats.agentsCheckResults.push(...earlyChecks.results);
+	if (earlyChecks.report.findings.length > 0) {
+		const remediationPromptSelection = pickRemediationPrompt({
+			workerPrompt: options.workerPrompt,
+			designWorkerPrompt: options.designWorkerPrompt,
+			phases: workerResults.map((result) => result.phase),
+			changedFiles,
+			findings: earlyChecks.report.findings,
+		});
+		options.onStageChange?.("fix");
+		emitWorkflowUpdate(options.onUpdate, {
+			type: "fix-started",
+			stage: "fix",
+			lines: [
+				"Early required checks found blocking issues. Applying one focused remediation pass before final review.",
+				`Worker: ${remediationPromptSelection.promptLabel}`,
+			],
+			context: {
+				changedFiles,
+				changedFilesSummary: summarizePaths(changedFiles),
+				workerKind: remediationPromptSelection.kind,
+				note: remediationPromptSelection.reason,
+			},
+		});
+		const fixSummary = await runWorkerFixPass({
+			cwd: options.cwd,
+			tempDir: options.tempDir,
+			planPath: options.planPath,
+			agentFiles: earlyChecks.guidance.documents.map((document) => document.path).length > 0
+				? [...new Set([...options.agentFiles, ...earlyChecks.guidance.documents.map((document) => document.path)])]
+				: options.agentFiles,
+			touchedPaths: changedFiles,
+			systemPrompt: remediationPromptSelection.systemPrompt,
+			contextTitle: "fast-precheck-fix",
+			contextMarkdown: renderFindingReportSummary("Early AGENTS.md-required check findings", earlyChecks.report),
+			prompt:
+				"Resolve the attached failed or blocked AGENTS.md-required checks now. Make the smallest code changes needed to clear them, run focused verification if useful, and then summarize what changed.",
+			model: options.primaryModel,
+			thinkingLevel: options.thinkingLevel,
+		});
+		workerResults.push({
+			phase: {
+				id: "fast-precheck-fix",
+				title: "Early required-check remediation",
+				goal: "Resolve blocking AGENTS.md-required checks before final review",
+				instructions: ["Resolve the failed or blocked AGENTS.md-required checks before final review."],
+				dependsOn: [phaseResult.phase.id],
+				touchedPaths: changedFiles,
+				parallelSafe: false,
+				designSensitive: remediationPromptSelection.designSensitive,
+			},
+			summary: fixSummary,
+		});
+		workflowQualityStats.remediationPasses += 1;
+		recordQualityFindings(workflowQualityStats, "checker", earlyChecks.report.findings);
+		emitWorkflowUpdate(options.onUpdate, {
+			type: "fix-completed",
+			stage: "fix",
+			lines: ["Completed early required-check remediation.", `Worker: ${remediationPromptSelection.promptLabel}`],
+			context: {
+				changedFiles,
+				changedFilesSummary: summarizePaths(changedFiles),
+				workerKind: remediationPromptSelection.kind,
+				note: remediationPromptSelection.reason,
+			},
+		});
+		changedFiles = await detectChangedFiles(options.cwd, options.exec);
+		earlyChecks = await runRequiredChecksPass({
+			cwd: options.cwd,
+			changedFiles,
+			exec: options.exec,
+			onUpdate: options.onUpdate,
+			resolveAgentsCheckExecutionPolicy: options.resolveAgentsCheckExecutionPolicy,
+		});
+		workflowQualityStats.agentsCheckResults.push(...earlyChecks.results);
+		if (earlyChecks.report.findings.length > 0) {
+			emitWorkflowUpdate(options.onUpdate, {
+				type: "detail-lines",
+				stage: "checker",
+				lines: [
+					`Early required checks still report ${earlyChecks.report.findings.length} blocking finding(s).`,
+					"Carrying those blockers into the bounded final checker loop so you can decide whether to continue or stop if they remain.",
+				],
+				context: {
+					changedFiles,
+					changedFilesSummary: summarizePaths(changedFiles),
+					note: "Early required-check blockers still remain",
+				},
+			});
+		}
+	}
+
+	const fastCheckerModels = options.primaryModel ? [options.primaryModel] : options.checkerModels.slice(0, 1);
+	const checkerModels = fastCheckerModels.length > 0 ? fastCheckerModels : options.checkerModels;
+	const checkerLoop = await runCheckerLoop({
+		cwd: options.cwd,
+		tempDir: options.tempDir,
+		planPath: options.planPath,
+		agentFiles: options.agentFiles,
+		checkerPrompt: options.checkerPrompt,
+		workerPrompt: options.workerPrompt,
+		designWorkerPrompt: options.designWorkerPrompt,
+		decomposition,
+		workerResults,
+		changedFiles,
+		exec: options.exec,
+		primaryModel: options.primaryModel,
+		checkerModels,
+		thinkingLevel: options.thinkingLevel,
+		onUpdate: options.onUpdate,
+		onStageChange: options.onStageChange,
+		resolveAgentsCheckExecutionPolicy: options.resolveAgentsCheckExecutionPolicy,
+		promptForHardGateChoice: options.promptForHardGateChoice,
+	});
+	mergeWorkflowQualityStats(workflowQualityStats, checkerLoop.stats);
+	changedFiles = checkerLoop.changedFiles;
+	const acceptedResidualSoftFindings = checkerLoop.acceptedResidualSoftFindings;
+	const blockingHardFindings = checkerLoop.blockingHardFindings;
+	const checkPass = checkerLoop.checkerRun;
+	if (checkerLoop.outcome === "stopped-hard") {
+		return {
+			decision: "stopped",
+			summary: buildStoppedSummary({
+				reason:
+					checkerLoop.stopReason ??
+					"Final checker stopped with hard-blocking findings still remaining after the bounded retry budget.",
+				changedFiles,
+				checks: checkPass.results,
+				checker: checkPass.report,
+				quality: summarizeWorkflowQualityStats(workflowQualityStats),
+				workerResults,
+				acceptedResidualSoftFindings,
+				blockingHardFindings,
+			}),
+		};
+	}
+
+	options.onStageChange?.("validator");
+	emitWorkflowUpdate(options.onUpdate, {
+		type: "validator-started",
+		stage: "validator",
+		lines: [
+			"Comparing the fast-mode implementation against PLAN.md.",
+			`Changed files: ${summarizePaths(changedFiles)}`,
+			`Checker findings: ${checkPass.report.findings.length}`,
+		],
+		context: {
+			changedFiles,
+			changedFilesSummary: summarizePaths(changedFiles),
+			checkerModels: checkPass.modelRuns.map((run) => run.model),
+			note: "Fast-mode validator started",
+		},
+	});
+	const validation = await runValidator({
+		cwd: options.cwd,
+		tempDir: options.tempDir,
+		planPath: options.planPath,
+		agentFiles: options.agentFiles,
+		validatorPrompt: options.validatorPrompt,
+		decomposition,
+		workerResults,
+		changedFiles,
+		checkerReport: checkPass.report,
+		checkResults: checkPass.results,
+		model: options.primaryModel,
+		thinkingLevel: options.thinkingLevel,
+	});
+	const discrepancySummaryItems = summarizeDiscrepancies(validation.discrepancies);
+	emitWorkflowUpdate(options.onUpdate, {
+		type: "validator-completed",
+		stage: "validator",
+		lines: [
+			`Validator recommendation: ${validation.recommendation}`,
+			validation.summary || `${validation.discrepancies.length} discrepancy(s) reported.`,
+			...(discrepancySummaryItems.length > 0 ? [`Discrepancies: ${discrepancySummaryItems.join(" • ")}`] : []),
+		],
+		context: {
+			changedFiles,
+			changedFilesSummary: summarizePaths(changedFiles),
+			discrepancyCount: validation.discrepancies.length,
+			discrepancySummary: discrepancySummaryItems,
+			recommendation: validation.recommendation,
+			note: "Fast-mode validator completed",
+		},
+	});
+	if (validation.discrepancies.length > 0) {
+		emitWorkflowUpdate(options.onUpdate, {
+			type: "detail-lines",
+			stage: "validator",
+			lines: [
+				`Validator reported ${validation.discrepancies.length} remaining plan discrepancy(s).`,
+				"Fast mode stays bounded: remaining discrepancies are reported in the final summary instead of triggering more remediation loops.",
+				...(discrepancySummaryItems.length > 0 ? [`Top discrepancies: ${discrepancySummaryItems.join(" • ")}`] : []),
+			],
+			context: {
+				discrepancyCount: validation.discrepancies.length,
+				discrepancySummary: discrepancySummaryItems,
+				recommendation: validation.recommendation,
+				note: "Fast-mode validator discrepancies recorded for advisory follow-up",
+			},
+		});
+	}
+
+	const summary = buildSummary(
+		changedFiles,
+		checkPass.results,
+		validation,
+		checkPass.report,
+		summarizeWorkflowQualityStats(workflowQualityStats),
+		{
+			acceptedResidualSoftFindings,
+			blockingHardFindings,
+		},
+	);
+	return {
+		decision: "done",
+		summary,
+	};
+}
+
 async function runCheckerSuite(options: {
 	cwd: string;
 	tempDir: string;
@@ -2185,7 +2702,11 @@ interface TargetedFollowThroughResult {
 	deferredSoftFindings: QualityGateFindingSummary[];
 }
 
+type CheckerLoopOutcome = "pass" | "accepted-soft" | "stopped-hard";
+
 interface CheckerLoopResult {
+	outcome: CheckerLoopOutcome;
+	stopReason?: string;
 	changedFiles: string[];
 	checkerRun: CheckerSuiteResult;
 	stats: WorkflowQualityStats;
@@ -2194,6 +2715,8 @@ interface CheckerLoopResult {
 }
 
 interface MergedResultVerificationResult {
+	outcome: CheckerLoopOutcome;
+	stopReason?: string;
 	changedFiles: string[];
 	checkerRun: CheckerSuiteResult;
 	stats: WorkflowQualityStats;
@@ -2606,17 +3129,21 @@ async function runCheckerLoop(options: {
 	onStageChange?: (nodeId: WorkflowNodeId) => void;
 	resolveAgentsCheckExecutionPolicy?: (commands: AgentsCheckCommand[]) => Promise<AgentsCheckExecutionPolicy>;
 	holisticSoftFindings?: QualityGateFindingSummary[];
+	promptForHardGateChoice?: (decision: FinalCheckerHardGateDecision) => Promise<FinalCheckerHardGateChoice>;
 }): Promise<CheckerLoopResult> {
 	let currentChangedFiles = uniquePaths(options.changedFiles);
 	const stats = createWorkflowQualityStats();
 	let checkerRun!: CheckerSuiteResult;
+	let manualContinueBudget = 0;
 
-	for (let round = 1; round <= FINAL_CHECKER_MAX_PASSES; round++) {
+	for (let round = 1; round <= FINAL_CHECKER_MAX_PASSES + manualContinueBudget; round++) {
+		let roundBudgetTotal = FINAL_CHECKER_MAX_PASSES + manualContinueBudget;
 		const scopeContextPath = await writeTempContextFile(
 			options.tempDir,
 			`final-checker-scope-${round}.md`,
 			renderFinalCheckerScopeContext({
 				round,
+				totalPasses: roundBudgetTotal,
 				changedFiles: currentChangedFiles,
 				softFindings: options.holisticSoftFindings ?? [],
 			}),
@@ -2627,14 +3154,14 @@ async function runCheckerLoop(options: {
 			type: "checker-started",
 			stage: "checker",
 			lines: [
-				`Final checker pass ${round}/${FINAL_CHECKER_MAX_PASSES}`,
+				`Final checker pass ${round}/${roundBudgetTotal}`,
 				`Changed files: ${summarizePaths(currentChangedFiles)}`,
 			],
 			context: {
 				changedFiles: currentChangedFiles,
 				changedFilesSummary: summarizePaths(currentChangedFiles),
 				qualityRound: round,
-				qualityRounds: FINAL_CHECKER_MAX_PASSES,
+				qualityRounds: roundBudgetTotal,
 				note: `Final checker pass ${round} started`,
 			},
 		});
@@ -2659,7 +3186,7 @@ async function runCheckerLoop(options: {
 			type: "checker-completed",
 			stage: "checker",
 			lines: [
-				`Final checker pass ${round}/${FINAL_CHECKER_MAX_PASSES} finished with ${checkerRun.report.findings.length} finding(s).`,
+				`Final checker pass ${round}/${roundBudgetTotal} finished with ${checkerRun.report.findings.length} finding(s).`,
 				checkerRun.report.findings.length > 0
 					? `Top findings: ${summarizeCheckerFindings(checkerRun.report).join(" • ")}`
 					: `Changed files: ${summarizePaths(currentChangedFiles)}`,
@@ -2668,13 +3195,14 @@ async function runCheckerLoop(options: {
 				changedFiles: currentChangedFiles,
 				changedFilesSummary: summarizePaths(currentChangedFiles),
 				qualityRound: round,
-				qualityRounds: FINAL_CHECKER_MAX_PASSES,
+				qualityRounds: roundBudgetTotal,
 				note: `Final checker pass ${round} completed`,
 			},
 		});
 		const checkerGate = partitionQualityGateFindings("checker", checkerRun.report.findings);
 		if (checkerGate.hard.length === 0 && checkerGate.soft.length === 0) {
 			return {
+				outcome: "pass",
 				changedFiles: currentChangedFiles,
 				checkerRun,
 				stats,
@@ -2682,13 +3210,113 @@ async function runCheckerLoop(options: {
 				blockingHardFindings: [],
 			};
 		}
-		if (round >= FINAL_CHECKER_MAX_PASSES) {
-			if (checkerGate.hard.length > 0) {
-				throw new Error(
-					`Final checker stopped after ${FINAL_CHECKER_MAX_PASSES} pass(es). Hard-blocking findings remain: ${renderQualityGateCountsSummary(checkerGate.hard)}.`,
-				);
+		if (round >= roundBudgetTotal && checkerGate.hard.length > 0) {
+			const stopMessage = `Final checker stopped after ${roundBudgetTotal} pass(es). Hard-blocking findings remain: ${renderQualityGateCountsSummary(checkerGate.hard)}.`;
+			if (options.promptForHardGateChoice) {
+				emitWorkflowUpdate(options.onUpdate, {
+					type: "detail-lines",
+					stage: "checker",
+					lines: [
+						stopMessage,
+						`Changed files: ${summarizePaths(currentChangedFiles)}`,
+						"Awaiting your choice: continue remediating inside the isolated workspace, or stop and summarize the current progress.",
+					],
+					context: {
+						changedFiles: currentChangedFiles,
+						changedFilesSummary: summarizePaths(currentChangedFiles),
+						qualityRound: round,
+						qualityRounds: roundBudgetTotal,
+						note: "Awaiting final-checker hard-gate decision",
+					},
+				});
+				const choice = await options.promptForHardGateChoice({
+					round,
+					roundBudget: {
+						base: FINAL_CHECKER_MAX_PASSES,
+						extra: manualContinueBudget,
+						total: roundBudgetTotal,
+					},
+					message: stopMessage,
+					changedFiles: currentChangedFiles,
+					hardGateFindings: checkerGate.hard,
+					softGateFindings: checkerGate.soft,
+					checkerRun,
+				});
+				if (choice === "Stop and summarize current progress") {
+					emitWorkflowUpdate(options.onUpdate, {
+						type: "detail-lines",
+						stage: "checker",
+						lines: [
+							stopMessage,
+							"Stopping gracefully and returning a summary of what was completed and what remains.",
+							"The isolated workspace result will not be applied to the original checkout.",
+						],
+						context: {
+							changedFiles: currentChangedFiles,
+							changedFilesSummary: summarizePaths(currentChangedFiles),
+							qualityRound: round,
+							qualityRounds: roundBudgetTotal,
+							note: "Final checker stopped gracefully after hard-gate prompt",
+						},
+					});
+					return {
+						outcome: "stopped-hard",
+						stopReason: stopMessage,
+						changedFiles: currentChangedFiles,
+						checkerRun,
+						stats,
+						acceptedResidualSoftFindings: checkerGate.soft,
+						blockingHardFindings: checkerGate.hard,
+					};
+				}
+				manualContinueBudget += 1;
+				roundBudgetTotal = FINAL_CHECKER_MAX_PASSES + manualContinueBudget;
+				emitWorkflowUpdate(options.onUpdate, {
+					type: "detail-lines",
+					stage: "checker",
+					lines: [
+						`Manual continuation granted. Final checker budget extended to ${roundBudgetTotal} pass(es).`,
+						"Continuing remediation inside the existing isolated workspace.",
+					],
+					context: {
+						changedFiles: currentChangedFiles,
+						changedFilesSummary: summarizePaths(currentChangedFiles),
+						qualityRound: round,
+						qualityRounds: roundBudgetTotal,
+						note: "Final checker continuation granted by user",
+					},
+				});
+			} else {
+				emitWorkflowUpdate(options.onUpdate, {
+					type: "detail-lines",
+					stage: "checker",
+					lines: [
+						stopMessage,
+						"Stopping gracefully and returning a summary of what was completed and what remains.",
+						"The isolated workspace result will not be applied to the original checkout.",
+					],
+					context: {
+						changedFiles: currentChangedFiles,
+						changedFilesSummary: summarizePaths(currentChangedFiles),
+						qualityRound: round,
+						qualityRounds: roundBudgetTotal,
+						note: "Final checker stopped gracefully without interactive override",
+					},
+				});
+				return {
+					outcome: "stopped-hard",
+					stopReason: stopMessage,
+					changedFiles: currentChangedFiles,
+					checkerRun,
+					stats,
+					acceptedResidualSoftFindings: checkerGate.soft,
+					blockingHardFindings: checkerGate.hard,
+				};
 			}
+		}
+		if (round >= roundBudgetTotal) {
 			return {
+				outcome: "accepted-soft",
 				changedFiles: currentChangedFiles,
 				checkerRun,
 				stats,
@@ -2701,14 +3329,14 @@ async function runCheckerLoop(options: {
 			"checker->fix",
 			"fix",
 			[
-				`Final checker pass ${round}/${FINAL_CHECKER_MAX_PASSES} requested remediation.`,
+				`Final checker pass ${round}/${roundBudgetTotal} requested remediation.`,
 				`Changed files: ${summarizePaths(currentChangedFiles)}`,
 			],
 			{
 				changedFiles: currentChangedFiles,
 				changedFilesSummary: summarizePaths(currentChangedFiles),
 				qualityRound: round,
-				qualityRounds: FINAL_CHECKER_MAX_PASSES,
+				qualityRounds: roundBudgetTotal,
 				note: `Final checker pass ${round} requested remediation`,
 			},
 		);
@@ -2724,7 +3352,7 @@ async function runCheckerLoop(options: {
 			type: "fix-started",
 			stage: "fix",
 			lines: [
-				`Applying final checker remediation after pass ${round}/${FINAL_CHECKER_MAX_PASSES}.`,
+				`Applying final checker remediation after pass ${round}/${roundBudgetTotal}.`,
 				`Worker: ${remediationPromptSelection.promptLabel}`,
 			],
 			context: {
@@ -2732,7 +3360,7 @@ async function runCheckerLoop(options: {
 				changedFilesSummary: summarizePaths(currentChangedFiles),
 				workerKind: remediationPromptSelection.kind,
 				qualityRound: round,
-				qualityRounds: FINAL_CHECKER_MAX_PASSES,
+				qualityRounds: roundBudgetTotal,
 				note: remediationPromptSelection.reason,
 			},
 		});
@@ -2769,7 +3397,7 @@ async function runCheckerLoop(options: {
 			type: "fix-completed",
 			stage: "fix",
 			lines: [
-				`Completed final checker remediation after pass ${round}/${FINAL_CHECKER_MAX_PASSES}.`,
+				`Completed final checker remediation after pass ${round}/${roundBudgetTotal}.`,
 				`Worker: ${remediationPromptSelection.promptLabel}`,
 			],
 			context: {
@@ -2777,7 +3405,7 @@ async function runCheckerLoop(options: {
 				changedFilesSummary: summarizePaths(currentChangedFiles),
 				workerKind: remediationPromptSelection.kind,
 				qualityRound: round,
-				qualityRounds: FINAL_CHECKER_MAX_PASSES,
+				qualityRounds: roundBudgetTotal,
 				note: remediationPromptSelection.reason,
 			},
 		});
@@ -2787,20 +3415,20 @@ async function runCheckerLoop(options: {
 			"fix->checker",
 			"checker",
 			[
-				`Re-running the final checker after remediation from pass ${round}/${FINAL_CHECKER_MAX_PASSES}.`,
+				`Re-running the final checker after remediation from pass ${round}/${roundBudgetTotal}.`,
 				`Changed files: ${summarizePaths(currentChangedFiles)}`,
 			],
 			{
 				changedFiles: currentChangedFiles,
 				changedFilesSummary: summarizePaths(currentChangedFiles),
 				qualityRound: round,
-				qualityRounds: FINAL_CHECKER_MAX_PASSES,
+				qualityRounds: roundBudgetTotal,
 				note: `Re-running final checker after remediation from pass ${round}`,
 			},
 		);
 	}
 
-	throw new Error(`Final checker exhausted ${FINAL_CHECKER_MAX_PASSES} pass(es).`);
+	throw new Error(`Final checker exhausted ${FINAL_CHECKER_MAX_PASSES + manualContinueBudget} pass(es).`);
 }
 
 async function runMergedResultVerification(options: {
@@ -2825,6 +3453,7 @@ async function runMergedResultVerification(options: {
 	verificationReason: string;
 	designContextText?: string;
 	resolveAgentsCheckExecutionPolicy?: (commands: AgentsCheckCommand[]) => Promise<AgentsCheckExecutionPolicy>;
+	promptForHardGateChoice?: (decision: FinalCheckerHardGateDecision) => Promise<FinalCheckerHardGateChoice>;
 }): Promise<MergedResultVerificationResult> {
 	let currentChangedFiles = uniquePaths(options.changedFiles);
 	const stats = createWorkflowQualityStats();
@@ -3076,9 +3705,12 @@ async function runMergedResultVerification(options: {
 		onStageChange: options.onStageChange,
 		resolveAgentsCheckExecutionPolicy: options.resolveAgentsCheckExecutionPolicy,
 		holisticSoftFindings,
+		promptForHardGateChoice: options.promptForHardGateChoice,
 	});
 	mergeWorkflowQualityStats(stats, checkerLoop.stats);
 	return {
+		outcome: checkerLoop.outcome,
+		stopReason: checkerLoop.stopReason,
 		changedFiles: checkerLoop.changedFiles,
 		checkerRun: checkerLoop.checkerRun,
 		stats,
@@ -3631,7 +4263,7 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 				options.rawPrompt?.trim()
 					? "Synthesizing a lightweight plan in an isolated workspace."
 					: `Using ${options.planPath} as the approved source of truth in an isolated workspace.`,
-				`Workspace: ${runWorkspace.kind} @ ${runWorkspace.cwd}`,
+				`Workspace: ${runWorkspace.kind} ${runWorkspace.workspaceName} @ ${runWorkspace.cwd}`,
 				`Seeded source checkout changes: ${initialSeededChangedFiles.length > 0 ? summarizePaths(initialSeededChangedFiles) : "none"}`,
 				`Primary model: ${primaryModel ?? "default"}`,
 				`Checker models: ${reviewModels.length > 0 ? reviewModels.join(", ") : primaryModel ?? "default"}`,
@@ -3719,11 +4351,68 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 				`- workflow cwd relative to repo root: ${workspaceRelativeCwd}`,
 				`- seeded source checkout changes: ${initialSeededChangedFiles.length > 0 ? initialSeededChangedFiles.join(", ") : "none"}`,
 				`- approved plan source: ${materializedPlan.label}`,
+				`- workflow mode: ${(options.workflowMode ?? "fast").trim()}`,
 				...(options.extraInstructions.trim()
 					? ["", "## Additional instructions", "", options.extraInstructions.trim()]
 					: []),
 			].join("\n"),
 		);
+
+		const workflowMode = options.workflowMode ?? "fast";
+		const setActiveNode = (nodeId: WorkflowNodeId): void => {
+			activeNode = nodeId;
+		};
+		if (workflowMode === "fast") {
+			const result = await runFastImplementationWorkflow({
+				cwd: workflowCwd,
+				tempDir,
+				planPath,
+				agentFiles,
+				workerPrompt,
+				designWorkerPrompt,
+				checkerPrompt,
+				validatorPrompt,
+				extraInstructions: options.extraInstructions,
+				exec,
+				primaryModel,
+				checkerModels: reviewModels,
+				thinkingLevel,
+				onUpdate: options.onUpdate,
+				onStageChange: setActiveNode,
+				resolveAgentsCheckExecutionPolicy,
+				promptForHardGateChoice: ctx.hasUI
+					? async (decision) => await promptForFinalCheckerHardGateChoice(ctx, decision)
+					: undefined,
+			});
+			if (result.decision === "done") {
+				await integrateRunWorkspace();
+				emitWorkflowUpdate(options.onUpdate, {
+					type: "workflow-completed",
+					stage: "complete",
+					lines: [
+						"Fast sub-agent implementation workflow finished.",
+						`Changed files: ${summarizePaths(await detectChangedFiles(workflowCwd, exec))}`,
+					],
+					context: {
+						note: "Fast workflow completed",
+					},
+				});
+			} else {
+				emitWorkflowUpdate(options.onUpdate, {
+					type: "workflow-completed",
+					stage: "complete",
+					lines: [
+						"Fast sub-agent implementation workflow stopped with blockers still remaining.",
+						"The isolated workspace result was not applied to the original checkout.",
+					],
+					context: {
+						note: "Fast workflow stopped gracefully without integrating the isolated workspace",
+					},
+				});
+			}
+			cleanupReportStage = "complete";
+			return result;
+		}
 
 		activeNode = "decomposer";
 		emitWorkflowUpdate(options.onUpdate, {
@@ -3785,9 +4474,6 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 		let resolvedChildIntegrationConflicts = false;
 		const workerResults: WorkerPhaseResult[] = [];
 		const workflowQualityStats = createWorkflowQualityStats();
-		const setActiveNode = (nodeId: WorkflowNodeId): void => {
-			activeNode = nodeId;
-		};
 		for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
 			activeNode = "implementation";
 			const batch = batches[batchIndex];
@@ -3968,12 +4654,50 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 				? "merged implementation result after child-workspace conflict resolution"
 				: "merged implementation result",
 			resolveAgentsCheckExecutionPolicy,
+			promptForHardGateChoice: ctx.hasUI
+				? async (decision) => await promptForFinalCheckerHardGateChoice(ctx, decision)
+				: undefined,
 		});
 		mergeWorkflowQualityStats(workflowQualityStats, verificationPass.stats);
 		changedFiles = verificationPass.changedFiles;
 		acceptedResidualSoftFindings = verificationPass.acceptedResidualSoftFindings;
 		blockingHardFindings = verificationPass.blockingHardFindings;
 		let checkPass = verificationPass.checkerRun;
+
+		if (verificationPass.outcome === "stopped-hard") {
+			const qualitySummary = summarizeWorkflowQualityStats(workflowQualityStats);
+			const summary = buildStoppedSummary({
+				reason:
+					verificationPass.stopReason ??
+					"Final checker stopped with hard-blocking findings still remaining after the bounded retry budget.",
+				changedFiles,
+				checks: checkPass.results,
+				checker: checkPass.report,
+				quality: qualitySummary,
+				workerResults,
+				acceptedResidualSoftFindings,
+				blockingHardFindings,
+			});
+			emitWorkflowUpdate(options.onUpdate, {
+				type: "workflow-completed",
+				stage: "complete",
+				lines: [
+					"Sub-agent implementation workflow stopped with hard blockers still remaining.",
+					verificationPass.stopReason ?? "Final checker stopped before the validator ran.",
+					"The isolated workspace result was not applied to the original checkout.",
+				],
+				context: {
+					changedFiles,
+					changedFilesSummary: summarizePaths(changedFiles),
+					note: "Workflow stopped gracefully without integrating the isolated workspace",
+				},
+			});
+			cleanupReportStage = "complete";
+			return {
+				decision: "stopped",
+				summary,
+			};
+		}
 
 		let validation!: ValidationReport;
 		let discrepancySummaryItems: string[] = [];

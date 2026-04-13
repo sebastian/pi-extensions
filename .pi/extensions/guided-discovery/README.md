@@ -5,13 +5,14 @@ A research-first planning workflow for pi that turns a loose feature prompt into
 ## Features
 
 - read-only discovery mode with `read`, `bash`, `grep`, `find`, `ls`, `questionnaire`, and `web_research`
+- discovery starts in its own isolated jj workspace (or git worktree fallback), and relative repo reads plus read-only bash commands are routed there automatically
 - structured multiple-choice clarifying questions with an `Other` fallback
 - external docs / API / market / state-of-the-art research via `web_research`
-- concise final-plan detection and automatic save of the latest plan to `PLAN.md`
+- concise final-plan detection and automatic save of the latest plan to the isolated workspace `PLAN.md`
 - approval UI with two implementation paths:
   - direct handoff to the main session
-  - isolated sub-agent implementation workflow
-- standalone `/implement-subagents [prompt]` entrypoint for ad hoc sub-agent implementation outside discovery
+  - isolated sub-agent implementation workflow in either `fast` or `strict` mode
+- standalone `/implement-subagents [prompt]` and `/implement-subagents-strict [prompt]` entrypoints for ad hoc sub-agent implementation outside discovery
 - raw-prompt sub-agent runs synthesize a lightweight ephemeral plan instead of requiring a repo-root `PLAN.md`
 - bundled sub-agent roles for decomposition, general implementation, design-specialist implementation, cleanup auditing, design review, final code review, and plan validation
 - simplified sub-agent progress UI in interactive sessions: a persistent widget above the editor showing workflow stages, worker batches, active phases, targeted follow-through activity, final review reruns, and only the branches that are actually in use
@@ -31,10 +32,12 @@ A research-first planning workflow for pi that turns a loose feature prompt into
     - `/discover-implement`
     - `/discover-implement direct Start with tests.`
     - `/discover-implement subagents Keep changes minimal.`
-- `/implement-subagents [prompt]` — run sub-agents directly from the current `PLAN.md`, or from a raw prompt that gets a lightweight synthesized plan
+- `/discover-implement-strict [extra instructions]` — start the strict sub-agent workflow from the approved plan
+- `/implement-subagents [prompt]` — run the fast sub-agent workflow directly from the approved plan, or from a raw prompt that gets a lightweight synthesized plan
   - examples:
     - `/implement-subagents`
     - `/implement-subagents Add a standalone /sync command and keep the UI minimal.`
+- `/implement-subagents-strict [prompt]` — run the strict sub-agent workflow directly from the approved plan, or from a raw prompt
 - `Ctrl+Alt+D` — toggle discovery mode
 
 ## How discovery mode behaves
@@ -42,6 +45,7 @@ A research-first planning workflow for pi that turns a loose feature prompt into
 While guided discovery mode is active:
 
 - active tools are restricted to `read`, `bash`, `grep`, `find`, `ls`, `questionnaire`, and `web_research`
+- discovery immediately creates an isolated workspace and routes relative repo reads plus read-only bash commands there
 - `bash` is limited to a read-only allowlist
 - the model is pushed to:
   - do a fast repo scan first
@@ -54,30 +58,41 @@ While guided discovery mode is active:
 
 When the assistant produces a final plan, the extension:
 
-1. auto-saves it to `PLAN.md`
+1. auto-saves it to the isolated workspace `PLAN.md`
 2. appends a `## Sources consulted` section when external sources were used
 3. shows an approval UI with options to:
    - implement directly
-   - implement with sub-agents
+   - implement with sub-agents (fast)
+   - implement with sub-agents (strict)
    - keep refining in discovery mode
    - leave discovery mode with the saved plan only
 
 ## Sub-agent implementation mode
 
-Sub-agent mode keeps orchestration out of the main conversation and runs a fixed workflow in isolated `pi` subprocesses. The whole run happens in a temporary jj workspace (or git worktree fallback), and parallel-safe worker batches get their own child workspaces before their results are integrated back into the parent workspace. Design-sensitive work is routed to a dedicated design specialist worker.
+Sub-agent mode keeps orchestration out of the main conversation and runs in isolated `pi` subprocesses.
 
-The workflow is intentionally bounded:
+Discovery already prepared an isolated workspace and stored the approved `PLAN.md` there. When you start implementation from discovery, the workflow reads that approved plan from the isolated workspace and then runs implementation in a fresh isolated build workspace. If the run finishes successfully, the discovery workspace is cleaned up so the planning `PLAN.md` does not linger afterward.
 
-1. **phase-local follow-through** — after each implementation phase, run targeted cleanup and, when needed, targeted design review inside that phase’s scope
-2. **final holistic review** — one final cleanup pass and one conditional design pass for glaring feature-level issues only
-3. **final code review loop** — the only looping end-stage reviewer, bounded to 2 passes, focused on logic, regressions, side effects, security, and guidance
-4. **single advisory validator pass** — compare the final result to the approved plan once, report any remaining gaps, and stop there
+There are now two sub-agent workflows:
+
+1. **fast** — the default. Uses one whole-plan worker, runs early `AGENTS.md`-required checks before the final review loop, keeps the final checker bounded, and runs the validator once at the end.
+2. **strict** — the previous heavier workflow. Keeps decomposition, targeted follow-through, holistic cleanup/design review, the bounded final checker loop, and the final advisory validator.
 
 In interactive TUI sessions, it also renders a persistent progress widget above the editor. The widget keeps the workflow spine visible, expands worker batches after decomposition, highlights the current active phase, and hides unused branches like fix unless they are actually touched. In RPC or non-interactive flows, the extension falls back to concise text progress instead.
 
 ### Stages
 
-1. **decomposer** — breaks `PLAN.md` into a very small set of actionable phases with conservative parallel-safety hints and a `designSensitive` flag for UI, interaction, discoverability, navigation, copy, and ambiguous product-behavior work
+#### Fast mode
+
+1. **single worker / design worker** — implements the approved plan as one coherent change in the isolated workspace. Workers now also get `bash` so they can do focused repo inspection and verification inside the isolated workspace.
+2. **early required checks** — explicit `AGENTS.md` checks run immediately after the first implementation pass so obvious objective failures surface before the final review loop.
+3. **optional focused remediation** — if those early required checks fail, the workflow does one focused remediation pass before moving on.
+4. **final code review loop** — the only looping end-stage reviewer, bounded, focused on logic, regressions, side effects, security, and guidance.
+5. **validator** — compares the actual result against the approved plan once and reports remaining discrepancies as advisory follow-up instead of triggering another endgame implementation loop.
+
+#### Strict mode
+
+1. **decomposer** — breaks `PLAN.md` into a very small set of actionable phases with conservative parallel-safety hints and a `designSensitive` flag for UI, interaction, discoverability, navigation, copy, and ambiguous product-behavior work.
 2. **worker / design worker** — implements phases, usually sequentially, only parallelizing batches when touched paths do not overlap and safety is explicit. Parallel phases run in separate child workspaces and are then integrated back into the parent workspace. Design-sensitive phases use the dedicated design worker instead of the generic worker.
 3. **targeted phase follow-through** — after each phase, run targeted cleanup on that phase’s changed files and touched paths. If the phase is design-sensitive or visibly user-facing, also run targeted design review. This loop is small, local, and bounded.
 4. **final cleanup auditor** — after the implementation is merged, run one holistic cleanup pass for glaring feature-level cleanup mistakes only.
@@ -88,8 +103,8 @@ In interactive TUI sessions, it also renders a persistent progress widget above 
    - security issues
    - performance regression risk when materially relevant
    - relevant `AGENTS.md` guidance for touched areas
-7. **review remediation loop** — if the final code review returns findings, the workflow applies fixes automatically and reruns only the final code review. After 2 review passes, remaining non-critical findings are non-blocking.
-8. **validator** — compares the actual result against the approved plan once and reports remaining discrepancies as advisory follow-up instead of triggering another endgame implementation loop
+7. **review remediation loop** — if the final code review returns findings, the workflow applies fixes automatically and reruns only the final code review. After 2 review passes, remaining non-critical findings are non-blocking. If hard blockers still remain at that bound, interactive sessions prompt you to either continue remediating anyway or stop gracefully with a summary of what was completed and what remains; non-interactive runs stop with that summary instead of hard-failing.
+8. **validator** — compares the actual result against the approved plan once and reports remaining discrepancies as advisory follow-up instead of triggering another endgame implementation loop.
 
 If the validator finds material discrepancies, the extension reports them clearly in the final summary and, by design, does not keep looping.
 
@@ -98,6 +113,7 @@ If the validator finds material discrepancies, the extension reports them clearl
 - the cleanup auditor, design reviewer, and checker all return the existing `CheckerReport` JSON shape instead of introducing separate report types
 - that shared structure means parsing, severity/category handling, finding summaries, and fix-context rendering are reused across all three quality gates
 - the final workflow summary reports changed files, how many cleanup audits ran, how many design reviews ran vs were skipped, how many quality remediation passes were needed, how many cleanup/design/checker findings were fixed, whether any residual soft findings were accepted, whether any blocking hard issues remain, how many merged-result verification passes ran, whether legacy code/files were removed, final review totals, and the validator recommendation
+- when the bounded final checker still has hard blockers, the workflow now returns a graceful stop summary instead of surfacing a raw workflow failure; that summary explicitly says what completed in the isolated workspace, what remains, and whether the isolated result was applied
 - remaining validator discrepancies stay visible under the remaining-discrepancies section instead of being silently dropped or auto-looped away
 - cleanup reporting is concrete: it focuses on actionable cleanup appropriate to finish now, and the summary calls out when legacy or superseded code/files were actually removed
 
@@ -115,26 +131,22 @@ Free-form repository workflow instructions that require higher-level orchestrati
 
 ### Direct mode
 
-- preserves today’s lightweight handoff behavior
-- remains unchanged by the new design-review and cleanup behavior
 - exits discovery mode
 - sends an implementation prompt back into the main session
+- if the approved plan lives in the isolated discovery workspace, the prompt inlines that plan so the discovery workspace can be cleaned up immediately instead of leaving a stray `PLAN.md` behind
 
 ### Sub-agent mode
 
-- works from either a saved `PLAN.md` or a raw prompt passed to `/implement-subagents`
+- works from either the approved discovery-workspace `PLAN.md` or a raw prompt passed to `/implement-subagents`
+- defaults to **fast** mode; **strict** mode is opt-in
 - synthesizes a lightweight ephemeral plan for raw-prompt runs
 - runs implementation in an isolated jj workspace or git worktree with bundled prompts
 - keeps orchestration chatter out of the main session
-- prefers `openai-codex/gpt-5.4` for decomposition, implementation, and validation when available
-- routes design-sensitive implementation and remediation work to the dedicated design worker when needed
-- runs targeted per-phase cleanup after every implementation phase and targeted design review only for design-sensitive/user-visible work
-- runs one final holistic cleanup pass and one final holistic design pass for glaring feature-level issues only
-- runs the final code review with the primary model plus at most one companion (`gpt-5.3-codex`, else `GLM-5.1`)
-- makes final code review the only looping end-stage reviewer, capped at 2 passes
-- treats severe design/accessibility/discoverability issues, security/correctness regressions, AGENTS-required check failures, and process violations as blocking problems, while letting non-critical residual findings stop blocking after the second review pass
+- lets workers use `bash` inside the isolated workspace for focused inspection and verification
+- runs `AGENTS.md`-required checks early in fast mode and still enforces them during final review
+- keeps final checker remediation bounded and graceful when blockers still remain
 - runs the validator once at the end as an advisory plan-coverage check
-- does not auto-integrate isolated-workspace output back into the original checkout when the workflow hands back to discovery reformulation
+- cleans up the discovery-workspace `PLAN.md` after a successful implementation run so planning artifacts do not linger in the source checkout
 
 In non-UI contexts, `/discover-implement` still defaults to the direct path unless you explicitly request `subagents`.
 
@@ -156,6 +168,12 @@ Or explicitly choose the isolated workflow:
 
 ```text
 /discover-implement subagents Start with the smallest safe slice.
+```
+
+Or opt into the heavier strict workflow:
+
+```text
+/discover-implement-strict Start with the smallest safe slice.
 ```
 
 ## Install globally as a pi package

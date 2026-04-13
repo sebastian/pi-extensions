@@ -6,6 +6,7 @@ import { basename, dirname, join } from "node:path";
 import {
 	QUALITY_SUITE_MAX_EXTRA_ROUNDS,
 	QUALITY_SUITE_MAX_ROUNDS,
+	buildStoppedSummary,
 	buildSummary,
 	collectWorkerAgentFiles,
 	decideQualitySuiteRound,
@@ -584,6 +585,63 @@ test("buildSummary distinguishes fixed issues, accepted residual soft issues, an
 	assert.match(summary, /design\/ui: Button copy could be clearer/);
 	assert.match(summary, /## Blocking hard quality issues/);
 	assert.match(summary, /checker\/guidance: Required AGENTS.md check failed: pnpm lint/);
+});
+
+test("buildStoppedSummary explains completed work, remaining blockers, and the non-integrated isolated result", () => {
+	const summary = buildStoppedSummary({
+		reason: "Final checker stopped after 2 pass(es). Hard-blocking findings remain: checker 1.",
+		changedFiles: ["src/ui/screen.tsx", "README.md"],
+		checks: [
+			{ command: "model-review", source: "default", status: "failed", summary: "1 blocker remains" },
+			{ command: "pnpm test", source: "AGENTS.md", status: "passed", summary: "All tests passed" },
+		],
+		checker: report([
+			{
+				id: "finding-1",
+				category: "guidance",
+				severity: "high",
+				summary: "Required AGENTS.md check failed: pnpm lint",
+				details: "The lint command still fails in the isolated workspace.",
+				suggestedFix: "Fix the lint issue before integrating.",
+				paths: ["src/ui/screen.tsx"],
+			},
+		]),
+		quality: qualitySummary(),
+		workerResults: [
+			{ phase: phase({ id: "phase-1", title: "Refresh overview shell" }), summary: "Updated the layout." },
+			{ phase: phase({ id: "phase-2", title: "Add supporting tests", touchedPaths: ["tests/ui/overview.test.ts"] }), summary: "Added focused coverage." },
+		],
+		acceptedResidualSoftFindings: [
+			{
+				stage: "design",
+				category: "ui",
+				severity: "medium",
+				summary: "Button copy could be clearer",
+				paths: ["src/ui/screen.tsx"],
+				classification: "soft",
+			},
+		],
+		blockingHardFindings: [
+			{
+				stage: "checker",
+				category: "guidance",
+				severity: "high",
+				summary: "Required AGENTS.md check failed: pnpm lint",
+				paths: ["src/ui/screen.tsx"],
+				classification: "hard",
+			},
+		],
+	});
+
+	assert.match(summary, /Sub-agent implementation workflow stopped before applying the isolated workspace result/);
+	assert.match(summary, /Reason: Final checker stopped after 2 pass\(es\)\./);
+	assert.match(summary, /## Completed work/);
+	assert.match(summary, /phase-1 — Refresh overview shell/);
+	assert.match(summary, /phase-2 — Add supporting tests/);
+	assert.match(summary, /## Remaining hard quality issues/);
+	assert.match(summary, /checker\/guidance: Required AGENTS.md check failed: pnpm lint/);
+	assert.match(summary, /The isolated workspace result was not applied to the original checkout/);
+	assert.match(summary, /## Next steps/);
 });
 
 test("collectWorkerAgentFiles includes touched-path AGENTS guidance once", async () => {
