@@ -26,8 +26,11 @@ import {
 	createManagedWorkspace,
 	createWorkspaceSnapshot,
 	integrateWorkspaceChanges,
+	reviveManagedWorkspace,
+	serializeManagedWorkspace,
 	workspaceRevisionChanged,
 	type ManagedWorkspace,
+	type SerializedManagedWorkspace,
 	type WorkspaceSnapshot,
 } from "./workspaces.ts";
 import {
@@ -112,19 +115,33 @@ interface WorkflowOptions {
 	rawPrompt?: string;
 	extraInstructions: string;
 	workflowMode?: SubagentWorkflowMode;
+	resumeState?: ResumableImplementationState;
 	onUpdate?: (update: WorkflowProgressUpdate) => void;
 	onUsage?: (usage: SubagentUsageTotals) => void;
 }
 
-interface WorkerPhaseResult {
+export interface SerializedWorkerPhaseResult {
 	phase: DecompositionPhase;
 	summary: string;
+}
+
+interface WorkerPhaseResult extends SerializedWorkerPhaseResult {}
+
+export interface ResumableImplementationState {
+	workspace: SerializedManagedWorkspace;
+	originalRepoRoot: string;
+	workflowMode: SubagentWorkflowMode;
+	planDocument: string;
+	extraInstructions: string;
+	decomposition: DecompositionPlan;
+	workerResults: SerializedWorkerPhaseResult[];
 }
 
 interface WorkflowSummary {
 	decision: WorkflowDecision;
 	summary: string;
 	reformulationPrompt?: string;
+	resumableState?: ResumableImplementationState;
 }
 
 let currentWorkflowSubagentUsageSink: ((usage: SubagentUsageTotals) => void) | undefined;
@@ -315,6 +332,40 @@ async function writeTempContextFile(tempDir: string, name: string, content: stri
 	const filePath = join(tempDir, name);
 	await writeFile(filePath, trimBlock(content), "utf8");
 	return filePath;
+}
+
+async function materializeResumedWorkflowPlan(tempDir: string, planDocument: string): Promise<string> {
+	const workflowPlanPath = join(tempDir, "PLAN.md");
+	await writeFile(workflowPlanPath, trimBlock(planDocument), "utf8");
+	return workflowPlanPath;
+}
+
+function cloneWorkerResults(results: SerializedWorkerPhaseResult[]): WorkerPhaseResult[] {
+	return structuredClone(results) as WorkerPhaseResult[];
+}
+
+function cloneDecompositionPlan(plan: DecompositionPlan): DecompositionPlan {
+	return structuredClone(plan) as DecompositionPlan;
+}
+
+function buildResumableImplementationState(options: {
+	runWorkspace: ManagedWorkspace;
+	originalRepoRoot: string;
+	workflowMode: SubagentWorkflowMode;
+	planDocument: string;
+	extraInstructions: string;
+	decomposition: DecompositionPlan;
+	workerResults: WorkerPhaseResult[];
+}): ResumableImplementationState {
+	return {
+		workspace: serializeManagedWorkspace(options.runWorkspace),
+		originalRepoRoot: options.originalRepoRoot,
+		workflowMode: options.workflowMode,
+		planDocument: options.planDocument,
+		extraInstructions: options.extraInstructions,
+		decomposition: cloneDecompositionPlan(options.decomposition),
+		workerResults: cloneWorkerResults(options.workerResults),
+	};
 }
 
 function uniquePaths(paths: string[]): string[] {
@@ -972,7 +1023,7 @@ export function buildStoppedSummary(options: {
 				[
 					"## Next steps",
 					"",
-					"- Continue remediation by rerunning /implement-subagents if you want another bounded attempt from PLAN.md.",
+					"- Continue remediation from the preserved isolated workspace with /implement-subagents-resume if you want another bounded attempt without starting over.",
 					"- Or switch back into discovery if the remaining blockers suggest the plan needs to change before more implementation work.",
 				].join("\n"),
 			),
@@ -2233,6 +2284,8 @@ async function runFastImplementationWorkflow(options: {
 }): Promise<{
 	decision: Extract<WorkflowDecision, "done" | "stopped">;
 	summary: string;
+	decomposition?: DecompositionPlan;
+	workerResults?: WorkerPhaseResult[];
 }> {
 	const workflowQualityStats = createWorkflowQualityStats();
 	workflowQualityStats.mergedResultVerificationRuns += 1;
@@ -2441,6 +2494,8 @@ async function runFastImplementationWorkflow(options: {
 				acceptedResidualSoftFindings,
 				blockingHardFindings,
 			}),
+			decomposition,
+			workerResults,
 		};
 	}
 
@@ -2510,6 +2565,458 @@ async function runFastImplementationWorkflow(options: {
 		});
 	}
 
+	const summary = buildSummary(
+		changedFiles,
+		checkPass.results,
+		validation,
+		checkPass.report,
+		summarizeWorkflowQualityStats(workflowQualityStats),
+		{
+			acceptedResidualSoftFindings,
+			blockingHardFindings,
+		},
+	);
+	return {
+		decision: "done",
+		summary,
+	};
+}
+
+async function runResumedFastImplementationWorkflow(options: {
+	cwd: string;
+	tempDir: string;
+	planPath: string;
+	agentFiles: string[];
+	workerPrompt: string;
+	designWorkerPrompt: string;
+	checkerPrompt: string;
+	validatorPrompt: string;
+	extraInstructions: string;
+	decomposition: DecompositionPlan;
+	workerResults: WorkerPhaseResult[];
+	exec: ExecLike;
+	primaryModel?: string;
+	checkerModels: string[];
+	thinkingLevel?: string;
+	onUpdate?: (update: WorkflowProgressUpdate) => void;
+	onStageChange?: (nodeId: WorkflowNodeId) => void;
+	resolveAgentsCheckExecutionPolicy?: (commands: AgentsCheckCommand[]) => Promise<AgentsCheckExecutionPolicy>;
+	promptForHardGateChoice?: (decision: FinalCheckerHardGateDecision) => Promise<FinalCheckerHardGateChoice>;
+}): Promise<{
+	decision: Extract<WorkflowDecision, "done" | "stopped">;
+	summary: string;
+	workerResults?: WorkerPhaseResult[];
+}> {
+	const workflowQualityStats = createWorkflowQualityStats();
+	workflowQualityStats.mergedResultVerificationRuns += 1;
+	workflowQualityStats.mergedResultVerificationReasons.add("resumed fast isolated implementation result");
+	let changedFiles = await detectChangedFiles(options.cwd, options.exec);
+	const workerResults = options.workerResults;
+
+	emitWorkflowUpdate(options.onUpdate, {
+		type: "detail-lines",
+		stage: "starting",
+		lines: [
+			"Resuming the fast sub-agent workflow from the preserved isolated workspace.",
+			`Changed files already present: ${summarizePaths(changedFiles)}`,
+		],
+		context: {
+			changedFiles,
+			changedFilesSummary: summarizePaths(changedFiles),
+			note: "Fast-mode resume started",
+		},
+	});
+
+	let earlyChecks = await runRequiredChecksPass({
+		cwd: options.cwd,
+		changedFiles,
+		exec: options.exec,
+		onUpdate: options.onUpdate,
+		resolveAgentsCheckExecutionPolicy: options.resolveAgentsCheckExecutionPolicy,
+	});
+	workflowQualityStats.agentsCheckResults.push(...earlyChecks.results);
+	if (earlyChecks.report.findings.length > 0) {
+		const remediationPromptSelection = pickRemediationPrompt({
+			workerPrompt: options.workerPrompt,
+			designWorkerPrompt: options.designWorkerPrompt,
+			phases: workerResults.map((result) => result.phase),
+			changedFiles,
+			findings: earlyChecks.report.findings,
+		});
+		options.onStageChange?.("fix");
+		emitWorkflowUpdate(options.onUpdate, {
+			type: "fix-started",
+			stage: "fix",
+			lines: [
+				"Resumed workflow required checks still show blocking issues. Applying one focused remediation pass before final review.",
+				`Worker: ${remediationPromptSelection.promptLabel}`,
+			],
+			context: {
+				changedFiles,
+				changedFilesSummary: summarizePaths(changedFiles),
+				workerKind: remediationPromptSelection.kind,
+				note: remediationPromptSelection.reason,
+			},
+		});
+		const fixSummary = await runWorkerFixPass({
+			cwd: options.cwd,
+			tempDir: options.tempDir,
+			planPath: options.planPath,
+			agentFiles:
+				earlyChecks.guidance.documents.map((document) => document.path).length > 0
+					? [...new Set([...options.agentFiles, ...earlyChecks.guidance.documents.map((document) => document.path)])]
+					: options.agentFiles,
+			touchedPaths: changedFiles,
+			systemPrompt: remediationPromptSelection.systemPrompt,
+			contextTitle: "fast-resume-precheck-fix",
+			contextMarkdown: renderFindingReportSummary("Early AGENTS.md-required check findings", earlyChecks.report),
+			prompt:
+				"Resolve the attached failed or blocked AGENTS.md-required checks now. Make the smallest code changes needed to clear them, run focused verification if useful, and then summarize what changed.",
+			model: options.primaryModel,
+			thinkingLevel: options.thinkingLevel,
+		});
+		workerResults.push({
+			phase: {
+				id: "fast-resume-precheck-fix",
+				title: "Resumed required-check remediation",
+				goal: "Resolve blocking AGENTS.md-required checks before final review",
+				instructions: ["Resolve the failed or blocked AGENTS.md-required checks before final review."],
+				dependsOn: workerResults.length > 0 ? [workerResults[workerResults.length - 1]!.phase.id] : [],
+				touchedPaths: changedFiles,
+				parallelSafe: false,
+				designSensitive: remediationPromptSelection.designSensitive,
+			},
+			summary: fixSummary,
+		});
+		workflowQualityStats.remediationPasses += 1;
+		recordQualityFindings(workflowQualityStats, "checker", earlyChecks.report.findings);
+		emitWorkflowUpdate(options.onUpdate, {
+			type: "fix-completed",
+			stage: "fix",
+			lines: ["Completed resumed required-check remediation.", `Worker: ${remediationPromptSelection.promptLabel}`],
+			context: {
+				changedFiles,
+				changedFilesSummary: summarizePaths(changedFiles),
+				workerKind: remediationPromptSelection.kind,
+				note: remediationPromptSelection.reason,
+			},
+		});
+		changedFiles = await detectChangedFiles(options.cwd, options.exec);
+		earlyChecks = await runRequiredChecksPass({
+			cwd: options.cwd,
+			changedFiles,
+			exec: options.exec,
+			onUpdate: options.onUpdate,
+			resolveAgentsCheckExecutionPolicy: options.resolveAgentsCheckExecutionPolicy,
+		});
+		workflowQualityStats.agentsCheckResults.push(...earlyChecks.results);
+		if (earlyChecks.report.findings.length > 0) {
+			emitWorkflowUpdate(options.onUpdate, {
+				type: "detail-lines",
+				stage: "checker",
+				lines: [
+					`Resumed required checks still report ${earlyChecks.report.findings.length} blocking finding(s).`,
+					"Carrying those blockers into the bounded final checker loop so you can decide whether to continue or stop if they remain.",
+				],
+				context: {
+					changedFiles,
+					changedFilesSummary: summarizePaths(changedFiles),
+					note: "Resumed required-check blockers still remain",
+				},
+			});
+		}
+	}
+
+	const fastCheckerModels = options.primaryModel ? [options.primaryModel] : options.checkerModels.slice(0, 1);
+	const checkerModels = fastCheckerModels.length > 0 ? fastCheckerModels : options.checkerModels;
+	const checkerLoop = await runCheckerLoop({
+		cwd: options.cwd,
+		tempDir: options.tempDir,
+		planPath: options.planPath,
+		agentFiles: options.agentFiles,
+		checkerPrompt: options.checkerPrompt,
+		workerPrompt: options.workerPrompt,
+		designWorkerPrompt: options.designWorkerPrompt,
+		decomposition: options.decomposition,
+		workerResults,
+		changedFiles,
+		exec: options.exec,
+		primaryModel: options.primaryModel,
+		checkerModels,
+		thinkingLevel: options.thinkingLevel,
+		onUpdate: options.onUpdate,
+		onStageChange: options.onStageChange,
+		resolveAgentsCheckExecutionPolicy: options.resolveAgentsCheckExecutionPolicy,
+		promptForHardGateChoice: options.promptForHardGateChoice,
+	});
+	mergeWorkflowQualityStats(workflowQualityStats, checkerLoop.stats);
+	changedFiles = checkerLoop.changedFiles;
+	const acceptedResidualSoftFindings = checkerLoop.acceptedResidualSoftFindings;
+	const blockingHardFindings = checkerLoop.blockingHardFindings;
+	const checkPass = checkerLoop.checkerRun;
+	if (checkerLoop.outcome === "stopped-hard") {
+		return {
+			decision: "stopped",
+			summary: buildStoppedSummary({
+				reason:
+					checkerLoop.stopReason ??
+					"Final checker stopped with hard-blocking findings still remaining after the bounded retry budget.",
+				changedFiles,
+				checks: checkPass.results,
+				checker: checkPass.report,
+				quality: summarizeWorkflowQualityStats(workflowQualityStats),
+				workerResults,
+				acceptedResidualSoftFindings,
+				blockingHardFindings,
+			}),
+			workerResults,
+		};
+	}
+
+	options.onStageChange?.("validator");
+	emitWorkflowUpdate(options.onUpdate, {
+		type: "validator-started",
+		stage: "validator",
+		lines: [
+			"Comparing the resumed fast-mode implementation against PLAN.md.",
+			`Changed files: ${summarizePaths(changedFiles)}`,
+			`Checker findings: ${checkPass.report.findings.length}`,
+		],
+		context: {
+			changedFiles,
+			changedFilesSummary: summarizePaths(changedFiles),
+			checkerModels: checkPass.modelRuns.map((run) => run.model),
+			note: "Resumed fast-mode validator started",
+		},
+	});
+	const validation = await runValidator({
+		cwd: options.cwd,
+		tempDir: options.tempDir,
+		planPath: options.planPath,
+		agentFiles: options.agentFiles,
+		validatorPrompt: options.validatorPrompt,
+		decomposition: options.decomposition,
+		workerResults,
+		changedFiles,
+		checkerReport: checkPass.report,
+		checkResults: checkPass.results,
+		model: options.primaryModel,
+		thinkingLevel: options.thinkingLevel,
+	});
+	const discrepancySummaryItems = summarizeDiscrepancies(validation.discrepancies);
+	emitWorkflowUpdate(options.onUpdate, {
+		type: "validator-completed",
+		stage: "validator",
+		lines: [
+			`Validator recommendation: ${validation.recommendation}`,
+			validation.summary || `${validation.discrepancies.length} discrepancy(s) reported.`,
+			...(discrepancySummaryItems.length > 0 ? [`Discrepancies: ${discrepancySummaryItems.join(" • ")}`] : []),
+		],
+		context: {
+			changedFiles,
+			changedFilesSummary: summarizePaths(changedFiles),
+			discrepancyCount: validation.discrepancies.length,
+			discrepancySummary: discrepancySummaryItems,
+			recommendation: validation.recommendation,
+			note: "Resumed fast-mode validator completed",
+		},
+	});
+	if (validation.discrepancies.length > 0) {
+		emitWorkflowUpdate(options.onUpdate, {
+			type: "detail-lines",
+			stage: "validator",
+			lines: [
+				`Validator reported ${validation.discrepancies.length} remaining plan discrepancy(s).`,
+				"Fast mode stays bounded: remaining discrepancies are reported in the final summary instead of triggering more remediation loops.",
+				...(discrepancySummaryItems.length > 0 ? [`Top discrepancies: ${discrepancySummaryItems.join(" • ")}`] : []),
+			],
+			context: {
+				discrepancyCount: validation.discrepancies.length,
+				discrepancySummary: discrepancySummaryItems,
+				recommendation: validation.recommendation,
+				note: "Resumed fast-mode validator discrepancies recorded for advisory follow-up",
+			},
+		});
+	}
+
+	const summary = buildSummary(
+		changedFiles,
+		checkPass.results,
+		validation,
+		checkPass.report,
+		summarizeWorkflowQualityStats(workflowQualityStats),
+		{
+			acceptedResidualSoftFindings,
+			blockingHardFindings,
+		},
+	);
+	return {
+		decision: "done",
+		summary,
+	};
+}
+
+async function runResumedStrictImplementationWorkflow(options: {
+	cwd: string;
+	tempDir: string;
+	planPath: string;
+	agentFiles: string[];
+	workerPrompt: string;
+	designWorkerPrompt: string;
+	cleanupPrompt: string;
+	designReviewPrompt: string;
+	checkerPrompt: string;
+	validatorPrompt: string;
+	decomposition: DecompositionPlan;
+	workerResults: WorkerPhaseResult[];
+	exec: ExecLike;
+	primaryModel?: string;
+	checkerModels: string[];
+	thinkingLevel?: string;
+	onUpdate?: (update: WorkflowProgressUpdate) => void;
+	onStageChange?: (nodeId: WorkflowNodeId) => void;
+	resolveAgentsCheckExecutionPolicy?: (commands: AgentsCheckCommand[]) => Promise<AgentsCheckExecutionPolicy>;
+	promptForHardGateChoice?: (decision: FinalCheckerHardGateDecision) => Promise<FinalCheckerHardGateChoice>;
+	integrateRunWorkspace: () => Promise<void>;
+}): Promise<{
+	decision: Extract<WorkflowDecision, "done" | "stopped">;
+	summary: string;
+	workerResults?: WorkerPhaseResult[];
+}> {
+	let changedFiles = await detectChangedFiles(options.cwd, options.exec);
+	const workerResults = options.workerResults;
+	const workflowQualityStats = createWorkflowQualityStats();
+
+	emitWorkflowUpdate(options.onUpdate, {
+		type: "detail-lines",
+		stage: "starting",
+		lines: [
+			"Resuming the strict sub-agent workflow from the preserved isolated workspace.",
+			`Changed files already present: ${summarizePaths(changedFiles)}`,
+		],
+		context: {
+			changedFiles,
+			changedFilesSummary: summarizePaths(changedFiles),
+			note: "Strict-mode resume started",
+		},
+	});
+
+	const verificationPass = await runMergedResultVerification({
+		cwd: options.cwd,
+		tempDir: options.tempDir,
+		planPath: options.planPath,
+		agentFiles: options.agentFiles,
+		workerPrompt: options.workerPrompt,
+		designWorkerPrompt: options.designWorkerPrompt,
+		cleanupPrompt: options.cleanupPrompt,
+		designReviewPrompt: options.designReviewPrompt,
+		checkerPrompt: options.checkerPrompt,
+		decomposition: options.decomposition,
+		workerResults,
+		changedFiles,
+		exec: options.exec,
+		primaryModel: options.primaryModel,
+		checkerModels: options.checkerModels,
+		thinkingLevel: options.thinkingLevel,
+		onUpdate: options.onUpdate,
+		onStageChange: options.onStageChange,
+		verificationReason: "resumed merged implementation result",
+		resolveAgentsCheckExecutionPolicy: options.resolveAgentsCheckExecutionPolicy,
+		promptForHardGateChoice: options.promptForHardGateChoice,
+	});
+	mergeWorkflowQualityStats(workflowQualityStats, verificationPass.stats);
+	changedFiles = verificationPass.changedFiles;
+	const acceptedResidualSoftFindings = verificationPass.acceptedResidualSoftFindings;
+	const blockingHardFindings = verificationPass.blockingHardFindings;
+	const checkPass = verificationPass.checkerRun;
+
+	if (verificationPass.outcome === "stopped-hard") {
+		return {
+			decision: "stopped",
+			summary: buildStoppedSummary({
+				reason:
+					verificationPass.stopReason ??
+					"Final checker stopped with hard-blocking findings still remaining after the bounded retry budget.",
+				changedFiles,
+				checks: checkPass.results,
+				checker: checkPass.report,
+				quality: summarizeWorkflowQualityStats(workflowQualityStats),
+				workerResults,
+				acceptedResidualSoftFindings,
+				blockingHardFindings,
+			}),
+			workerResults,
+		};
+	}
+
+	options.onStageChange?.("validator");
+	emitWorkflowUpdate(options.onUpdate, {
+		type: "validator-started",
+		stage: "validator",
+		lines: [
+			"Comparing the resumed implementation against PLAN.md.",
+			`Changed files: ${summarizePaths(changedFiles)}`,
+			`Checker findings: ${checkPass.report.findings.length}`,
+		],
+		context: {
+			changedFiles,
+			changedFilesSummary: summarizePaths(changedFiles),
+			checkerModels: checkPass.modelRuns.map((run) => run.model),
+			note: "Resumed validator started",
+		},
+	});
+	const validation = await runValidator({
+		cwd: options.cwd,
+		tempDir: options.tempDir,
+		planPath: options.planPath,
+		agentFiles: options.agentFiles,
+		validatorPrompt: options.validatorPrompt,
+		decomposition: options.decomposition,
+		workerResults,
+		changedFiles,
+		checkerReport: checkPass.report,
+		checkResults: checkPass.results,
+		model: options.primaryModel,
+		thinkingLevel: options.thinkingLevel,
+	});
+	let discrepancySummaryItems = summarizeDiscrepancies(validation.discrepancies);
+	emitWorkflowUpdate(options.onUpdate, {
+		type: "validator-completed",
+		stage: "validator",
+		lines: [
+			`Validator recommendation: ${validation.recommendation}`,
+			validation.summary || `${validation.discrepancies.length} discrepancy(s) reported.`,
+			...(discrepancySummaryItems.length > 0 ? [`Discrepancies: ${discrepancySummaryItems.join(" • ")}`] : []),
+		],
+		context: {
+			changedFiles,
+			changedFilesSummary: summarizePaths(changedFiles),
+			discrepancyCount: validation.discrepancies.length,
+			discrepancySummary: discrepancySummaryItems,
+			recommendation: validation.recommendation,
+			note: "Resumed validator completed",
+		},
+	});
+	if (validation.discrepancies.length > 0) {
+		discrepancySummaryItems = summarizeDiscrepancies(validation.discrepancies);
+		emitWorkflowUpdate(options.onUpdate, {
+			type: "detail-lines",
+			stage: "validator",
+			lines: [
+				`Validator reported ${validation.discrepancies.length} remaining plan discrepancy(s).`,
+				"Keeping the sub-agent workflow bounded: remaining discrepancies are reported in the final summary instead of triggering another implementation loop.",
+				...(discrepancySummaryItems.length > 0 ? [`Top discrepancies: ${discrepancySummaryItems.join(" • ")}`] : []),
+			],
+			context: {
+				discrepancyCount: validation.discrepancies.length,
+				discrepancySummary: discrepancySummaryItems,
+				recommendation: validation.recommendation,
+				note: "Resumed validator discrepancies recorded for advisory follow-up",
+			},
+		});
+	}
+
+	await options.integrateRunWorkspace();
 	const summary = buildSummary(
 		changedFiles,
 		checkPass.results,
@@ -4221,7 +4728,7 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 	ctx: ExtensionContext,
 	options: WorkflowOptions,
 ): Promise<WorkflowSummary> {
-	const originalRepoRoot = findRepoRoot(ctx.cwd);
+	let originalRepoRoot = findRepoRoot(ctx.cwd);
 	const exec = makeExec(pi);
 	let runWorkspace: ManagedWorkspace | undefined;
 	let initialSeededChangedFiles: string[] = [];
@@ -4229,10 +4736,12 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 	let workspaceRelativeCwd = "";
 	let workflowCwd = "";
 	let tempDir = "";
+	let preserveRunWorkspace = false;
 	const workflowModels = resolveWorkflowModels(ctx);
 	const primaryModel = workflowModels.primary;
 	const checkerModels = workflowModels.checkers;
 	const thinkingLevel = pi.getThinkingLevel();
+	const resumeState = options.resumeState ? structuredClone(options.resumeState) : undefined;
 
 	const reviewModels = checkerModels.length > 0 ? checkerModels : primaryModel ? [primaryModel] : [];
 	let activeNode: WorkflowNodeId | undefined;
@@ -4244,35 +4753,66 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 	currentWorkflowSubagentUsageSink = options.onUsage;
 
 	try {
-		const managedRunWorkspace = await createManagedWorkspace({
-			exec,
-			sourceCwd: ctx.cwd,
-			label: "run",
-		});
-		runWorkspace = managedRunWorkspace.workspace;
-		initialSeededChangedFiles = managedRunWorkspace.seededChangedFiles;
-		await runWorkspace.refresh();
-		workspaceRepoRoot = runWorkspace.repoRoot;
-		workspaceRelativeCwd = runWorkspace.sourceRelativeCwd;
-		workflowCwd = resolve(runWorkspace.cwd, workspaceRelativeCwd);
+		if (resumeState) {
+			const currentRepoRoot = findRepoRoot(ctx.cwd);
+			if (resolve(currentRepoRoot) !== resolve(resumeState.originalRepoRoot)) {
+				throw new Error(
+					`The saved resumable workspace belongs to ${resumeState.originalRepoRoot}, but the current checkout is ${currentRepoRoot}. Resume it from the original repository checkout instead.`,
+				);
+			}
+			originalRepoRoot = resumeState.originalRepoRoot;
+			runWorkspace = await reviveManagedWorkspace({ exec, state: resumeState.workspace });
+			initialSeededChangedFiles = [...runWorkspace.seededChangedFiles];
+			await runWorkspace.refresh();
+			workspaceRepoRoot = runWorkspace.repoRoot;
+			workspaceRelativeCwd = runWorkspace.sourceRelativeCwd;
+			workflowCwd = resolve(runWorkspace.cwd, workspaceRelativeCwd);
+			emitWorkflowUpdate(options.onUpdate, {
+				type: "workflow-start",
+				stage: "starting",
+				lines: [
+					`Resuming a stopped ${resumeState.workflowMode} sub-agent workflow in the preserved isolated workspace.`,
+					`Workspace: ${runWorkspace.kind} ${runWorkspace.workspaceName} @ ${runWorkspace.cwd}`,
+					`Carried-over workspace changes: ${initialSeededChangedFiles.length > 0 ? summarizePaths(initialSeededChangedFiles) : "none"}`,
+					`Primary model: ${primaryModel ?? "default"}`,
+					`Checker models: ${reviewModels.length > 0 ? reviewModels.join(", ") : primaryModel ?? "default"}`,
+				],
+				context: {
+					checkerModels: reviewModels,
+					note: "Resumed sub-agent implementation workflow starting",
+				},
+			});
+		} else {
+			const managedRunWorkspace = await createManagedWorkspace({
+				exec,
+				sourceCwd: ctx.cwd,
+				label: "run",
+			});
+			runWorkspace = managedRunWorkspace.workspace;
+			initialSeededChangedFiles = managedRunWorkspace.seededChangedFiles;
+			await runWorkspace.refresh();
+			workspaceRepoRoot = runWorkspace.repoRoot;
+			workspaceRelativeCwd = runWorkspace.sourceRelativeCwd;
+			workflowCwd = resolve(runWorkspace.cwd, workspaceRelativeCwd);
 
-		emitWorkflowUpdate(options.onUpdate, {
-			type: "workflow-start",
-			stage: "starting",
-			lines: [
-				options.rawPrompt?.trim()
-					? "Synthesizing a lightweight plan in an isolated workspace."
-					: `Using ${options.planPath} as the approved source of truth in an isolated workspace.`,
-				`Workspace: ${runWorkspace.kind} ${runWorkspace.workspaceName} @ ${runWorkspace.cwd}`,
-				`Seeded source checkout changes: ${initialSeededChangedFiles.length > 0 ? summarizePaths(initialSeededChangedFiles) : "none"}`,
-				`Primary model: ${primaryModel ?? "default"}`,
-				`Checker models: ${reviewModels.length > 0 ? reviewModels.join(", ") : primaryModel ?? "default"}`,
-			],
-			context: {
-				checkerModels: reviewModels,
-				note: "Sub-agent implementation workflow starting",
-			},
-		});
+			emitWorkflowUpdate(options.onUpdate, {
+				type: "workflow-start",
+				stage: "starting",
+				lines: [
+					options.rawPrompt?.trim()
+						? "Synthesizing a lightweight plan in an isolated workspace."
+						: `Using ${options.planPath} as the approved source of truth in an isolated workspace.`,
+					`Workspace: ${runWorkspace.kind} ${runWorkspace.workspaceName} @ ${runWorkspace.cwd}`,
+					`Seeded source checkout changes: ${initialSeededChangedFiles.length > 0 ? summarizePaths(initialSeededChangedFiles) : "none"}`,
+					`Primary model: ${primaryModel ?? "default"}`,
+					`Checker models: ${reviewModels.length > 0 ? reviewModels.join(", ") : primaryModel ?? "default"}`,
+				],
+				context: {
+					checkerModels: reviewModels,
+					note: "Sub-agent implementation workflow starting",
+				},
+			});
+		}
 
 		const originalCheckoutBaseline = await createWorkspaceSnapshot({
 			cwd: originalRepoRoot,
@@ -4280,7 +4820,7 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 			seededChangedFiles: initialSeededChangedFiles,
 		});
 		const originalCheckoutRevision = await captureWorkspaceRevision(originalRepoRoot, exec);
-		tempDir = await mkdtemp(join(runWorkspace.cleanupRoot, "context-"));
+		tempDir = await mkdtemp(join(runWorkspace.cleanupRoot, resumeState ? "resume-context-" : "context-"));
 		const [implementationPlannerPrompt, decomposerPrompt, workerPrompt, designWorkerPrompt, cleanupPrompt, designReviewPrompt, checkerPrompt, validatorPrompt] =
 			await Promise.all([
 				readBundledPrompt("implementation-planner"),
@@ -4293,18 +4833,24 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 				readBundledPrompt("validator"),
 			]);
 		const agentFiles = await existingFiles(discoverAncestorDocumentPaths(workflowCwd, workspaceRepoRoot, "AGENTS.md"));
-		const materializedPlan = await materializeWorkflowPlan({
-			cwd: workflowCwd,
-			tempDir,
-			agentFiles,
-			planPath: options.planPath,
-			rawPrompt: options.rawPrompt,
-			plannerPrompt: implementationPlannerPrompt,
-			extraInstructions: options.extraInstructions,
-			model: primaryModel,
-			thinkingLevel,
-		});
+		const materializedPlan = resumeState
+			? {
+				planPath: await materializeResumedWorkflowPlan(tempDir, resumeState.planDocument),
+				label: "preserved stopped-workflow plan",
+			}
+			: await materializeWorkflowPlan({
+					cwd: workflowCwd,
+					tempDir,
+					agentFiles,
+					planPath: options.planPath,
+					rawPrompt: options.rawPrompt,
+					plannerPrompt: implementationPlannerPrompt,
+					extraInstructions: options.extraInstructions,
+					model: primaryModel,
+					thinkingLevel,
+				});
 		const planPath = materializedPlan.planPath;
+		const planDocument = resumeState?.planDocument ?? (await readFile(planPath, "utf8"));
 		const resolveAgentsCheckExecutionPolicy = async (
 			commands: AgentsCheckCommand[],
 		): Promise<AgentsCheckExecutionPolicy> => {
@@ -4339,6 +4885,8 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 			runWorkspaceIntegrated = true;
 		};
 		handleRunWorkspaceIntegration = integrateRunWorkspace;
+		const workflowMode = resumeState?.workflowMode ?? options.workflowMode ?? "fast";
+		const effectiveExtraInstructions = resumeState?.extraInstructions ?? options.extraInstructions;
 		const planInfoPath = await writeTempContextFile(
 			tempDir,
 			"workflow-instructions.md",
@@ -4351,17 +4899,159 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 				`- workflow cwd relative to repo root: ${workspaceRelativeCwd}`,
 				`- seeded source checkout changes: ${initialSeededChangedFiles.length > 0 ? initialSeededChangedFiles.join(", ") : "none"}`,
 				`- approved plan source: ${materializedPlan.label}`,
-				`- workflow mode: ${(options.workflowMode ?? "fast").trim()}`,
-				...(options.extraInstructions.trim()
-					? ["", "## Additional instructions", "", options.extraInstructions.trim()]
+				`- workflow mode: ${workflowMode.trim()}`,
+				...(resumeState ? ["- resumed from preserved isolated workspace: yes"] : []),
+				...(effectiveExtraInstructions.trim()
+					? ["", "## Additional instructions", "", effectiveExtraInstructions.trim()]
 					: []),
 			].join("\n"),
 		);
-
-		const workflowMode = options.workflowMode ?? "fast";
 		const setActiveNode = (nodeId: WorkflowNodeId): void => {
 			activeNode = nodeId;
 		};
+		if (resumeState) {
+			const resumedWorkerResults = cloneWorkerResults(resumeState.workerResults);
+			const resumedDecomposition = cloneDecompositionPlan(resumeState.decomposition);
+			if (workflowMode === "fast") {
+				const result = await runResumedFastImplementationWorkflow({
+					cwd: workflowCwd,
+					tempDir,
+					planPath,
+					agentFiles,
+					workerPrompt,
+					designWorkerPrompt,
+					checkerPrompt,
+					validatorPrompt,
+					extraInstructions: effectiveExtraInstructions,
+					decomposition: resumedDecomposition,
+					workerResults: resumedWorkerResults,
+					exec,
+					primaryModel,
+					checkerModels: reviewModels,
+					thinkingLevel,
+					onUpdate: options.onUpdate,
+					onStageChange: setActiveNode,
+					resolveAgentsCheckExecutionPolicy,
+					promptForHardGateChoice: ctx.hasUI
+						? async (decision) => await promptForFinalCheckerHardGateChoice(ctx, decision)
+						: undefined,
+				});
+				if (result.decision === "done") {
+					await integrateRunWorkspace();
+					emitWorkflowUpdate(options.onUpdate, {
+						type: "workflow-completed",
+						stage: "complete",
+						lines: [
+							"Resumed fast sub-agent implementation workflow finished.",
+							`Changed files: ${summarizePaths(await detectChangedFiles(workflowCwd, exec))}`,
+						],
+						context: {
+							note: "Resumed fast workflow completed",
+						},
+					});
+				} else {
+					preserveRunWorkspace = true;
+					emitWorkflowUpdate(options.onUpdate, {
+						type: "workflow-completed",
+						stage: "complete",
+						lines: [
+							"Resumed fast sub-agent implementation workflow stopped with blockers still remaining.",
+							"The isolated workspace result was not applied to the original checkout.",
+						],
+						context: {
+							note: "Resumed fast workflow stopped gracefully without integrating the isolated workspace",
+						},
+					});
+				}
+				cleanupReportStage = "complete";
+				return {
+					decision: result.decision,
+					summary: result.summary,
+					resumableState:
+						result.decision === "stopped"
+							? buildResumableImplementationState({
+								runWorkspace,
+								originalRepoRoot,
+								workflowMode,
+								planDocument,
+								extraInstructions: effectiveExtraInstructions,
+								decomposition: resumedDecomposition,
+								workerResults: result.workerResults ?? resumedWorkerResults,
+							})
+							: undefined,
+				};
+			}
+
+			const verificationPass = await runResumedStrictImplementationWorkflow({
+				cwd: workflowCwd,
+				tempDir,
+				planPath,
+				agentFiles,
+				workerPrompt,
+				designWorkerPrompt,
+				cleanupPrompt,
+				designReviewPrompt,
+				checkerPrompt,
+				validatorPrompt,
+				decomposition: resumedDecomposition,
+				workerResults: resumedWorkerResults,
+				exec,
+				primaryModel,
+				checkerModels: reviewModels,
+				thinkingLevel,
+				onUpdate: options.onUpdate,
+				onStageChange: setActiveNode,
+				resolveAgentsCheckExecutionPolicy,
+				promptForHardGateChoice: ctx.hasUI
+					? async (decision) => await promptForFinalCheckerHardGateChoice(ctx, decision)
+					: undefined,
+				integrateRunWorkspace,
+			});
+			if (verificationPass.decision === "stopped") {
+				preserveRunWorkspace = true;
+				emitWorkflowUpdate(options.onUpdate, {
+					type: "workflow-completed",
+					stage: "complete",
+					lines: [
+						"Resumed strict sub-agent implementation workflow stopped with blockers still remaining.",
+						"The isolated workspace result was not applied to the original checkout.",
+					],
+					context: {
+						note: "Resumed strict workflow stopped gracefully without integrating the isolated workspace",
+					},
+				});
+			} else {
+				emitWorkflowUpdate(options.onUpdate, {
+					type: "workflow-completed",
+					stage: "complete",
+					lines: [
+						"Resumed strict sub-agent implementation workflow finished.",
+						`Changed files: ${summarizePaths(await detectChangedFiles(workflowCwd, exec))}`,
+					],
+					context: {
+						note: "Resumed strict workflow completed",
+					},
+				});
+			}
+			cleanupReportStage = "complete";
+			return {
+				decision: verificationPass.decision,
+				summary: verificationPass.summary,
+				resumableState:
+					verificationPass.decision === "stopped"
+						? buildResumableImplementationState({
+							runWorkspace,
+							originalRepoRoot,
+							workflowMode,
+							planDocument,
+							extraInstructions: effectiveExtraInstructions,
+							decomposition: resumedDecomposition,
+							workerResults: verificationPass.workerResults ?? resumedWorkerResults,
+						})
+						: undefined,
+			};
+		}
+
 		if (workflowMode === "fast") {
 			const result = await runFastImplementationWorkflow({
 				cwd: workflowCwd,
@@ -4372,7 +5062,7 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 				designWorkerPrompt,
 				checkerPrompt,
 				validatorPrompt,
-				extraInstructions: options.extraInstructions,
+				extraInstructions: effectiveExtraInstructions,
 				exec,
 				primaryModel,
 				checkerModels: reviewModels,
@@ -4397,21 +5087,35 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 						note: "Fast workflow completed",
 					},
 				});
-			} else {
-				emitWorkflowUpdate(options.onUpdate, {
-					type: "workflow-completed",
-					stage: "complete",
-					lines: [
-						"Fast sub-agent implementation workflow stopped with blockers still remaining.",
-						"The isolated workspace result was not applied to the original checkout.",
-					],
-					context: {
-						note: "Fast workflow stopped gracefully without integrating the isolated workspace",
-					},
-				});
+				cleanupReportStage = "complete";
+				return result;
 			}
+			preserveRunWorkspace = true;
+			emitWorkflowUpdate(options.onUpdate, {
+				type: "workflow-completed",
+				stage: "complete",
+				lines: [
+					"Fast sub-agent implementation workflow stopped with blockers still remaining.",
+					"The isolated workspace result was not applied to the original checkout.",
+				],
+				context: {
+					note: "Fast workflow stopped gracefully without integrating the isolated workspace",
+				},
+			});
 			cleanupReportStage = "complete";
-			return result;
+			return {
+				decision: result.decision,
+				summary: result.summary,
+				resumableState: buildResumableImplementationState({
+					runWorkspace,
+					originalRepoRoot,
+					workflowMode,
+					planDocument,
+					extraInstructions: effectiveExtraInstructions,
+					decomposition: result.decomposition ?? createFastModeDecomposition(planDocument),
+					workerResults: result.workerResults ?? [],
+				}),
+			};
 		}
 
 		activeNode = "decomposer";
@@ -4505,7 +5209,7 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 					phase,
 					batchIndex,
 					batchCount: batches.length,
-					extraInstructions: options.extraInstructions,
+					extraInstructions: effectiveExtraInstructions,
 					model: primaryModel,
 					thinkingLevel,
 					onUpdate: options.onUpdate,
@@ -4692,10 +5396,20 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 					note: "Workflow stopped gracefully without integrating the isolated workspace",
 				},
 			});
+			preserveRunWorkspace = true;
 			cleanupReportStage = "complete";
 			return {
 				decision: "stopped",
 				summary,
+				resumableState: buildResumableImplementationState({
+					runWorkspace,
+					originalRepoRoot,
+					workflowMode,
+					planDocument,
+					extraInstructions: effectiveExtraInstructions,
+					decomposition,
+					workerResults,
+				}),
 			};
 		}
 
@@ -4851,7 +5565,7 @@ export async function runGuidedDiscoveryImplementationWorkflow(
 		currentWorkflowSubagentUsageSink = previousWorkflowSubagentUsageSink;
 		await runBestEffortWorkflowCleanup({
 			tempDir,
-			runWorkspace,
+			runWorkspace: preserveRunWorkspace ? undefined : runWorkspace,
 			onUpdate: options.onUpdate,
 			stage: cleanupReportStage,
 		});

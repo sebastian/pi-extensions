@@ -642,6 +642,7 @@ test("buildStoppedSummary explains completed work, remaining blockers, and the n
 	assert.match(summary, /checker\/guidance: Required AGENTS.md check failed: pnpm lint/);
 	assert.match(summary, /The isolated workspace result was not applied to the original checkout/);
 	assert.match(summary, /## Next steps/);
+	assert.match(summary, /\/implement-subagents-resume/);
 });
 
 test("collectWorkerAgentFiles includes touched-path AGENTS guidance once", async () => {

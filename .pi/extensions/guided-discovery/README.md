@@ -16,6 +16,7 @@ A research-first planning workflow for pi that turns a loose feature prompt into
 - raw-prompt sub-agent runs synthesize a lightweight ephemeral plan instead of requiring a repo-root `PLAN.md`
 - bundled sub-agent roles for decomposition, general implementation, design-specialist implementation, cleanup auditing, design review, final code review, and plan validation
 - simplified sub-agent progress UI in interactive sessions: a persistent widget above the editor showing workflow stages, worker batches, active phases, targeted follow-through activity, final review reruns, and only the branches that are actually in use
+- clearer workspace-status surfacing in the widget and footer, including the isolated discovery workspace path and any resumable stopped sub-agent workspace
 - single-pass advisory validator output instead of an open-ended endgame remediation loop
 - touched-path `AGENTS.md` discovery so worker, remediation, cleanup, design review, checker, and validator passes see the right repo-local guidance for touched files
 - conservative execution of explicit `AGENTS.md` check commands as part of the checker / final quality path
@@ -38,6 +39,8 @@ A research-first planning workflow for pi that turns a loose feature prompt into
     - `/implement-subagents`
     - `/implement-subagents Add a standalone /sync command and keep the UI minimal.`
 - `/implement-subagents-strict [prompt]` — run the strict sub-agent workflow directly from the approved plan, or from a raw prompt
+- `/implement-subagents-resume [extra instructions]` — resume the latest stopped sub-agent workflow from its preserved isolated workspace
+- `/discover-implement-resume [extra instructions]` — same as above, but convenient from discovery mode
 - `Ctrl+Alt+D` — toggle discovery mode
 
 ## How discovery mode behaves
@@ -61,6 +64,7 @@ When the assistant produces a final plan, the extension:
 1. auto-saves it to the isolated workspace `PLAN.md`
 2. appends a `## Sources consulted` section when external sources were used
 3. shows an approval UI with options to:
+   - resume a previously stopped sub-agent run when one exists
    - implement directly
    - implement with sub-agents (fast)
    - implement with sub-agents (strict)
@@ -104,7 +108,8 @@ In interactive TUI sessions, it also renders a persistent progress widget above 
    - performance regression risk when materially relevant
    - relevant `AGENTS.md` guidance for touched areas
 7. **review remediation loop** — if the final code review returns findings, the workflow applies fixes automatically and reruns only the final code review. After 2 review passes, remaining non-critical findings are non-blocking. If hard blockers still remain at that bound, interactive sessions prompt you to either continue remediating anyway or stop gracefully with a summary of what was completed and what remains; non-interactive runs stop with that summary instead of hard-failing.
-8. **validator** — compares the actual result against the approved plan once and reports remaining discrepancies as advisory follow-up instead of triggering another endgame implementation loop.
+8. **resume path** — when a bounded run stops with hard blockers, the isolated implementation workspace is preserved so you can continue later with `/implement-subagents-resume` instead of restarting from scratch.
+9. **validator** — compares the actual result against the approved plan once and reports remaining discrepancies as advisory follow-up instead of triggering another endgame implementation loop.
 
 If the validator finds material discrepancies, the extension reports them clearly in the final summary and, by design, does not keep looping.
 
@@ -145,6 +150,7 @@ Free-form repository workflow instructions that require higher-level orchestrati
 - lets workers use `bash` inside the isolated workspace for focused inspection and verification
 - runs `AGENTS.md`-required checks early in fast mode and still enforces them during final review
 - keeps final checker remediation bounded and graceful when blockers still remain
+- preserves stopped isolated implementation workspaces so you can continue with `/implement-subagents-resume`
 - runs the validator once at the end as an advisory plan-coverage check
 - cleans up the discovery-workspace `PLAN.md` after a successful implementation run so planning artifacts do not linger in the source checkout
 
@@ -174,6 +180,12 @@ Or opt into the heavier strict workflow:
 
 ```text
 /discover-implement-strict Start with the smallest safe slice.
+```
+
+If a bounded sub-agent run stops, continue later from the preserved isolated workspace:
+
+```text
+/implement-subagents-resume Focus only on the remaining blockers.
 ```
 
 ## Install globally as a pi package
