@@ -6,7 +6,7 @@ A research-first planning workflow for pi that turns a loose feature prompt into
 
 - read-only discovery mode with `read`, `bash`, `grep`, `find`, `ls`, `questionnaire`, and `web_research`
 - discovery starts in its own isolated jj workspace (or git worktree fallback), and relative repo reads plus read-only bash commands are routed there automatically
-- structured multiple-choice clarifying questions with an `Other` fallback
+- structured multiple-choice clarifying questions with a recommended option shown first and an `Other` fallback
 - external docs / API / market / state-of-the-art research via `web_research`
 - concise final-plan detection and automatic save of the latest plan to the isolated workspace `PLAN.md`
 - approval UI with two implementation paths:
@@ -55,9 +55,11 @@ While guided discovery mode is active:
   - proactively research external products, APIs, ecosystems, and market patterns when they materially affect the decision
   - prefer first-party sources for vendor / API details
   - surface the real product / UX / technical trade-offs and recommend a default
+  - ask the user to choose materially different viable paths via `questionnaire`, with the recommended option first
   - ask only the highest-leverage questions
   - keep planning concise and implementation-oriented
-  - produce a final plan with problem, key findings, trade-offs, approach, build plan, acceptance checks, and risks
+  - produce a final plan that reflects only the agreed path, not the rejected alternatives
+  - produce a final plan with problem, key findings, the agreed trade-off rationale, approach, build plan, acceptance checks, and risks
 
 When the assistant produces a final plan, the extension:
 

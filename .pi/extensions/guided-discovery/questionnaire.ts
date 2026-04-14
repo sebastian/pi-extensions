@@ -1,43 +1,23 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Editor, type EditorTheme, Key, Text, matchesKey, truncateToWidth } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
-
-interface QuestionOption {
-	value: string;
-	label: string;
-	description?: string;
-}
-
-type RenderOption = QuestionOption & { isOther?: boolean };
-
-interface Question {
-	id: string;
-	label: string;
-	prompt: string;
-	options: QuestionOption[];
-	allowOther: boolean;
-}
-
-interface Answer {
-	id: string;
-	questionLabel: string;
-	questionPrompt: string;
-	value: string;
-	label: string;
-	wasCustom: boolean;
-	index?: number;
-}
-
-interface QuestionnaireResult {
-	questions: Question[];
-	answers: Answer[];
-	cancelled: boolean;
-}
+import {
+	buildRenderOptions,
+	normalizeQuestions,
+	renderQuestionnaireResultText,
+	type Answer,
+	type Question,
+	type QuestionInput,
+	type QuestionnaireResult,
+} from "./questionnaire-model.ts";
 
 const QuestionOptionSchema = Type.Object({
 	value: Type.String({ description: "The value returned when selected" }),
 	label: Type.String({ description: "Display label for the option" }),
 	description: Type.Optional(Type.String({ description: "Optional description shown below the option" })),
+	recommended: Type.Optional(
+		Type.Boolean({ description: "Whether this is the recommended option; recommended options are shown first" }),
+	),
 });
 
 const QuestionSchema = Type.Object({
@@ -72,11 +52,13 @@ export default function registerQuestionnaire(pi: ExtensionAPI): void {
 		label: "Questionnaire",
 		description:
 			"Ask the user one or more structured clarifying questions with multiple-choice answers and an optional custom response.",
-		promptSnippet: "Ask grouped clarifying questions as multiple choice during planning and discovery.",
+		promptSnippet:
+			"Ask grouped clarifying questions as multiple choice during planning and discovery, and mark the recommended option so it appears first.",
 		promptGuidelines: [
-			"Use questionnaire when you need the user to choose between alternatives or confirm important assumptions.",
+			"Use questionnaire when the user needs to choose between materially different alternatives or confirm important assumptions.",
+			"Resolve meaningful forks with questionnaire instead of carrying multiple options into the final plan.",
 			"Ask at most 4 questions per batch, each with 2-6 concrete options and brief descriptions when helpful.",
-			"Leave allowOther enabled unless you have a strong reason to force predefined answers.",
+			"When you have a clear default, mark that option as recommended so it is shown first. Leave allowOther enabled unless you have a strong reason to force predefined answers.",
 		],
 		parameters: QuestionnaireParams,
 
@@ -88,11 +70,7 @@ export default function registerQuestionnaire(pi: ExtensionAPI): void {
 				return errorResult("Error: No questions provided");
 			}
 
-			const questions: Question[] = params.questions.map((question, index) => ({
-				...question,
-				label: question.label || `Q${index + 1}`,
-				allowOther: question.allowOther !== false,
-			}));
+			const questions = normalizeQuestions(params.questions as QuestionInput[]);
 
 			const isMulti = questions.length > 1;
 			const totalTabs = questions.length + 1;
@@ -130,14 +108,8 @@ export default function registerQuestionnaire(pi: ExtensionAPI): void {
 					return questions[currentTab];
 				}
 
-				function currentOptions(): RenderOption[] {
-					const question = currentQuestion();
-					if (!question) return [];
-					const options: RenderOption[] = [...question.options];
-					if (question.allowOther) {
-						options.push({ value: "__other__", label: "Type something.", isOther: true });
-					}
-					return options;
+				function currentOptions() {
+					return buildRenderOptions(currentQuestion());
 				}
 
 				function allAnswered(): boolean {
@@ -294,8 +266,10 @@ export default function registerQuestionnaire(pi: ExtensionAPI): void {
 							const option = options[index];
 							const selected = index === optionIndex;
 							const prefix = selected ? theme.fg("accent", "> ") : "  ";
-							const line = `${index + 1}. ${option.label}${option.isOther && inputMode ? " ✎" : ""}`;
-							add(prefix + theme.fg(selected ? "accent" : "text", line));
+							const optionText = theme.fg(selected ? "accent" : "text", `${index + 1}. ${option.label}`);
+							const recommendedText = option.recommended && !option.isOther ? ` ${theme.fg("success", "(recommended)")}` : "";
+							const inputText = option.isOther && inputMode ? theme.fg(selected ? "accent" : "text", " ✎") : "";
+							add(prefix + optionText + recommendedText + inputText);
 							if (option.description) {
 								add(`     ${theme.fg("muted", option.description)}`);
 							}
@@ -373,15 +347,8 @@ export default function registerQuestionnaire(pi: ExtensionAPI): void {
 				};
 			}
 
-			const answerLines = result.answers.map((answer) => {
-				const prefix = `${answer.questionLabel}: `;
-				return answer.wasCustom
-					? `${prefix}user wrote: ${answer.label}`
-					: `${prefix}user selected: ${answer.index}. ${answer.label}`;
-			});
-
 			return {
-				content: [{ type: "text", text: answerLines.join("\n") }],
+				content: [{ type: "text", text: renderQuestionnaireResultText(result) }],
 				details: result,
 			};
 		},

@@ -16,6 +16,7 @@
     "implementation-progress-widget.ts",
     "index.ts",
     "models.ts",
+    "questionnaire-model.ts",
     "questionnaire.ts",
     "repo.ts",
     "structured-output.ts",
