@@ -33,7 +33,7 @@ import {
 	renderPlanDocument,
 } from "./utils.ts";
 import registerWebResearch from "./web-research.ts";
-import { findRepoLocation, formatJjRepoMetadata, readJjRepoMetadata, type JjRepoMetadata } from "./repo.ts";
+import { detectRepoKind, findRepoLocation, formatJjRepoMetadata, readJjRepoMetadata, type JjRepoMetadata } from "./repo.ts";
 import {
 	createManagedWorkspace,
 	reviveManagedWorkspace,
@@ -492,7 +492,8 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 	function syncUsageFooter(ctx: ExtensionContext): void {
 		if (!ctx.hasUI) return;
 		const guidedFooterLines = buildGuidedFooterLines();
-		if (!subagentWorkflowActive && !hasUsageTotals(subagentUsageTotals) && guidedFooterLines.length === 0) {
+		const shouldShowRepoChrome = detectRepoKind(ctx.sessionManager.getCwd()) === "jj";
+		if (!subagentWorkflowActive && !hasUsageTotals(subagentUsageTotals) && guidedFooterLines.length === 0 && !shouldShowRepoChrome) {
 			if (ownsFooter) {
 				ctx.ui.setFooter(undefined);
 				ownsFooter = false;

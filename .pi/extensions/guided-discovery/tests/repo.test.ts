@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExecLike } from "../changes.ts";
 import {
+	detectRepoKind,
 	findRepoLocation,
 	formatJjRepoMetadata,
 	parseJjRepoMetadata,
@@ -18,6 +19,14 @@ test("findRepoLocation prefers jj over colocated git metadata", async () => {
 	await mkdir(join(root, "src"), { recursive: true });
 
 	assert.deepEqual(findRepoLocation(join(root, "src")), { root, kind: "jj" });
+});
+
+test("detectRepoKind identifies jj repositories from nested paths", async () => {
+	const root = await mkdtemp(join(tmpdir(), "guided-discovery-repo-"));
+	await mkdir(join(root, ".jj"), { recursive: true });
+	await mkdir(join(root, "src", "nested"), { recursive: true });
+
+	assert.equal(detectRepoKind(join(root, "src", "nested")), "jj");
 });
 
 test("parseJjRepoMetadata falls back to a placeholder description", () => {

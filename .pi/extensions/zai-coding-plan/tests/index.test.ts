@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import zaiCodingPlan, {
 	hasUsageError,
 	registerZaiCodingPlan,
@@ -9,7 +12,13 @@ import zaiCodingPlan, {
 	ZAI_CODING_PLAN_PROVIDER_ID,
 } from "../index.ts";
 
-function createPiStub() {
+function createPiStub(options?: {
+	exec?: (command: string, args: string[], params?: { cwd?: string; timeout?: number }) => Promise<{
+		stdout: string;
+		stderr: string;
+		code: number;
+	}>;
+}) {
 	const providerRegistrations: Array<{ id: string; config: Record<string, unknown> }> = [];
 	const handlers = new Map<string, Function[]>();
 
@@ -23,6 +32,7 @@ function createPiStub() {
 				eventHandlers.push(handler);
 				handlers.set(event, eventHandlers);
 			},
+			exec: options?.exec,
 		},
 		providerRegistrations,
 		handlers,
@@ -268,4 +278,104 @@ test("custom footer merges z.ai status into the main stats line", async () => {
 	assert.equal(lines.length, 2);
 	assert.match(lines[1], /z\.ai 5h 78% · 7d 96%/);
 	assert.match(lines[1], /glm-5\.1 • high/);
+});
+
+test("custom footer suppresses detached git chrome in jj repositories", async () => {
+	const repoRoot = await mkdtemp(join(tmpdir(), "zai-coding-plan-jj-"));
+	await mkdir(join(repoRoot, ".jj"), { recursive: true });
+
+	const { pi, getHandlers } = createPiStub({
+		exec: async (command, args, options) => {
+			assert.equal(command, "jj");
+			assert.deepEqual(args, [
+				"log",
+				"-r",
+				"@",
+				"--no-graph",
+				"-T",
+				'change_id.short(8) ++ "\\n" ++ commit_id.short(8) ++ "\\n" ++ description.first_line()',
+			]);
+			assert.equal(options?.cwd, repoRoot);
+			return {
+				stdout: "pzzzuuol\n39cc93d2\nShow jj change metadata instead of detached git head\n",
+				stderr: "",
+				code: 0,
+			};
+		},
+	});
+	zaiCodingPlan(pi as never);
+
+	const sessionStartHandlers = getHandlers<(event: unknown, ctx: any) => Promise<void>>("session_start");
+	assert.equal(sessionStartHandlers.length, 1);
+
+	let footerFactory: any;
+	await sessionStartHandlers[0](
+		{},
+		{
+			hasUI: true,
+			model: { provider: ZAI_CODING_PLAN_PROVIDER_ID, id: "glm-5.1", baseUrl: ZAI_CODING_PLAN_BASE_URL, reasoning: true, contextWindow: 131072 },
+			ui: {
+				theme: { fg: (_color: string, text: string) => text, bold: (text: string) => text },
+				setStatus() {},
+				setWidget() {},
+				setFooter(factory: unknown) {
+					footerFactory = factory;
+				},
+			},
+			getContextUsage() {
+				return { tokens: 1000, contextWindow: 131072, percent: 12.3 };
+			},
+			sessionManager: {
+				getEntries() {
+					return [];
+				},
+				getBranch() {
+					return [];
+				},
+				getCwd() {
+					return repoRoot;
+				},
+				getSessionName() {
+					return undefined;
+				},
+			},
+			modelRegistry: {
+				isUsingOAuth() {
+					return false;
+				},
+				async getApiKeyAndHeaders() {
+					return { ok: false, error: "auth not configured" };
+				},
+			},
+		},
+	);
+
+	let renderCount = 0;
+	const component = footerFactory(
+		{ requestRender() {
+			renderCount += 1;
+		} },
+		{ fg: (_color: string, text: string) => text, bold: (text: string) => text },
+		{
+			getGitBranch() {
+				return "detached";
+			},
+			getExtensionStatuses() {
+				return new Map();
+			},
+			getAvailableProviderCount() {
+				return 1;
+			},
+			onBranchChange() {
+				return () => {};
+			},
+		},
+	);
+
+	assert.match(component.render(240)[0], /\(jj …\)/);
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	const rendered = component.render(240)[0];
+	assert.match(rendered, /\(jj pzzzuuol • Show jj change metadata instead of detached git head\)/);
+	assert.doesNotMatch(rendered, /\(detached\)/);
+	assert.ok(renderCount >= 1);
 });

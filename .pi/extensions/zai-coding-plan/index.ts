@@ -1,5 +1,7 @@
 import type { AssistantMessage } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionContext, ReadonlyFooterDataProvider } from "@mariozechner/pi-coding-agent";
+import { existsSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import {
 	buildZaiUsageIndicatorLines,
 	extractZaiAuthToken,
@@ -136,6 +138,64 @@ export function registerZaiCodingPlan(
 	});
 }
 
+interface RepoLocation {
+	root: string;
+	kind: "jj" | "git";
+}
+
+interface JjRepoMetadata {
+	changeId: string;
+	commitId: string;
+	description: string;
+}
+
+type ExecLike = (
+	command: string,
+	args: string[],
+	options?: { cwd?: string; timeout?: number },
+) => Promise<{ stdout: string; stderr: string; code: number }>;
+
+const JJ_REPO_METADATA_TEMPLATE = 'change_id.short(8) ++ "\\n" ++ commit_id.short(8) ++ "\\n" ++ description.first_line()';
+
+function findRepoLocation(start: string): RepoLocation | null {
+	let current = resolve(start);
+	while (true) {
+		if (existsSync(join(current, ".jj"))) return { root: current, kind: "jj" };
+		if (existsSync(join(current, ".git"))) return { root: current, kind: "git" };
+		const parent = dirname(current);
+		if (parent === current) return null;
+		current = parent;
+	}
+}
+
+function parseJjRepoMetadata(output: string): JjRepoMetadata | null {
+	const normalized = output.replace(/\r/g, "").trimEnd();
+	if (!normalized.trim()) return null;
+	const [rawChangeId = "", rawCommitId = "", ...rawDescription] = normalized.split("\n");
+	const changeId = rawChangeId.trim();
+	const commitId = rawCommitId.trim();
+	if (!changeId || !commitId) return null;
+	const description = rawDescription.join("\n").trim() || "(no description)";
+	return { changeId, commitId, description };
+}
+
+function formatJjRepoMetadata(metadata: JjRepoMetadata): string {
+	return `jj ${metadata.changeId} • ${metadata.description || "(no description)"}`;
+}
+
+async function readJjRepoMetadata(start: string, exec: ExecLike): Promise<JjRepoMetadata | null> {
+	const repo = findRepoLocation(start);
+	if (!repo || repo.kind !== "jj") return null;
+	const result = await exec("jj", ["log", "-r", "@", "--no-graph", "-T", JJ_REPO_METADATA_TEMPLATE], {
+		cwd: repo.root,
+		timeout: 30_000,
+	});
+	if (result.code !== 0) {
+		throw new Error(result.stderr || result.stdout || `Failed to read jj change metadata at ${repo.root}`);
+	}
+	return parseJjRepoMetadata(result.stdout);
+}
+
 function stripAnsi(text: string): string {
 	return text.replace(/\x1b\[[0-9;]*m/g, "");
 }
@@ -182,6 +242,7 @@ function buildInlineFooter(
 	footerData: ReadonlyFooterDataProvider,
 	theme: ExtensionContext["ui"]["theme"],
 	width: number,
+	repoChromeLabel: string | null,
 ): string[] {
 	let totalInput = 0;
 	let totalOutput = 0;
@@ -207,8 +268,7 @@ function buildInlineFooter(
 	let pwd = ctx.sessionManager.getCwd();
 	const home = process.env.HOME || process.env.USERPROFILE;
 	if (home && pwd.startsWith(home)) pwd = `~${pwd.slice(home.length)}`;
-	const branch = footerData.getGitBranch();
-	if (branch) pwd = `${pwd} (${branch})`;
+	if (repoChromeLabel) pwd = `${pwd} (${repoChromeLabel})`;
 	const sessionName = ctx.sessionManager.getSessionName();
 	if (sessionName) pwd = `${pwd} • ${sessionName}`;
 
@@ -269,25 +329,7 @@ function buildInlineFooter(
 	return lines;
 }
 
-function syncInlineFooter(ctx: ExtensionContext): void {
-	if (!ctx.hasUI) return;
-	if (ctx.model && isZaiUsageModel(ctx.model)) {
-		ctx.ui.setFooter((tui, theme, footerData) => {
-			const unsubscribe = footerData.onBranchChange(() => tui.requestRender());
-			return {
-				dispose: unsubscribe,
-				invalidate() {},
-				render(width: number): string[] {
-					return buildInlineFooter(ctx, footerData, theme, width);
-				},
-			};
-		});
-		return;
-	}
-	ctx.ui.setFooter(undefined);
-}
-
-function createUsageTracker() {
+function createUsageTracker(syncInlineFooter: (ctx: ExtensionContext) => void) {
 	const state: UsageTrackerState = {
 		activeKey: null,
 		snapshot: null,
@@ -523,6 +565,106 @@ function errorMessage(error: unknown): string {
 export default function zaiCodingPlan(pi: ExtensionAPI): void {
 	registerZaiCodingPlan(pi);
 
+	let jjFooterMetadataState:
+		| {
+				repoRoot: string;
+				metadata: JjRepoMetadata | null;
+				loading: boolean;
+				error: string | null;
+				request: Promise<void> | null;
+		  }
+		| null = null;
+
+	function makeExec(): ExecLike {
+		return async (command, args, options) => {
+			if (typeof pi.exec !== "function") throw new Error("pi.exec unavailable");
+			const result = await pi.exec(command, args, options);
+			return {
+				stdout: result.stdout,
+				stderr: result.stderr,
+				code: result.code,
+			};
+		};
+	}
+
+	function invalidateJjFooterMetadata(cwd?: string): void {
+		const repoLocation = cwd ? findRepoLocation(cwd) : null;
+		if (!repoLocation || repoLocation.kind !== "jj") {
+			jjFooterMetadataState = null;
+			return;
+		}
+		jjFooterMetadataState = {
+			repoRoot: repoLocation.root,
+			metadata: null,
+			loading: false,
+			error: null,
+			request: null,
+		};
+	}
+
+	function getRepoChromeLabel(cwd: string, gitBranch: string | null, requestRender: () => void): string | null {
+		const repoLocation = findRepoLocation(cwd);
+		if (!repoLocation) {
+			jjFooterMetadataState = null;
+			return gitBranch;
+		}
+		if (repoLocation.kind !== "jj") {
+			jjFooterMetadataState = null;
+			return gitBranch;
+		}
+		if (!jjFooterMetadataState || jjFooterMetadataState.repoRoot !== repoLocation.root) {
+			invalidateJjFooterMetadata(repoLocation.root);
+		}
+		const state = jjFooterMetadataState;
+		if (state && !state.loading && !state.metadata && !state.error) {
+			state.loading = true;
+			state.request = readJjRepoMetadata(repoLocation.root, makeExec())
+				.then((metadata) => {
+					if (!jjFooterMetadataState || jjFooterMetadataState.repoRoot !== repoLocation.root) return;
+					jjFooterMetadataState.metadata = metadata;
+					jjFooterMetadataState.error = metadata ? null : "unavailable";
+				})
+				.catch((error) => {
+					if (!jjFooterMetadataState || jjFooterMetadataState.repoRoot !== repoLocation.root) return;
+					jjFooterMetadataState.error = error instanceof Error ? error.message : String(error);
+				})
+				.finally(() => {
+					if (jjFooterMetadataState?.repoRoot === repoLocation.root) {
+						jjFooterMetadataState.loading = false;
+						jjFooterMetadataState.request = null;
+					}
+					requestRender();
+				});
+		}
+		if (state?.metadata) return formatJjRepoMetadata(state.metadata);
+		if (state?.loading) return "jj …";
+		return "jj";
+	}
+
+	function syncInlineFooter(ctx: ExtensionContext): void {
+		if (!ctx.hasUI) return;
+		if (ctx.model && isZaiUsageModel(ctx.model)) {
+			ctx.ui.setFooter((tui, theme, footerData) => {
+				const unsubscribe = footerData.onBranchChange(() => {
+					invalidateJjFooterMetadata(ctx.sessionManager.getCwd());
+					tui.requestRender();
+				});
+				return {
+					dispose: unsubscribe,
+					invalidate() {},
+					render(width: number): string[] {
+						const repoChromeLabel = getRepoChromeLabel(ctx.sessionManager.getCwd(), footerData.getGitBranch(), () =>
+							tui.requestRender(),
+						);
+						return buildInlineFooter(ctx, footerData, theme, width, repoChromeLabel);
+					},
+				};
+			});
+			return;
+		}
+		ctx.ui.setFooter(undefined);
+	}
+
 	pi.on("before_agent_start", async (event, ctx) => {
 		if (ctx.model?.provider !== ZAI_CODING_PLAN_PROVIDER_ID || ctx.model.id !== "glm-5.1") {
 			return undefined;
@@ -535,7 +677,7 @@ export default function zaiCodingPlan(pi: ExtensionAPI): void {
 		};
 	});
 
-	const usageTracker = createUsageTracker();
+	const usageTracker = createUsageTracker(syncInlineFooter);
 
 	pi.on("session_start", async (_event, ctx) => {
 		usageTracker.start(ctx);
