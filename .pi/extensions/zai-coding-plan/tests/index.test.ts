@@ -52,9 +52,10 @@ test("registerZaiCodingPlan registers the coding-plan provider with cloned model
 	assert.notEqual((config.models as typeof ZAI_CODING_PLAN_MODELS)[0].compat, ZAI_CODING_PLAN_MODELS[0].compat);
 });
 
-test("newer coding-plan models enable Z.AI tool-call streaming compat", () => {
+test("glm-5.1 uses a conservative effective context window and Z.AI tool-call streaming compat", () => {
 	const model = ZAI_CODING_PLAN_MODELS.find((entry) => entry.id === "glm-5.1");
 	assert.ok(model);
+	assert.equal(model.contextWindow, 116_384);
 	assert.deepEqual(model.compat, {
 		supportsDeveloperRole: false,
 		thinkingFormat: "zai",
