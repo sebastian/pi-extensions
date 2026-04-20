@@ -80,6 +80,7 @@ pi --provider zai-coding-plan --model glm-5.1
 ## Notes
 
 - On newer pi versions, core may already ship built-in `zai/*` models aimed at the same coding endpoint. This package is still useful as an explicit, backportable `zai-coding-plan/*` namespace.
+- `zai-coding-plan/glm-5.1` gets an extra per-turn system-prompt append that nudges the model to be more concise, direct, and less sycophantic.
 - Z.AI's coding-plan docs recommend the OpenAI-compatible coding endpoint for non-Claude coding tools; this package intentionally follows that route instead of the Anthropic-compatible Claude Code path.
 
 ## Sources

@@ -8,29 +8,48 @@ import zaiCodingPlan, {
 	ZAI_CODING_PLAN_PROVIDER_ID,
 } from "../index.ts";
 
-test("registerZaiCodingPlan registers an explicit coding-plan provider", () => {
-	let captured:
-		| {
-				name: string;
-				config: Record<string, unknown>;
-		  }
-		| undefined;
+type BeforeAgentStartHandler = (
+	event: { systemPrompt: string },
+	ctx: { model?: { provider?: string; id?: string } },
+) => Promise<{ systemPrompt: string } | undefined> | { systemPrompt: string } | undefined;
+
+function createPiStub() {
+	const providerRegistrations: Array<{ id: string; config: Record<string, unknown> }> = [];
+	const beforeAgentStartHandlers: BeforeAgentStartHandler[] = [];
+
+	return {
+		pi: {
+			registerProvider(id: string, config: Record<string, unknown>) {
+				providerRegistrations.push({ id, config });
+			},
+			on(event: string, handler: BeforeAgentStartHandler) {
+				if (event === "before_agent_start") beforeAgentStartHandlers.push(handler);
+			},
+		},
+		providerRegistrations,
+		beforeAgentStartHandlers,
+	};
+}
+
+test("registerZaiCodingPlan registers the coding-plan provider with cloned models", () => {
+	const providerRegistrations: Array<{ id: string; config: Record<string, unknown> }> = [];
 
 	registerZaiCodingPlan({
-		registerProvider(name, config) {
-			captured = { name, config: config as Record<string, unknown> };
+		registerProvider(id, config) {
+			providerRegistrations.push({ id, config: config as Record<string, unknown> });
 		},
 	} as never);
 
-	assert.ok(captured);
-	assert.equal(captured.name, ZAI_CODING_PLAN_PROVIDER_ID);
-	assert.equal(captured.config.baseUrl, ZAI_CODING_PLAN_BASE_URL);
-	assert.equal(captured.config.apiKey, ZAI_CODING_PLAN_API_KEY_ENV);
-	assert.equal(captured.config.api, "openai-completions");
-	assert.deepEqual(
-		(captured.config.models as Array<{ id: string }>).map((model) => model.id),
-		ZAI_CODING_PLAN_MODELS.map((model) => model.id),
-	);
+	assert.equal(providerRegistrations.length, 1);
+
+	const [{ id, config }] = providerRegistrations;
+	assert.equal(id, ZAI_CODING_PLAN_PROVIDER_ID);
+	assert.equal(config.baseUrl, ZAI_CODING_PLAN_BASE_URL);
+	assert.equal(config.apiKey, ZAI_CODING_PLAN_API_KEY_ENV);
+	assert.equal(config.api, "openai-completions");
+	assert.deepEqual(config.models, ZAI_CODING_PLAN_MODELS);
+	assert.notEqual(config.models, ZAI_CODING_PLAN_MODELS);
+	assert.notEqual((config.models as typeof ZAI_CODING_PLAN_MODELS)[0].compat, ZAI_CODING_PLAN_MODELS[0].compat);
 });
 
 test("newer coding-plan models enable Z.AI tool-call streaming compat", () => {
@@ -52,14 +71,38 @@ test("glm-4.5-air keeps the older non-tool-streaming compat shape", () => {
 	});
 });
 
-test("default export delegates to registerZaiCodingPlan", () => {
-	let providerName: string | undefined;
+test("GLM-5.1 gets extra instructions to stay concise and less eager to please", async () => {
+	const { pi, beforeAgentStartHandlers } = createPiStub();
+	zaiCodingPlan(pi as never);
 
-	zaiCodingPlan({
-		registerProvider(name) {
-			providerName = name;
-		},
-	} as never);
+	assert.equal(beforeAgentStartHandlers.length, 1);
 
-	assert.equal(providerName, ZAI_CODING_PLAN_PROVIDER_ID);
+	const result = await beforeAgentStartHandlers[0](
+		{ systemPrompt: "Base instructions" },
+		{ model: { provider: ZAI_CODING_PLAN_PROVIDER_ID, id: "glm-5.1" } },
+	);
+
+	assert.ok(result);
+	assert.ok(result.systemPrompt.startsWith("Base instructions\n\n- Be concise, direct, and matter-of-fact."));
+	assert.match(result.systemPrompt, /Be concise, direct, and matter-of-fact\./);
+	assert.match(result.systemPrompt, /Do not be flattering, sycophantic, or overly eager to please\./);
+	assert.match(result.systemPrompt, /Avoid unnecessary praise, reassurance, or agreement\./);
+});
+
+test("non-GLM-5.1 turns are left unchanged", async () => {
+	const { pi, beforeAgentStartHandlers } = createPiStub();
+	zaiCodingPlan(pi as never);
+
+	assert.equal(beforeAgentStartHandlers.length, 1);
+
+	const handler = beforeAgentStartHandlers[0];
+	assert.equal(
+		await handler({ systemPrompt: "Base instructions" }, { model: { provider: ZAI_CODING_PLAN_PROVIDER_ID, id: "glm-5-turbo" } }),
+		undefined,
+	);
+	assert.equal(
+		await handler({ systemPrompt: "Base instructions" }, { model: { provider: "other-provider", id: "glm-5.1" } }),
+		undefined,
+	);
+	assert.equal(await handler({ systemPrompt: "Base instructions" }, {}), undefined);
 });

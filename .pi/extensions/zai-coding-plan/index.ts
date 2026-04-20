@@ -21,6 +21,14 @@ const ZAI_TOOL_STREAM_COMPAT = {
 	zaiToolStream: true,
 } as const;
 
+const GLM_51_REIN_IN_PROMPT = [
+	"- Be concise, direct, and matter-of-fact.",
+	"- Do not be flattering, sycophantic, or overly eager to please.",
+	"- Avoid unnecessary praise, reassurance, or agreement.",
+	"- Keep preambles short and skip filler.",
+	"- State uncertainty briefly when needed, then continue with the best grounded answer.",
+].join("\n");
+
 export const ZAI_CODING_PLAN_MODELS = [
 	{
 		id: "glm-5.1",
@@ -96,4 +104,16 @@ export function registerZaiCodingPlan(
 
 export default function zaiCodingPlan(pi: ExtensionAPI): void {
 	registerZaiCodingPlan(pi);
+
+	pi.on("before_agent_start", async (event, ctx) => {
+		if (ctx.model?.provider !== ZAI_CODING_PLAN_PROVIDER_ID || ctx.model.id !== "glm-5.1") {
+			return undefined;
+		}
+
+		return {
+			systemPrompt: event.systemPrompt
+				? `${event.systemPrompt}\n\n${GLM_51_REIN_IN_PROMPT}`
+				: GLM_51_REIN_IN_PROMPT,
+		};
+	});
 }
