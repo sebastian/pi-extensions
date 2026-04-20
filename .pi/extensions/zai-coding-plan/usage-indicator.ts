@@ -120,7 +120,7 @@ export function extractZaiAuthToken(resolvedAuth: {
 export function parseZaiQuotaSnapshot(payload: unknown, fetchedAt = Date.now()): ZaiQuotaSnapshot {
 	const root = unwrapPayload(payload);
 	const limits = findLimitCollection(root)
-		.map(parseQuotaWindow)
+		.map((item) => parseQuotaWindow(item, fetchedAt))
 		.filter((item): item is ZaiQuotaWindow => item !== null);
 
 	let fiveHour = limits.find((item) => item.kind === "5h") ?? null;
@@ -211,9 +211,10 @@ function trimFraction(value: string): string {
 	return value.replace(/\.0$/, "");
 }
 
-function parseQuotaWindow(item: Record<string, unknown>): ZaiQuotaWindow | null {
+function parseQuotaWindow(item: Record<string, unknown>, fetchedAt: number): ZaiQuotaWindow | null {
 	const signature = buildSignature(item);
-	const kind = classifyQuotaWindow(item, signature);
+	const resetAt = findTimeField(item, RESET_AT_KEYS);
+	const kind = classifyQuotaWindow(item, signature, { fetchedAt, resetAt });
 	if (kind === "ignore") return null;
 
 	let usedPercent = findNumericField(item, USED_PERCENT_KEYS);
@@ -237,15 +238,33 @@ function parseQuotaWindow(item: Record<string, unknown>): ZaiQuotaWindow | null 
 		remainingPercent,
 		usedValue,
 		limitValue,
-		resetAt: findTimeField(item, RESET_AT_KEYS),
+		resetAt,
 		signature,
 		raw: item,
 	};
 }
 
-function classifyQuotaWindow(item: Record<string, unknown>, signature: string): InternalQuotaKind {
+function classifyQuotaWindow(
+	item: Record<string, unknown>,
+	signature: string,
+	options: { fetchedAt: number; resetAt: number | null },
+): InternalQuotaKind {
 	const type = stringValue(item.type);
-	const raw = `${type ? normalizeSignature(type) + " " : ""}${signature}`.trim();
+	const normalizedType = type ? normalizeSignature(type) : "";
+	const raw = `${normalizedType ? normalizedType + " " : ""}${signature}`.trim();
+	const unit = parseNumberish(item.unit);
+	const number = parseNumberish(item.number);
+	const horizonMs = options.resetAt != null ? options.resetAt - options.fetchedAt : null;
+
+	if (normalizedType === "tokenslimit") {
+		if (unit === 3 && number === 5) return "5h";
+		if (unit === 6 && number === 1) return "7d";
+		if (horizonMs != null && horizonMs > 0) {
+			if (horizonMs <= 12 * 60 * 60 * 1000) return "5h";
+			if (horizonMs >= 5 * 24 * 60 * 60 * 1000 && horizonMs <= 10 * 24 * 60 * 60 * 1000) return "7d";
+		}
+	}
+
 	if (matchesAny(raw, ["week", "weekly", "7day", "7d"])) return "7d";
 	if (matchesAny(raw, ["tokenslimit", "token", "5hour", "5h", "hour"])) return "5h";
 	if (matchesAny(raw, ["month", "monthly", "mcp", "websearch", "webreader", "vision", "timelimit"])) {

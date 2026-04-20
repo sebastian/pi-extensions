@@ -54,6 +54,31 @@ test("parseZaiQuotaSnapshot derives percentages from current and total values wh
 	assert.equal(snapshot.sevenDay?.remainingPercent, 65);
 });
 
+test("parseZaiQuotaSnapshot recognizes live token windows by unit and reset horizon", () => {
+	const fetchedAt = Date.parse("2026-04-20T08:00:00.000Z");
+	const snapshot = parseZaiQuotaSnapshot(
+		{
+			code: 200,
+			msg: "Operation successful",
+			success: true,
+			data: {
+				limits: [
+					{ type: "TIME_LIMIT", unit: 5, number: 1, usage: 100, currentValue: 0, remaining: 100, percentage: 0, nextResetTime: 1779263229994 },
+					{ type: "TOKENS_LIMIT", unit: 3, number: 5, percentage: 20, nextResetTime: 1776690334718 },
+					{ type: "TOKENS_LIMIT", unit: 6, number: 1, percentage: 4, nextResetTime: 1777276029997 },
+				],
+			},
+		},
+		fetchedAt,
+	);
+
+	assert.equal(snapshot.fiveHour?.kind, "5h");
+	assert.equal(snapshot.fiveHour?.remainingPercent, 80);
+	assert.equal(snapshot.sevenDay?.kind, "7d");
+	assert.equal(snapshot.sevenDay?.remainingPercent, 96);
+	assert.equal(snapshot.limits.length, 2);
+});
+
 test("buildZaiUsageIndicatorLines renders a compact live status line", () => {
 	const snapshot = parseZaiQuotaSnapshot(
 		{

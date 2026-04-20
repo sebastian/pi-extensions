@@ -334,12 +334,16 @@ async function parseJsonResponse(response: Response): Promise<unknown> {
 	}
 }
 
-function hasUsageError(payload: unknown): boolean {
+export function hasUsageError(payload: unknown): boolean {
 	if (!payload || typeof payload !== "object") return false;
 	const candidate = payload as { success?: unknown; code?: unknown };
+	if (candidate.success === true) return false;
 	if (candidate.success === false) return true;
-	if (typeof candidate.code === "number") return candidate.code !== 0;
-	if (typeof candidate.code === "string") return candidate.code !== "0";
+	if (typeof candidate.code === "number") return candidate.code !== 0 && candidate.code !== 200;
+	if (typeof candidate.code === "string") {
+		const normalized = candidate.code.trim();
+		return normalized !== "0" && normalized !== "200";
+	}
 	return false;
 }
 

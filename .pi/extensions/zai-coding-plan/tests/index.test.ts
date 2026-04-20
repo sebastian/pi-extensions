@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import zaiCodingPlan, {
+	hasUsageError,
 	registerZaiCodingPlan,
 	ZAI_CODING_PLAN_API_KEY_ENV,
 	ZAI_CODING_PLAN_BASE_URL,
@@ -106,4 +107,24 @@ test("non-GLM-5.1 turns are left unchanged", async () => {
 		undefined,
 	);
 	assert.equal(await handler({ systemPrompt: "Base instructions" }, {}), undefined);
+});
+
+test("hasUsageError accepts successful live quota payloads that use code 200", () => {
+	assert.equal(
+		hasUsageError({
+			code: 200,
+			msg: "Operation successful",
+			success: true,
+			data: { limits: [{ type: "TOKENS_LIMIT", unit: 3, number: 5, percentage: 20 }] },
+		}),
+		false,
+	);
+	assert.equal(
+		hasUsageError({
+			code: 1001,
+			msg: "Authentication parameter not received in Header, unable to authenticate",
+			success: false,
+		}),
+		true,
+	);
 });
