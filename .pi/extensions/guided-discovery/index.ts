@@ -33,6 +33,7 @@ import {
 	renderPlanDocument,
 } from "./utils.ts";
 import registerWebResearch from "./web-research.ts";
+import { findRepoLocation, formatJjRepoMetadata, readJjRepoMetadata, type JjRepoMetadata } from "./repo.ts";
 import {
 	createManagedWorkspace,
 	reviveManagedWorkspace,
@@ -186,6 +187,15 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 	let discoveryWorkspaceState: SerializedManagedWorkspace | null = null;
 	let discoveryWorkspacePromise: Promise<ManagedWorkspace> | null = null;
 	let resumableImplementationState: ResumableImplementationState | null = null;
+	let jjFooterMetadataState:
+		| {
+				repoRoot: string;
+				metadata: JjRepoMetadata | null;
+				loading: boolean;
+				error: string | null;
+				request: Promise<void> | null;
+		  }
+		| null = null;
 
 	function persistState(): void {
 		pi.appendEntry(STATE_TYPE, {
@@ -213,6 +223,60 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 
 	function getWorkspaceWorkflowCwd(workspace: Pick<ManagedWorkspace, "repoRoot" | "sourceRelativeCwd">): string {
 		return resolve(workspace.repoRoot, workspace.sourceRelativeCwd);
+	}
+
+	function invalidateJjFooterMetadata(cwd?: string): void {
+		const repoLocation = cwd ? findRepoLocation(cwd) : null;
+		if (!repoLocation || repoLocation.kind !== "jj") {
+			jjFooterMetadataState = null;
+			return;
+		}
+		jjFooterMetadataState = {
+			repoRoot: repoLocation.root,
+			metadata: null,
+			loading: false,
+			error: null,
+			request: null,
+		};
+	}
+
+	function getRepoChromeLabel(cwd: string, gitBranch: string | null, requestRender: () => void): string | null {
+		const repoLocation = findRepoLocation(cwd);
+		if (!repoLocation) {
+			jjFooterMetadataState = null;
+			return gitBranch;
+		}
+		if (repoLocation.kind !== "jj") {
+			jjFooterMetadataState = null;
+			return gitBranch;
+		}
+		if (!jjFooterMetadataState || jjFooterMetadataState.repoRoot !== repoLocation.root) {
+			invalidateJjFooterMetadata(repoLocation.root);
+		}
+		const state = jjFooterMetadataState;
+		if (state && !state.loading && !state.metadata && !state.error) {
+			state.loading = true;
+			state.request = readJjRepoMetadata(repoLocation.root, makeExec())
+				.then((metadata) => {
+					if (!jjFooterMetadataState || jjFooterMetadataState.repoRoot !== repoLocation.root) return;
+					jjFooterMetadataState.metadata = metadata;
+					jjFooterMetadataState.error = metadata ? null : "unavailable";
+				})
+				.catch((error) => {
+					if (!jjFooterMetadataState || jjFooterMetadataState.repoRoot !== repoLocation.root) return;
+					jjFooterMetadataState.error = error instanceof Error ? error.message : String(error);
+				})
+				.finally(() => {
+					if (jjFooterMetadataState?.repoRoot === repoLocation.root) {
+						jjFooterMetadataState.loading = false;
+						jjFooterMetadataState.request = null;
+					}
+					requestRender();
+				});
+		}
+		if (state?.metadata) return formatJjRepoMetadata(state.metadata);
+		if (state?.loading) return "jj …";
+		return "jj";
 	}
 
 	function getDiscoveryWorkflowCwd(workspace: ManagedWorkspace): string {
@@ -438,6 +502,7 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 
 		ctx.ui.setFooter(function (tui, theme, footerData) {
 			const dispose = footerData.onBranchChange(function () {
+				invalidateJjFooterMetadata(ctx.sessionManager.getCwd());
 				tui.requestRender();
 			});
 
@@ -451,11 +516,12 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 					const contextPercentValue = contextUsage?.percent ?? 0;
 					const contextPercent = contextUsage?.percent !== null && contextUsage?.percent !== undefined ? contextPercentValue.toFixed(1) : "?";
 
-					let pwd = ctx.sessionManager.getCwd();
+					const sessionCwd = ctx.sessionManager.getCwd();
+					let pwd = sessionCwd;
 					const home = process.env.HOME || process.env.USERPROFILE;
 					if (home && pwd.startsWith(home)) pwd = "~" + pwd.slice(home.length);
-					const branch = footerData.getGitBranch();
-					if (branch) pwd += " (" + branch + ")";
+					const repoChromeLabel = getRepoChromeLabel(sessionCwd, footerData.getGitBranch(), () => tui.requestRender());
+					if (repoChromeLabel) pwd += " (" + repoChromeLabel + ")";
 					const sessionName = ctx.sessionManager.getSessionName();
 					if (sessionName) pwd += " • " + sessionName;
 
