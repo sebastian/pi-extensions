@@ -565,6 +565,7 @@ function errorMessage(error: unknown): string {
 export default function zaiCodingPlan(pi: ExtensionAPI): void {
 	registerZaiCodingPlan(pi);
 
+	let ownsFooter = false;
 	let jjFooterMetadataState:
 		| {
 				repoRoot: string;
@@ -660,9 +661,13 @@ export default function zaiCodingPlan(pi: ExtensionAPI): void {
 					},
 				};
 			});
+			ownsFooter = true;
 			return;
 		}
-		ctx.ui.setFooter(undefined);
+		if (ownsFooter) {
+			ctx.ui.setFooter(undefined);
+			ownsFooter = false;
+		}
 	}
 
 	pi.on("before_agent_start", async (event, ctx) => {

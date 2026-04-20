@@ -207,6 +207,58 @@ test("usage tracker uses footer integration and no widget row", async () => {
 	assert.equal(typeof footers[0], "function");
 });
 
+test("non-z.ai session start does not clear another extension footer", async () => {
+	const { pi, getHandlers } = createPiStub();
+	zaiCodingPlan(pi as never);
+
+	const sessionStartHandlers = getHandlers<(event: unknown, ctx: any) => Promise<void>>("session_start");
+	assert.equal(sessionStartHandlers.length, 1);
+
+	const footers: unknown[] = [];
+	await sessionStartHandlers[0](
+		{},
+		{
+			hasUI: true,
+			model: { provider: "other-provider", id: "other-model", reasoning: true, contextWindow: 131072 },
+			ui: {
+				theme: { fg: (_color: string, text: string) => text, bold: (text: string) => text },
+				setStatus() {},
+				setWidget() {},
+				setFooter(factory: unknown) {
+					footers.push(factory);
+				},
+			},
+			getContextUsage() {
+				return { tokens: 1000, contextWindow: 131072, percent: 0.8 };
+			},
+			sessionManager: {
+				getEntries() {
+					return [];
+				},
+				getBranch() {
+					return [];
+				},
+				getCwd() {
+					return "/tmp/project";
+				},
+				getSessionName() {
+					return undefined;
+				},
+			},
+			modelRegistry: {
+				isUsingOAuth() {
+					return false;
+				},
+				async getApiKeyAndHeaders() {
+					return { ok: false, error: "auth not configured" };
+				},
+			},
+		},
+	);
+
+	assert.deepEqual(footers, []);
+});
+
 test("custom footer merges z.ai status into the main stats line", async () => {
 	const { pi, getHandlers } = createPiStub();
 	zaiCodingPlan(pi as never);
