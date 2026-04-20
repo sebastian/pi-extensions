@@ -137,7 +137,7 @@ test("hasUsageError accepts successful live quota payloads that use code 200", (
 	);
 });
 
-test("usage tracker renders inline status instead of a separate widget row", async () => {
+test("usage tracker uses footer integration and no widget row", async () => {
 	const { pi, getHandlers } = createPiStub();
 	zaiCodingPlan(pi as never);
 
@@ -146,11 +146,12 @@ test("usage tracker renders inline status instead of a separate widget row", asy
 
 	const statuses: Array<{ key: string; text: string | undefined }> = [];
 	const widgets: Array<{ key: string; content: unknown }> = [];
+	const footers: unknown[] = [];
 	await sessionStartHandlers[0](
 		{},
 		{
 			hasUI: true,
-			model: { provider: ZAI_CODING_PLAN_PROVIDER_ID, id: "glm-5.1", baseUrl: ZAI_CODING_PLAN_BASE_URL },
+			model: { provider: ZAI_CODING_PLAN_PROVIDER_ID, id: "glm-5.1", baseUrl: ZAI_CODING_PLAN_BASE_URL, reasoning: true, contextWindow: 131072 },
 			ui: {
 				theme: { fg: (_color: string, text: string) => text, bold: (text: string) => text },
 				setStatus(key: string, text: string | undefined) {
@@ -159,8 +160,31 @@ test("usage tracker renders inline status instead of a separate widget row", asy
 				setWidget(key: string, content: unknown) {
 					widgets.push({ key, content });
 				},
+				setFooter(factory: unknown) {
+					footers.push(factory);
+				},
+			},
+			getContextUsage() {
+				return { tokens: 1000, contextWindow: 131072, percent: 0.8 };
+			},
+			sessionManager: {
+				getEntries() {
+					return [];
+				},
+				getBranch() {
+					return [];
+				},
+				getCwd() {
+					return "/tmp/project";
+				},
+				getSessionName() {
+					return undefined;
+				},
 			},
 			modelRegistry: {
+				isUsingOAuth() {
+					return false;
+				},
 				async getApiKeyAndHeaders() {
 					return { ok: false, error: "auth not configured" };
 				},
@@ -170,4 +194,78 @@ test("usage tracker renders inline status instead of a separate widget row", asy
 
 	assert.deepEqual(statuses[0], { key: "zai-usage-indicator", text: "◌ z.ai quota…" });
 	assert.equal(widgets.length, 0);
+	assert.equal(typeof footers[0], "function");
+});
+
+test("custom footer merges z.ai status into the main stats line", async () => {
+	const { pi, getHandlers } = createPiStub();
+	zaiCodingPlan(pi as never);
+
+	const sessionStartHandlers = getHandlers<(event: unknown, ctx: any) => Promise<void>>("session_start");
+	assert.equal(sessionStartHandlers.length, 1);
+
+	let footerFactory: any;
+	await sessionStartHandlers[0](
+		{},
+		{
+			hasUI: true,
+			model: { provider: ZAI_CODING_PLAN_PROVIDER_ID, id: "glm-5.1", baseUrl: ZAI_CODING_PLAN_BASE_URL, reasoning: true, contextWindow: 131072 },
+			ui: {
+				theme: { fg: (_color: string, text: string) => text, bold: (text: string) => text },
+				setStatus() {},
+				setWidget() {},
+				setFooter(factory: unknown) {
+					footerFactory = factory;
+				},
+			},
+			getContextUsage() {
+				return { tokens: 1000, contextWindow: 131072, percent: 12.3 };
+			},
+			sessionManager: {
+				getEntries() {
+					return [];
+				},
+				getBranch() {
+					return [{ type: "thinking_level_change", thinkingLevel: "high" }];
+				},
+				getCwd() {
+					return "/tmp/project";
+				},
+				getSessionName() {
+					return undefined;
+				},
+			},
+			modelRegistry: {
+				isUsingOAuth() {
+					return false;
+				},
+				async getApiKeyAndHeaders() {
+					return { ok: false, error: "auth not configured" };
+				},
+			},
+		},
+	);
+
+	const component = footerFactory(
+		{ requestRender() {} },
+		{ fg: (_color: string, text: string) => text, bold: (text: string) => text },
+		{
+			getGitBranch() {
+				return "main";
+			},
+			getExtensionStatuses() {
+				return new Map([["zai-usage-indicator", "● z.ai 5h 78% · 7d 96%"]]);
+			},
+			getAvailableProviderCount() {
+				return 2;
+			},
+			onBranchChange() {
+				return () => {};
+			},
+		},
+	);
+	const lines = component.render(120);
+	assert.equal(lines.length, 2);
+	assert.match(lines[1], /z\.ai 5h 78% · 7d 96%/);
+	assert.match(lines[1], /glm-5\.1 • high/);
 });

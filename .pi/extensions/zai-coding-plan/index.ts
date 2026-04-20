@@ -1,4 +1,5 @@
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { AssistantMessage } from "@mariozechner/pi-ai";
+import type { ExtensionAPI, ExtensionContext, ReadonlyFooterDataProvider } from "@mariozechner/pi-coding-agent";
 import {
 	buildZaiUsageIndicatorLines,
 	extractZaiAuthToken,
@@ -18,6 +19,7 @@ const ZAI_USAGE_REFRESH_INTERVAL_MS = 90_000;
 const ZAI_USAGE_MIN_FETCH_INTERVAL_MS = 20_000;
 const ZAI_USAGE_POST_TURN_REFRESH_DELAY_MS = 2_000;
 const ZAI_USAGE_REQUEST_TIMEOUT_MS = 10_000;
+const FOOTER_MIN_GAP = 2;
 
 const ZERO_COST = {
 	input: 0,
@@ -132,6 +134,157 @@ export function registerZaiCodingPlan(
 		api: "openai-completions",
 		models: cloneModels(),
 	});
+}
+
+function stripAnsi(text: string): string {
+	return text.replace(/\x1b\[[0-9;]*m/g, "");
+}
+
+function visibleWidth(text: string): number {
+	return stripAnsi(text).length;
+}
+
+function truncateToWidth(text: string, width: number, ellipsis = "..."): string {
+	if (width <= 0) return "";
+	if (visibleWidth(text) <= width) return text;
+	const plain = stripAnsi(text);
+	const ellipsisWidth = Math.min(width, visibleWidth(ellipsis));
+	const kept = Math.max(0, width - ellipsisWidth);
+	return plain.slice(0, kept) + (ellipsisWidth > 0 ? stripAnsi(ellipsis).slice(0, ellipsisWidth) : "");
+}
+
+function sanitizeStatusText(text: string): string {
+	return text
+		.replace(/[\r\n\t]/g, " ")
+		.replace(/ +/g, " ")
+		.trim();
+}
+
+function formatTokens(count: number): string {
+	if (count < 1000) return `${count}`;
+	if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
+	if (count < 1_000_000) return `${Math.round(count / 1000)}k`;
+	if (count < 10_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
+	return `${Math.round(count / 1_000_000)}M`;
+}
+
+function getCurrentThinkingLevel(ctx: ExtensionContext): string {
+	for (const entry of [...ctx.sessionManager.getBranch()].reverse()) {
+		if (entry.type === "thinking_level_change" && typeof entry.thinkingLevel === "string") {
+			return entry.thinkingLevel;
+		}
+	}
+	return "off";
+}
+
+function buildInlineFooter(
+	ctx: ExtensionContext,
+	footerData: ReadonlyFooterDataProvider,
+	theme: ExtensionContext["ui"]["theme"],
+	width: number,
+): string[] {
+	let totalInput = 0;
+	let totalOutput = 0;
+	let totalCacheRead = 0;
+	let totalCacheWrite = 0;
+	let totalCost = 0;
+	for (const entry of ctx.sessionManager.getEntries()) {
+		if (entry.type === "message" && entry.message.role === "assistant") {
+			const message = entry.message as AssistantMessage;
+			totalInput += message.usage.input;
+			totalOutput += message.usage.output;
+			totalCacheRead += message.usage.cacheRead;
+			totalCacheWrite += message.usage.cacheWrite;
+			totalCost += message.usage.cost.total;
+		}
+	}
+
+	const contextUsage = ctx.getContextUsage();
+	const contextWindow = contextUsage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
+	const contextPercentValue = contextUsage?.percent ?? 0;
+	const contextPercent = contextUsage?.percent !== null ? contextPercentValue.toFixed(1) : "?";
+
+	let pwd = ctx.sessionManager.getCwd();
+	const home = process.env.HOME || process.env.USERPROFILE;
+	if (home && pwd.startsWith(home)) pwd = `~${pwd.slice(home.length)}`;
+	const branch = footerData.getGitBranch();
+	if (branch) pwd = `${pwd} (${branch})`;
+	const sessionName = ctx.sessionManager.getSessionName();
+	if (sessionName) pwd = `${pwd} • ${sessionName}`;
+
+	const dimSep = theme.fg("dim", " ");
+	const inlineSep = theme.fg("dim", " · ");
+	const leftParts: string[] = [];
+	if (totalInput) leftParts.push(theme.fg("dim", `↑${formatTokens(totalInput)}`));
+	if (totalOutput) leftParts.push(theme.fg("dim", `↓${formatTokens(totalOutput)}`));
+	if (totalCacheRead) leftParts.push(theme.fg("dim", `R${formatTokens(totalCacheRead)}`));
+	if (totalCacheWrite) leftParts.push(theme.fg("dim", `W${formatTokens(totalCacheWrite)}`));
+	const usingSubscription = ctx.model ? ctx.modelRegistry.isUsingOAuth(ctx.model) : false;
+	if (totalCost || usingSubscription) {
+		leftParts.push(theme.fg("dim", `$${totalCost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`));
+	}
+	const contextPercentDisplay =
+		contextPercent === "?" ? `?/${formatTokens(contextWindow)}` : `${contextPercent}%/${formatTokens(contextWindow)}`;
+	leftParts.push(
+		contextPercentValue > 90
+			? theme.fg("error", contextPercentDisplay)
+			: contextPercentValue > 70
+				? theme.fg("warning", contextPercentDisplay)
+				: theme.fg("dim", contextPercentDisplay),
+	);
+
+	const extensionStatuses = footerData.getExtensionStatuses();
+	const zaiStatus = extensionStatuses.get(ZAI_USAGE_STATUS_KEY);
+	if (zaiStatus) leftParts.push(sanitizeStatusText(zaiStatus));
+	let left = leftParts.join(dimSep);
+	left = truncateToWidth(left, width, theme.fg("dim", "..."));
+
+	const modelName = ctx.model?.id || "no-model";
+	let right = modelName;
+	if (ctx.model?.reasoning) {
+		const thinkingLevel = getCurrentThinkingLevel(ctx);
+		right = thinkingLevel === "off" ? `${modelName} • thinking off` : `${modelName} • ${thinkingLevel}`;
+	}
+	if (footerData.getAvailableProviderCount() > 1 && ctx.model) {
+		const candidate = `(${ctx.model.provider}) ${right}`;
+		if (visibleWidth(left) + FOOTER_MIN_GAP + visibleWidth(candidate) <= width) right = candidate;
+	}
+	const rightColored = theme.fg("dim", right);
+	const leftWidth = visibleWidth(left);
+	const rightWidth = visibleWidth(rightColored);
+	const totalNeeded = leftWidth + FOOTER_MIN_GAP + rightWidth;
+	const statsLine =
+		totalNeeded <= width
+			? left + " ".repeat(width - leftWidth - rightWidth) + rightColored
+			: left;
+
+	const lines = [truncateToWidth(theme.fg("dim", pwd), width, theme.fg("dim", "...")), statsLine];
+	const otherStatuses = Array.from(extensionStatuses.entries())
+		.filter(([key]) => key !== ZAI_USAGE_STATUS_KEY)
+		.sort(([a], [b]) => a.localeCompare(b))
+		.map(([, text]) => sanitizeStatusText(text));
+	if (otherStatuses.length > 0) {
+		lines.push(truncateToWidth(otherStatuses.join(inlineSep), width, theme.fg("dim", "...")));
+	}
+	return lines;
+}
+
+function syncInlineFooter(ctx: ExtensionContext): void {
+	if (!ctx.hasUI) return;
+	if (ctx.model && isZaiUsageModel(ctx.model)) {
+		ctx.ui.setFooter((tui, theme, footerData) => {
+			const unsubscribe = footerData.onBranchChange(() => tui.requestRender());
+			return {
+				dispose: unsubscribe,
+				invalidate() {},
+				render(width: number): string[] {
+					return buildInlineFooter(ctx, footerData, theme, width);
+				},
+			};
+		});
+		return;
+	}
+	ctx.ui.setFooter(undefined);
 }
 
 function createUsageTracker() {
@@ -299,6 +452,7 @@ function createUsageTracker() {
 	function start(ctx: ExtensionContext): void {
 		clearTimers();
 		syncStatus(ctx);
+		syncInlineFooter(ctx);
 		if (!ctx.hasUI) return;
 		state.intervalHandle = setInterval(() => {
 			void refresh(ctx);
@@ -313,6 +467,7 @@ function createUsageTracker() {
 		clearTimers();
 		resetUsageState(null);
 		clearStatus(ctx);
+		syncInlineFooter(ctx);
 	}
 
 	return {
@@ -388,6 +543,7 @@ export default function zaiCodingPlan(pi: ExtensionAPI): void {
 
 	pi.on("model_select", async (_event, ctx) => {
 		usageTracker.syncStatus(ctx);
+		syncInlineFooter(ctx);
 		void usageTracker.refresh(ctx, { force: true });
 	});
 
