@@ -1,13 +1,14 @@
 {
   "name": "zai-coding-plan-pi-package",
   "version": "0.1.0",
-  "description": "Explicit Z.AI GLM Coding Plan provider for pi using the coding endpoint so usage counts against the plan quota.",
+  "description": "Explicit Z.AI GLM Coding Plan provider for pi using the coding endpoint so usage counts against the plan quota, with a live quota indicator in the TUI.",
   "type": "module",
   "keywords": [
     "pi-package"
   ],
   "files": [
     "index.ts",
+    "usage-indicator.ts",
     "README.md"
   ],
   "pi": {

@@ -29,6 +29,8 @@ The package also applies the Z.AI-specific OpenAI compatibility flags pi needs f
 - no `developer` role
 - tool-call streaming on the newer coding-plan models
 
+It also adds a compact live quota indicator below the prompt while a relevant Z.AI model is active in the interactive TUI. The indicator auto-refreshes over time and after completed turns, and it uses the same monitor endpoint family that Z.AI's official `glm-plan-usage` Claude plugin uses.
+
 ## Included models
 
 - `zai-coding-plan/glm-5.1`
@@ -71,6 +73,8 @@ export ZAI_API_KEY=your_zai_api_key
 
 Start pi, open `/model`, and pick one of the `zai-coding-plan/*` models.
 
+When a Z.AI-backed model is active, the extension shows a small live usage line below the editor with your current 5-hour and 7-day quota headroom whenever the monitor endpoint exposes those windows.
+
 CLI example:
 
 ```bash
@@ -81,6 +85,8 @@ pi --provider zai-coding-plan --model glm-5.1
 
 - On newer pi versions, core may already ship built-in `zai/*` models aimed at the same coding endpoint. This package is still useful as an explicit, backportable `zai-coding-plan/*` namespace.
 - `zai-coding-plan/glm-5.1` gets an extra per-turn system-prompt append that nudges the model to be more concise, direct, and less sycophantic.
+- `zai-coding-plan/glm-5.1` also uses a conservative effective context window so pi compacts around ~100k prompt tokens by default instead of riding the model's larger advertised limit.
+- The quota widget uses `GET /api/monitor/usage/quota/limit` on `api.z.ai`, which is also what Z.AI's official usage-query plugin relies on.
 - Z.AI's coding-plan docs recommend the OpenAI-compatible coding endpoint for non-Claude coding tools; this package intentionally follows that route instead of the Anthropic-compatible Claude Code path.
 
 ## Sources
