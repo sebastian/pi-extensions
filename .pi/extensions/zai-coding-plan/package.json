@@ -1,0 +1,26 @@
+{
+  "name": "zai-coding-plan-pi-package",
+  "version": "0.1.0",
+  "description": "Explicit Z.AI GLM Coding Plan provider for pi using the coding endpoint so usage counts against the plan quota.",
+  "type": "module",
+  "keywords": [
+    "pi-package"
+  ],
+  "files": [
+    "index.ts",
+    "README.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*"
+  },
+  "scripts": {
+    "build": "echo 'No build step required'",
+    "check": "node --test ./tests/*.test.ts",
+    "test": "node --test ./tests/*.test.ts"
+  }
+}

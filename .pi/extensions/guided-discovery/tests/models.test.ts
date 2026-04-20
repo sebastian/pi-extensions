@@ -28,11 +28,17 @@ test("resolveWorkflowModelsFromRefs uses GLM-5.1 as the lone checker when it is 
 	assert.deepEqual(models.checkers, ["huggingface/zai-org/GLM-5.1"]);
 });
 
-test("resolveWorkflowModelsFromRefs prefers GLM-5.1 only when gpt-5.3-codex is unavailable", () => {
+test("resolveWorkflowModelsFromRefs recognizes the dedicated Z.AI coding-plan provider", () => {
+	const models = resolveWorkflowModelsFromRefs(["zai-coding-plan/glm-5.1"], undefined);
+	assert.equal(models.primary, "zai-coding-plan/glm-5.1");
+	assert.deepEqual(models.checkers, ["zai-coding-plan/glm-5.1"]);
+});
+
+test("resolveWorkflowModelsFromRefs prefers the dedicated coding-plan GLM-5.1 before other GLM providers", () => {
 	const models = resolveWorkflowModelsFromRefs(
-		["openai-codex/gpt-5.4", "huggingface/zai-org/GLM-5.1"],
+		["openai-codex/gpt-5.4", "huggingface/zai-org/GLM-5.1", "zai-coding-plan/glm-5.1"],
 		"openai-codex/gpt-5.4",
 	);
 	assert.equal(models.primary, "openai-codex/gpt-5.4");
-	assert.deepEqual(models.checkers, ["openai-codex/gpt-5.4", "huggingface/zai-org/GLM-5.1"]);
+	assert.deepEqual(models.checkers, ["openai-codex/gpt-5.4", "zai-coding-plan/glm-5.1"]);
 });

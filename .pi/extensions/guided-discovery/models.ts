@@ -34,7 +34,12 @@ export function resolveWorkflowModelsFromRefs(availableRefs: string[], currentMo
 
 	const companion = pickFirstAvailable(
 		available.filter((ref) => normalizeRef(ref) !== normalizeRef(primary ?? "")),
-		["openai-codex/gpt-5.3-codex", "huggingface/zai-org/GLM-5.1", "zai/zai-org/GLM-5.1"],
+		[
+			"openai-codex/gpt-5.3-codex",
+			"zai-coding-plan/glm-5.1",
+			"huggingface/zai-org/GLM-5.1",
+			"zai/zai-org/GLM-5.1",
+		],
 	);
 	if (companion && !checkers.includes(companion)) checkers.push(companion);
 

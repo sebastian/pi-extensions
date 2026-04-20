@@ -13,6 +13,7 @@ I maintain this repo for my own workflows and experiments.
 ## Current contents
 
 - `.pi/extensions/guided-discovery/` — a Codex-style guided discovery / planning workflow for pi with optional isolated sub-agent implementation mode
+- `.pi/extensions/zai-coding-plan/` — a pi provider extension that adds Z.AI **coding plan only** models via the official coding-plan endpoint so usage counts against plan quota rather than separate API billing
 
 ## License
 

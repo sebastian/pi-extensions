@@ -20,7 +20,7 @@ A research-first planning workflow for pi that turns a loose feature prompt into
 - single-pass advisory validator output instead of an open-ended endgame remediation loop
 - touched-path `AGENTS.md` discovery so worker, remediation, cleanup, design review, checker, and validator passes see the right repo-local guidance for touched files
 - conservative execution of explicit `AGENTS.md` check commands as part of the checker / final quality path
-- multi-model checking with `gpt-5.4` plus at most one companion checker model: prefer `gpt-5.3-codex`, else `GLM-5.1`
+- multi-model checking with `gpt-5.4` plus at most one companion checker model: prefer `gpt-5.3-codex`, else `GLM-5.1` (including the dedicated `zai-coding-plan/glm-5.1` provider)
 - checker-model failures are recorded as errored reviews without aborting the whole workflow, as long as at least one checker succeeds
 - packaged as a reusable pi package, not just a project-local extension
 
@@ -103,7 +103,7 @@ In interactive TUI sessions, it also renders a persistent progress widget above 
 3. **targeted phase follow-through** — after each phase, run targeted cleanup on that phase’s changed files and touched paths. If the phase is design-sensitive or visibly user-facing, also run targeted design review. This loop is small, local, and bounded.
 4. **final cleanup auditor** — after the implementation is merged, run one holistic cleanup pass for glaring feature-level cleanup mistakes only.
 5. **final design reviewer** — after the implementation is merged, run one holistic design pass when the feature is design-sensitive or visibly user-facing.
-6. **final code review** — runs review passes with the primary checker model plus at most one companion model (`gpt-5.3-codex`, else `GLM-5.1`), executes explicit required checks extracted conservatively from relevant `AGENTS.md` files, and focuses on:
+6. **final code review** — runs review passes with the primary checker model plus at most one companion model (`gpt-5.3-codex`, else `GLM-5.1`, including `zai-coding-plan/glm-5.1` when available), executes explicit required checks extracted conservatively from relevant `AGENTS.md` files, and focuses on:
    - logic bugs and correctness
    - unintended regressions or side effects
    - security issues
