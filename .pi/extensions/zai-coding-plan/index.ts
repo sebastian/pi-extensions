@@ -12,7 +12,7 @@ export const ZAI_CODING_PLAN_PROVIDER_ID = "zai-coding-plan";
 export const ZAI_CODING_PLAN_BASE_URL = "https://api.z.ai/api/coding/paas/v4";
 export const ZAI_CODING_PLAN_API_KEY_ENV = "ZAI_API_KEY";
 
-const ZAI_USAGE_WIDGET_KEY = "zai-usage-indicator";
+const ZAI_USAGE_STATUS_KEY = "zai-usage-indicator";
 const ZAI_USAGE_MONITOR_PATH = "/api/monitor/usage/quota/limit";
 const ZAI_USAGE_REFRESH_INTERVAL_MS = 90_000;
 const ZAI_USAGE_MIN_FETCH_INTERVAL_MS = 20_000;
@@ -111,7 +111,7 @@ interface UsageTrackerState {
 	inFlightKey: string | null;
 	intervalHandle: ReturnType<typeof setInterval> | null;
 	deferredHandle: ReturnType<typeof setTimeout> | null;
-	lastWidgetSignature: string | null;
+	lastStatusSignature: string | null;
 }
 
 function cloneModels() {
@@ -145,7 +145,7 @@ function createUsageTracker() {
 		inFlightKey: null,
 		intervalHandle: null,
 		deferredHandle: null,
-		lastWidgetSignature: null,
+		lastStatusSignature: null,
 	};
 
 	function clearTimers(): void {
@@ -159,10 +159,10 @@ function createUsageTracker() {
 		}
 	}
 
-	function clearWidget(ctx: ExtensionContext): void {
+	function clearStatus(ctx: ExtensionContext): void {
 		if (!ctx.hasUI) return;
-		ctx.ui.setWidget(ZAI_USAGE_WIDGET_KEY, undefined);
-		state.lastWidgetSignature = null;
+		ctx.ui.setStatus(ZAI_USAGE_STATUS_KEY, undefined);
+		state.lastStatusSignature = null;
 	}
 
 	function resetUsageState(nextKey: string | null): void {
@@ -171,14 +171,14 @@ function createUsageTracker() {
 		state.loading = false;
 		state.error = null;
 		state.lastFetchStartedAt = 0;
-		state.lastWidgetSignature = null;
+		state.lastStatusSignature = null;
 	}
 
-	function syncWidget(ctx: ExtensionContext): void {
+	function syncStatus(ctx: ExtensionContext): void {
 		if (!ctx.hasUI) return;
 		if (!ctx.model || !isZaiUsageModel(ctx.model)) {
 			resetUsageState(null);
-			clearWidget(ctx);
+			clearStatus(ctx);
 			return;
 		}
 
@@ -200,14 +200,14 @@ function createUsageTracker() {
 			ctx.ui.theme,
 		);
 		const signature = lines.join("\n");
-		if (signature === state.lastWidgetSignature) return;
-		ctx.ui.setWidget(ZAI_USAGE_WIDGET_KEY, lines, { placement: "belowEditor" });
-		state.lastWidgetSignature = signature;
+		if (signature === state.lastStatusSignature) return;
+		ctx.ui.setStatus(ZAI_USAGE_STATUS_KEY, lines[0]);
+		state.lastStatusSignature = signature;
 	}
 
 	async function refresh(ctx: ExtensionContext, options?: { force?: boolean }): Promise<void> {
 		if (!ctx.model || !isZaiUsageModel(ctx.model)) {
-			syncWidget(ctx);
+			syncStatus(ctx);
 			return;
 		}
 
@@ -217,26 +217,26 @@ function createUsageTracker() {
 			state.error = "usage monitor unavailable";
 			state.snapshot = null;
 			state.loading = false;
-			syncWidget(ctx);
+			syncStatus(ctx);
 			return;
 		}
 		if (state.activeKey !== key) resetUsageState(key);
 
 		if (state.inFlight && state.inFlightKey === key) {
-			syncWidget(ctx);
+			syncStatus(ctx);
 			return state.inFlight;
 		}
 
 		const now = Date.now();
 		if (!options?.force && now - state.lastFetchStartedAt < ZAI_USAGE_MIN_FETCH_INTERVAL_MS) {
-			syncWidget(ctx);
+			syncStatus(ctx);
 			return;
 		}
 
 		state.loading = true;
 		state.error = state.snapshot ? state.error : null;
 		state.lastFetchStartedAt = now;
-		syncWidget(ctx);
+		syncStatus(ctx);
 
 		const requestKey = key;
 		const request = (async () => {
@@ -278,7 +278,7 @@ function createUsageTracker() {
 					state.inFlight = null;
 					state.inFlightKey = null;
 				}
-				syncWidget(ctx);
+				syncStatus(ctx);
 			}
 		})();
 
@@ -298,7 +298,7 @@ function createUsageTracker() {
 
 	function start(ctx: ExtensionContext): void {
 		clearTimers();
-		syncWidget(ctx);
+		syncStatus(ctx);
 		if (!ctx.hasUI) return;
 		state.intervalHandle = setInterval(() => {
 			void refresh(ctx);
@@ -312,13 +312,13 @@ function createUsageTracker() {
 	function stop(ctx: ExtensionContext): void {
 		clearTimers();
 		resetUsageState(null);
-		clearWidget(ctx);
+		clearStatus(ctx);
 	}
 
 	return {
 		refresh,
 		scheduleRefresh,
-		syncWidget,
+		syncStatus,
 		start,
 		stop,
 	};
@@ -387,7 +387,7 @@ export default function zaiCodingPlan(pi: ExtensionAPI): void {
 	});
 
 	pi.on("model_select", async (_event, ctx) => {
-		usageTracker.syncWidget(ctx);
+		usageTracker.syncStatus(ctx);
 		void usageTracker.refresh(ctx, { force: true });
 	});
 

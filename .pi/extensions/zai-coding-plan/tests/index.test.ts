@@ -9,26 +9,26 @@ import zaiCodingPlan, {
 	ZAI_CODING_PLAN_PROVIDER_ID,
 } from "../index.ts";
 
-type BeforeAgentStartHandler = (
-	event: { systemPrompt: string },
-	ctx: { model?: { provider?: string; id?: string } },
-) => Promise<{ systemPrompt: string } | undefined> | { systemPrompt: string } | undefined;
-
 function createPiStub() {
 	const providerRegistrations: Array<{ id: string; config: Record<string, unknown> }> = [];
-	const beforeAgentStartHandlers: BeforeAgentStartHandler[] = [];
+	const handlers = new Map<string, Function[]>();
 
 	return {
 		pi: {
 			registerProvider(id: string, config: Record<string, unknown>) {
 				providerRegistrations.push({ id, config });
 			},
-			on(event: string, handler: BeforeAgentStartHandler) {
-				if (event === "before_agent_start") beforeAgentStartHandlers.push(handler);
+			on(event: string, handler: Function) {
+				const eventHandlers = handlers.get(event) ?? [];
+				eventHandlers.push(handler);
+				handlers.set(event, eventHandlers);
 			},
 		},
 		providerRegistrations,
-		beforeAgentStartHandlers,
+		handlers,
+		getHandlers<T extends Function>(event: string): T[] {
+			return (handlers.get(event) ?? []) as T[];
+		},
 	};
 }
 
@@ -74,9 +74,13 @@ test("glm-4.5-air keeps the older non-tool-streaming compat shape", () => {
 });
 
 test("GLM-5.1 gets extra instructions to stay concise and less eager to please", async () => {
-	const { pi, beforeAgentStartHandlers } = createPiStub();
+	const { pi, getHandlers } = createPiStub();
 	zaiCodingPlan(pi as never);
 
+	const beforeAgentStartHandlers = getHandlers<(
+		event: { systemPrompt: string },
+		ctx: { model?: { provider?: string; id?: string } },
+	) => Promise<{ systemPrompt: string } | undefined>>("before_agent_start");
 	assert.equal(beforeAgentStartHandlers.length, 1);
 
 	const result = await beforeAgentStartHandlers[0](
@@ -92,9 +96,13 @@ test("GLM-5.1 gets extra instructions to stay concise and less eager to please",
 });
 
 test("non-GLM-5.1 turns are left unchanged", async () => {
-	const { pi, beforeAgentStartHandlers } = createPiStub();
+	const { pi, getHandlers } = createPiStub();
 	zaiCodingPlan(pi as never);
 
+	const beforeAgentStartHandlers = getHandlers<(
+		event: { systemPrompt: string },
+		ctx: { model?: { provider?: string; id?: string } },
+	) => Promise<{ systemPrompt: string } | undefined>>("before_agent_start");
 	assert.equal(beforeAgentStartHandlers.length, 1);
 
 	const handler = beforeAgentStartHandlers[0];
@@ -127,4 +135,39 @@ test("hasUsageError accepts successful live quota payloads that use code 200", (
 		}),
 		true,
 	);
+});
+
+test("usage tracker renders inline status instead of a separate widget row", async () => {
+	const { pi, getHandlers } = createPiStub();
+	zaiCodingPlan(pi as never);
+
+	const sessionStartHandlers = getHandlers<(event: unknown, ctx: any) => Promise<void>>("session_start");
+	assert.equal(sessionStartHandlers.length, 1);
+
+	const statuses: Array<{ key: string; text: string | undefined }> = [];
+	const widgets: Array<{ key: string; content: unknown }> = [];
+	await sessionStartHandlers[0](
+		{},
+		{
+			hasUI: true,
+			model: { provider: ZAI_CODING_PLAN_PROVIDER_ID, id: "glm-5.1", baseUrl: ZAI_CODING_PLAN_BASE_URL },
+			ui: {
+				theme: { fg: (_color: string, text: string) => text, bold: (text: string) => text },
+				setStatus(key: string, text: string | undefined) {
+					statuses.push({ key, text });
+				},
+				setWidget(key: string, content: unknown) {
+					widgets.push({ key, content });
+				},
+			},
+			modelRegistry: {
+				async getApiKeyAndHeaders() {
+					return { ok: false, error: "auth not configured" };
+				},
+			},
+		},
+	);
+
+	assert.deepEqual(statuses[0], { key: "zai-usage-indicator", text: "◌ z.ai quota…" });
+	assert.equal(widgets.length, 0);
 });
