@@ -75,7 +75,8 @@ Your job in this mode:
     ## Build plan
     ## Acceptance checks
     ## Risks / follow-ups
-    In the final plan, keep only the agreed path. Under "Options and trade-offs", summarize only the selected direction and why it won; do not restate rejected alternatives unless the user explicitly asks for them.
+    ## TL;DR
+    In the final plan, keep only the agreed path. Under "Options and trade-offs", summarize only the selected direction and why it won; do not restate rejected alternatives unless the user explicitly asks for them. In ## TL;DR, give a very short end-of-plan summary that is easy to spot after terminal scrollback.
 15. If the user clearly wants to start coding, tell them to run /discover-implement or /discover-off first.
 `;
 
@@ -814,12 +815,14 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 			"",
 			"Workflow:",
 			"1. Re-scan the relevant files, then implement the agreed plan directly in this main session.",
-			"2. When the coding pass is done, run one focused self-review covering logic bugs, regressions, side effects, security, UX, and missed plan requirements.",
-			"3. Categorize review findings by priority. Immediately fix every P1-or-higher issue you find without asking first.",
-			"4. Run a second review pass after those fixes.",
-			"5. If findings still remain, present them to the user with questionnaire. Use one question per finding, batch up to 4 findings at a time, and give concrete choices like Address now / Ignore for now / Follow up later.",
-			"6. After the user answers, address only the findings they chose to fix now, and clearly summarize the ones they chose to ignore or defer.",
-			"7. Keep the implementation simple. Do not invent extra orchestration or sub-agent workflows.",
+			"2. Only after the implementation pass is complete, run the review phase automatically.",
+			"3. In that review phase, use the two strongest available models that were NOT used for implementation. Run those two reviews in parallel, at the highest reasoning level available, and ask them to look for as many concrete issues as possible across logic, regressions, side effects, security, UX, and missed plan requirements.",
+			"4. Synthesize the two review outputs into one deduplicated findings list. Merge overlaps, keep the strongest wording/evidence, and preserve priority.",
+			"5. Then switch back to the implementation model/original coding mode and immediately fix every P1-or-higher finding from that deduplicated review set without user intervention.",
+			"6. Run one more automatic review pass after those fixes. Again prefer a different review model from the implementation model, use the highest reasoning level available, and stay focused on remaining concrete issues.",
+			"7. If findings still remain, present them to the user with questionnaire. Prefer one question per finding, batch up to 4 findings at a time, and give concrete choices like Fix now / Defer / Ignore.",
+			"8. After the user answers, address only the findings they selected to fix now, and clearly summarize the ones they deferred or ignored.",
+			"9. Keep the implementation simple. Do not invent extra orchestration or sub-agent workflows.",
 		];
 		if (options.inlinePlanText?.trim()) {
 			instructions.push("", "Use the approved plan below as the source of truth.", "", options.inlinePlanText.trim());

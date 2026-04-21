@@ -20,6 +20,7 @@ Rules:
   - ## Build plan
   - ## Acceptance checks
   - ## Risks / follow-ups
+  - ## TL;DR
 
 Planning guidance:
 - In ## Problem, restate the requested outcome, scope boundaries, and key constraints.
@@ -29,3 +30,4 @@ Planning guidance:
 - In ## Build plan, give a short numbered list of concrete implementation steps. Usually 1-3 steps.
 - In ## Acceptance checks, describe the observable checks that make it clear the work is done.
 - In ## Risks / follow-ups, list only real uncertainties, trade-offs, or intentional deferrals.
+- In ## TL;DR, give a very short end-of-plan summary that is easy to spot after terminal scrollback.

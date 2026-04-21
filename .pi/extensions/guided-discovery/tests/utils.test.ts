@@ -31,6 +31,10 @@ test("isFinalPlanResponse accepts the concise discovery plan format", () => {
 		"## Risks / follow-ups",
 		"",
 		"- Coverage gaps may remain and should be reported clearly.",
+		"",
+		"## TL;DR",
+		"",
+		"Use one advisory validator pass and keep the workflow bounded.",
 	].join("\n");
 
 	assert.equal(isFinalPlanResponse(plan), true);
@@ -65,6 +69,10 @@ test("isFinalPlanResponse still accepts the legacy discovery plan format", () =>
 		"## Risks / follow-ups",
 		"",
 		"- None.",
+		"",
+		"## TL;DR",
+		"",
+		"Keep both plan layouts working.",
 	].join("\n");
 
 	assert.equal(isFinalPlanResponse(plan), true);

@@ -10,13 +10,17 @@ A research-first planning workflow for pi that turns a loose feature prompt into
 - structured multiple-choice clarifying questions with a recommended option shown first and an `Other` fallback
 - external docs / API / market / state-of-the-art research via `web_research`
 - concise final-plan detection and automatic save of the latest plan to the isolated workspace `PLAN.md`
+- final plans now end with a short `## TL;DR` so the takeaway is still visible after terminal scrollback
 - explicit end-of-discovery choice: **Implement now**, **Do not implement**, or **Keep refining in discovery mode**
 - straight-line implementation handoff in the main session with built-in guidance to:
-  - implement directly
-  - run one review pass
-  - immediately fix all P1-or-higher findings
-  - run a second review pass
-  - present remaining findings via `questionnaire` so you can choose which to address and which to ignore
+  - implement directly first
+  - then run automatic post-implementation reviews
+  - use the two strongest non-implementation models in parallel when the runtime supports it
+  - run those reviews at the highest reasoning level available
+  - synthesize and deduplicate findings before fixing
+  - immediately fix all P1-or-higher findings without user intervention
+  - run a final review pass
+  - present remaining findings via `questionnaire` so you can choose which to address, defer, or ignore
 - packaged as a reusable pi package, not just a project-local extension
 
 ## Commands
@@ -44,7 +48,7 @@ While guided discovery mode is active:
   - explicitly uncover the real user outcome, important side effects, scope boundaries, and implementation-shaping decisions
   - keep planning concise and implementation-oriented
   - produce a final plan that reflects only the agreed path
-  - produce a final plan with problem, key findings, the agreed trade-off rationale, approach, build plan, acceptance checks, and risks
+  - produce a final plan with problem, key findings, the agreed trade-off rationale, approach, build plan, acceptance checks, risks, and a final TL;DR
 
 When the assistant produces a final plan, the extension:
 
@@ -63,11 +67,13 @@ That prompt instructs the assistant to work in a simple straight line:
 
 1. re-scan the relevant files
 2. implement the approved plan directly in the main session
-3. run one focused review for logic bugs, regressions, side effects, security, UX, and missed plan requirements
-4. immediately fix every P1-or-higher finding
-5. run a second review pass
-6. present any remaining findings with `questionnaire`, one finding per question, so you can choose what to address now vs ignore/defer
-7. only implement the findings you selected
+3. run automatic post-implementation reviews for logic bugs, regressions, side effects, security, UX, and missed plan requirements
+4. use the two strongest non-implementation models in parallel when supported by the runtime, and run them at the highest reasoning level available
+5. synthesize and deduplicate those review findings
+6. immediately fix every P1-or-higher finding without user intervention
+7. run one more automatic review pass
+8. present any remaining findings with `questionnaire`, one finding per question, so you can choose what to address now vs defer/ignore
+9. only implement the findings you selected
 
 This keeps the flow simple and visible in the main conversation instead of pushing work into extra sub-agent orchestration.
 

@@ -107,6 +107,7 @@ const FINAL_PLAN_SECTION_FORMATS = [
 		/^## Build plan$/im,
 		/^## Acceptance checks$/im,
 		/^## Risks \/ follow-ups$/im,
+		/^## TL;DR$/im,
 	],
 	[
 		/^## Problem$/im,
@@ -116,6 +117,7 @@ const FINAL_PLAN_SECTION_FORMATS = [
 		/^## Implementation plan$/im,
 		/^## Acceptance criteria$/im,
 		/^## Risks \/ follow-ups$/im,
+		/^## TL;DR$/im,
 	],
 ];
 
