@@ -12,7 +12,7 @@ I maintain this repo for my own workflows and experiments.
 
 ## Current contents
 
-- `.pi/extensions/guided-discovery/` — a Codex-style guided discovery / planning workflow for pi with structured clarifying questions, plan approval, and straight-line implementation handoff
+- `.pi/extensions/guided-discovery/` — a review workflow extension for pi (historical folder name) that adds `/review` to compare a change against the two other strongest available models, deduplicate the findings, and let you choose which ones to address
 - `.pi/extensions/zai-coding-plan/` — a pi provider extension that adds Z.AI **coding plan only** models via the official coding-plan endpoint so usage counts against plan quota rather than separate API billing
 
 ## License

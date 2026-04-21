@@ -1,7 +1,7 @@
 {
   "name": "guided-discovery-pi-package",
-  "version": "0.3.2",
-  "description": "Codex-style guided discovery workflow for pi with structured Q&A, web research, plan approval, PLAN.md autosave, and straight-line implementation handoff.",
+  "version": "0.4.0",
+  "description": "pi review workflow extension that compares a change with two alternate top-level models, deduplicates the findings, and lets you choose which ones to address.",
   "type": "module",
   "keywords": [
     "pi-package"
@@ -20,6 +20,7 @@
     "questionnaire-model.ts",
     "questionnaire.ts",
     "repo.ts",
+    "review-workflow.ts",
     "structured-output.ts",
     "subagent-runner.ts",
     "tui-compat.ts",

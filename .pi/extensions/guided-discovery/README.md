@@ -1,95 +1,39 @@
-# Guided Discovery Extension
+# Review Workflow Extension
 
-A research-first planning workflow for pi that turns a loose feature prompt into a concrete implementation plan, asks structured clarifying questions, saves the approved plan to `PLAN.md`, and then hands off to a simple straight-line implementation flow in the main session.
+> Historical note: this package still lives in `.pi/extensions/guided-discovery/`, but the guided discovery / planning mode has been removed.
 
-## Features
+This extension now adds a single high-signal review workflow for pi.
 
-- read-only discovery mode with `read`, `bash`, `grep`, `find`, `ls`, `questionnaire`, and `web_research`
-- discovery runs in its own isolated jj workspace (or git worktree fallback), and relative repo reads plus read-only bash commands are routed there automatically
-- stronger guided questioning for idea-shaping work: discovery is pushed to ask focused questionnaire batches that clarify the real goal, side effects, and decision points before finalizing
-- structured multiple-choice clarifying questions with a recommended option shown first and an `Other` fallback
-- external docs / API / market / state-of-the-art research via `web_research`
-- concise final-plan detection and automatic save of the latest plan to the isolated workspace `PLAN.md`
-- final plans now end with a short `## TL;DR` so the takeaway is still visible after terminal scrollback
-- explicit end-of-discovery choice: **Implement now**, **Do not implement**, or **Keep refining in discovery mode**
-- straight-line implementation handoff in the main session with built-in guidance to:
-  - implement directly first
-  - then run automatic post-implementation reviews
-  - use the two strongest non-implementation models in parallel when the runtime supports it
-  - run those reviews at the highest reasoning level available
-  - synthesize and deduplicate findings before fixing
-  - immediately fix all P1-or-higher findings without user intervention
-  - run a final review pass
-  - present remaining findings via `questionnaire` so you can choose which to address, defer, or ignore
-- packaged as a reusable pi package, not just a project-local extension
+## What it does
 
-## Commands
+- adds `/review` to review the current uncommitted change
+- adds `/review <change>` to review a specific jj or git change / revision
+- treats the current session model as the implementation model
+- runs the two other strongest available top-level models as reviewers
+- asks those reviewer models for structured PR-style findings
+- deduplicates overlapping findings while preserving which model reported what
+- shows a review summary in the conversation
+- lets you choose which findings should be addressed now
+- sends only the selected findings back into the main session for implementation
 
-- `/discover [goal]` — enable guided discovery mode and optionally kick it off with a loose prompt
-- `/discover-off` — leave discovery mode and restore normal tools
-- `/discover-implement [extra instructions]` — exit discovery mode and start straight-line implementation from the approved plan
-- `Ctrl+Alt+D` — toggle discovery mode
+## Command
 
-Deprecated compatibility aliases still exist, but they now just route back to the straight-line implementation flow instead of launching sub-agents.
+- `/review` — review the current uncommitted change
+- `/review <change>` — review a specific jj change or git revision
 
-## How discovery mode behaves
+## Typical flow
 
-While guided discovery mode is active:
+1. Implement with your current model.
+2. Run `/review`.
+3. Read the merged review summary.
+4. Select all, some, or none of the findings to address.
+5. The extension sends the selected findings back to the main session so the agent can fix them.
 
-- active tools are restricted to `read`, `bash`, `grep`, `find`, `ls`, `questionnaire`, and `web_research`
-- discovery immediately creates an isolated workspace and routes relative repo reads plus read-only bash commands there
-- `bash` is limited to a read-only allowlist
-- the model is pushed to:
-  - do a fast repo scan first
-  - proactively research external products, APIs, ecosystems, and market patterns when they materially affect the decision
-  - prefer first-party sources for vendor / API details
-  - surface the real product / UX / technical trade-offs and recommend a default
-  - ask focused questionnaire batches for broad or ambiguous feature ideas before finalizing
-  - explicitly uncover the real user outcome, important side effects, scope boundaries, and implementation-shaping decisions
-  - keep planning concise and implementation-oriented
-  - produce a final plan that reflects only the agreed path
-  - produce a final plan with problem, key findings, the agreed trade-off rationale, approach, build plan, acceptance checks, risks, and a final TL;DR
+## Notes
 
-When the assistant produces a final plan, the extension:
-
-1. auto-saves it to the isolated workspace `PLAN.md`
-2. appends a `## Sources consulted` section when external sources were used
-3. shows a simple approval UI:
-   - **Implement now**
-   - **Do not implement**
-   - **Keep refining in discovery mode**
-
-## Implementation handoff
-
-When you choose **Implement now**, the extension exits discovery mode and sends a structured implementation prompt back into the main session.
-
-That prompt instructs the assistant to work in a simple straight line:
-
-1. re-scan the relevant files
-2. implement the approved plan directly in the main session
-3. run automatic post-implementation reviews for logic bugs, regressions, side effects, security, UX, and missed plan requirements
-4. use the two strongest non-implementation models in parallel when supported by the runtime, and run them at the highest reasoning level available
-5. synthesize and deduplicate those review findings
-6. immediately fix every P1-or-higher finding without user intervention
-7. run one more automatic review pass
-8. present any remaining findings with `questionnaire`, one finding per question, so you can choose what to address now vs defer/ignore
-9. only implement the findings you selected
-
-This keeps the flow simple and visible in the main conversation instead of pushing work into extra sub-agent orchestration.
-
-## Example workflow
-
-```text
-/discover Add a self-serve billing portal for teams
-```
-
-The agent should inspect the codebase, optionally pull in external docs or market context, ask structured questions, and eventually produce a final implementation-ready plan.
-
-Then approve from the UI or start manually:
-
-```text
-/discover-implement
-```
+- If there are fewer than two alternate reviewer models available, the command uses as many as it can.
+- For historical jj/git changes, the command reviews a snapshot of that change rather than your current working copy.
+- The review is intentionally bounded toward concrete bugs, regressions, security issues, side effects, and guidance violations.
 
 ## Install globally as a pi package
 
@@ -104,8 +48,6 @@ Or project-locally:
 ```text
 pi install -l /absolute/path/to/.pi/extensions/guided-discovery
 ```
-
-If you later publish this folder to npm or a git repo, it can also be installed like any other pi package.
 
 ## Project-local usage
 
