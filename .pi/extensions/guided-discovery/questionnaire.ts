@@ -57,6 +57,8 @@ export default function registerQuestionnaire(pi: ExtensionAPI): void {
 		promptGuidelines: [
 			"Use questionnaire when the user needs to choose between materially different alternatives or confirm important assumptions.",
 			"Resolve meaningful forks with questionnaire instead of carrying multiple options into the final plan.",
+			"Do not use questionnaire for status updates, no-op acknowledgements, or to re-confirm work the user already approved.",
+			"If the user already told you to proceed, do the work instead of asking whether to implement or whether to use the approved plan again.",
 			"Ask at most 4 questions per batch, each with 2-6 concrete options and brief descriptions when helpful.",
 			"When you have a clear default, mark that option as recommended so it is shown first. Leave allowOther enabled unless you have a strong reason to force predefined answers.",
 		],

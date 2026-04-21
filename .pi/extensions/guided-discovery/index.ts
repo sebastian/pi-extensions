@@ -24,6 +24,7 @@ import type { SubagentUsageTotals } from "./subagent-runner.ts";
 import registerQuestionnaire from "./questionnaire.ts";
 import { buildUsageDisplay, formatTokens, hasUsageTotals } from "./usage-display.ts";
 import { supportsStructuredImplementationWidget } from "./widget-support.ts";
+import { buildImplementationPrompt, isRedundantImplementationKickoffQuestionnaire } from "./implementation-prompt.ts";
 import {
 	type ResearchSource,
 	hashText,
@@ -180,6 +181,7 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 	registerWebResearch(pi);
 
 	let enabled = false;
+	let directImplementationKickoffPending = false;
 	let previousActiveTools: string[] | null = null;
 	let researchSources: ResearchSource[] = [];
 	let questionnaireBatchCount = 0;
@@ -805,42 +807,6 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 		return null;
 	}
 
-	function buildImplementationPrompt(options: {
-		extraInstructions: string;
-		planPath?: string;
-		inlinePlanText?: string;
-	}): string {
-		const instructions = [
-			"Implement the approved plan from this session in a simple straight-line flow.",
-			"",
-			"Workflow:",
-			"1. Re-scan the relevant files, then implement the agreed plan directly in this main session.",
-			"2. Only after the implementation pass is complete, run the review phase automatically.",
-			"3. In that review phase, use the two strongest available models that were NOT used for implementation. Run those two reviews in parallel, at the highest reasoning level available, and ask them to look for as many concrete issues as possible across logic, regressions, side effects, security, UX, and missed plan requirements.",
-			"4. Synthesize the two review outputs into one deduplicated findings list. Merge overlaps, keep the strongest wording/evidence, and preserve priority.",
-			"5. Then switch back to the implementation model/original coding mode and immediately fix every P1-or-higher finding from that deduplicated review set without user intervention.",
-			"6. Run one more automatic review pass after those fixes. Again prefer a different review model from the implementation model, use the highest reasoning level available, and stay focused on remaining concrete issues.",
-			"7. If findings still remain, present them to the user with questionnaire. Prefer one question per finding, batch up to 4 findings at a time, and give concrete choices like Fix now / Defer / Ignore.",
-			"8. After the user answers, address only the findings they selected to fix now, and clearly summarize the ones they deferred or ignored.",
-			"9. Keep the implementation simple. Do not invent extra orchestration or sub-agent workflows.",
-		];
-		if (options.inlinePlanText?.trim()) {
-			instructions.push("", "Use the approved plan below as the source of truth.", "", options.inlinePlanText.trim());
-		} else if (options.planPath) {
-			instructions.push("", `Use ${options.planPath} as the source of truth for the latest approved plan.`);
-		} else {
-			instructions.push("", "Use the approved conversation context from this session as the source of truth; no PLAN.md file is available yet.");
-		}
-		instructions.push(
-			"",
-			"Follow the decision log and recommended approach established during discovery.",
-			"If anything still feels ambiguous and high-risk before implementation starts, ask before making the change.",
-		);
-		if (options.extraInstructions.trim()) {
-			instructions.push("", `Additional instructions: ${options.extraInstructions.trim()}`);
-		}
-		return instructions.join("\n");
-	}
 
 	function surfaceWorkflowWarning(ctx: ExtensionContext, message: string): void {
 		if (ctx.hasUI) {
@@ -1112,6 +1078,7 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 		if (planSource.hasPlan && planSource.source === "workspace") {
 			await cleanupDiscoveryWorkspace(ctx, { clearSavedPlan: true, cleanupOriginalPlanFile: true });
 		}
+		directImplementationKickoffPending = true;
 		pi.sendUserMessage(prompt);
 		return true;
 	}
@@ -1215,7 +1182,18 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 	});
 
 	pi.on("tool_call", async (event, ctx) => {
-		if (!enabled) return;
+		if (!enabled) {
+			if (!directImplementationKickoffPending) return;
+			if (event.toolName === "questionnaire" && isRedundantImplementationKickoffQuestionnaire(event.input)) {
+				return {
+					block: true,
+					reason:
+						"Implementation was already approved. Do not ask the user whether to proceed or whether to use the approved plan again. Start implementing, and reserve questionnaire for real blocking ambiguities or post-review fix/defer choices.",
+				};
+			}
+			if (event.toolName !== "questionnaire") directImplementationKickoffPending = false;
+			return;
+		}
 
 		if (event.toolName === "edit" || event.toolName === "write") {
 			return {
@@ -1276,7 +1254,10 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 	});
 
 	pi.on("agent_end", async (event, ctx) => {
-		if (!enabled) return;
+		if (!enabled) {
+			directImplementationKickoffPending = false;
+			return;
+		}
 		const assistantText = getLastAssistantText(event.messages as AgentMessage[]);
 		if (!assistantText) return;
 		const saved = await maybeSaveFinalPlan(assistantText, ctx);
@@ -1306,6 +1287,7 @@ export default function guidedDiscovery(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
+		directImplementationKickoffPending = false;
 		const branchEntries = ctx.sessionManager.getBranch() as Array<{
 			type: string;
 			customType?: string;
