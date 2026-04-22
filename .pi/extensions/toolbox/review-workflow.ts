@@ -252,6 +252,19 @@ function renderFindingLine(index: number, finding: DeduplicatedReviewFinding): s
 	return lines;
 }
 
+export function buildFindingsOverviewPrompt(findings: DeduplicatedReviewFinding[]): string {
+	const lines = [`Review finished. Deduplicated findings (${findings.length}):`, ""];
+	for (const [index, finding] of findings.entries()) {
+		lines.push(...renderFindingLine(index, finding), "");
+	}
+	lines.push("What should happen with these findings?");
+	return lines.join("\n").trim();
+}
+
+export function buildFindingDecisionPrompt(index: number, finding: DeduplicatedReviewFinding): string {
+	return [...renderFindingLine(index, finding), "", "Address this finding?"].join("\n").trim();
+}
+
 function buildReviewSummary(options: {
 	target: ReviewTarget;
 	implementationModel?: string;
@@ -677,7 +690,7 @@ async function chooseFindingsToAddress(
 ): Promise<DeduplicatedReviewFinding[]> {
 	if (!ctx.hasUI || findings.length === 0) return [];
 
-	const firstChoice = await ctx.ui.select("Review finished. What should happen with the findings?", [
+	const firstChoice = await ctx.ui.select(buildFindingsOverviewPrompt(findings), [
 		"Address all findings",
 		"Choose findings individually",
 		"Do not address findings now",
@@ -687,12 +700,7 @@ async function chooseFindingsToAddress(
 
 	const selected: DeduplicatedReviewFinding[] = [];
 	for (const [index, finding] of findings.entries()) {
-		const prompt = [
-			`${index + 1}. [${finding.severity.toUpperCase()}] [${finding.category}] ${finding.summary}`,
-			finding.paths.length > 0 ? `Paths: ${finding.paths.join(", ")}` : "Paths: (not specified)",
-			`Reported by: ${uniqueStrings(finding.reporters.map((reporter) => reporter.model)).join(", ")}`,
-		].join("\n");
-		const choice = await ctx.ui.select(prompt, ["Address this finding", "Skip this finding"]);
+		const choice = await ctx.ui.select(buildFindingDecisionPrompt(index, finding), ["Address this finding", "Skip this finding"]);
 		if (choice === "Address this finding") selected.push(finding);
 	}
 	return selected;
