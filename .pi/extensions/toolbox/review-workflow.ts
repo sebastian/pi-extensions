@@ -23,7 +23,12 @@ import {
 } from "./review-progress.ts";
 import { detectRepoKind, findRepoLocation, findRepoRootOrSelf } from "./repo.ts";
 import { type CheckerFinding, parseCheckerReport } from "./structured-output.ts";
-import { runSubagent, type SubagentEvent, type SubagentUsageTotals } from "./subagent-runner.ts";
+import {
+	discoverProjectExtensionPaths,
+	runSubagent,
+	type SubagentEvent,
+	type SubagentUsageTotals,
+} from "./subagent-runner.ts";
 
 const REVIEW_STATUS_KEY = "guided-review";
 const REVIEW_WIDGET_KEY = "guided-review";
@@ -629,6 +634,8 @@ async function runModelReview(options: {
 	target: ReviewTarget;
 	model: string;
 	thinkingLevel?: string;
+	loadExtensions?: boolean;
+	extensions?: string[];
 	onEvent?: (event: SubagentEvent) => void;
 	onUsage?: (usage: SubagentUsageTotals) => void;
 }): Promise<ModelReviewRun> {
@@ -642,6 +649,8 @@ async function runModelReview(options: {
 			tools: REVIEW_TOOLS,
 			model: options.model,
 			thinkingLevel: options.thinkingLevel,
+			loadExtensions: options.loadExtensions,
+			extensions: options.extensions,
 			onEvent: options.onEvent,
 			onUsage: options.onUsage,
 		});
@@ -733,6 +742,8 @@ export default function registerReviewCommand(pi: ExtensionAPI): void {
 				if (ctx.hasUI) ctx.ui.notify(`Running review for ${target.label}`, "info");
 
 				const thinkingLevel = pi.getThinkingLevel() || undefined;
+				const reviewExtensions =
+					target.reviewCwd === target.repoRoot ? [] : await discoverProjectExtensionPaths(target.repoRoot);
 				const runs = await Promise.all(
 					modelPlan.reviewers.map(async (model) => {
 						progressTracker?.markRunning(model);
@@ -740,6 +751,8 @@ export default function registerReviewCommand(pi: ExtensionAPI): void {
 							target,
 							model,
 							thinkingLevel,
+							loadExtensions: true,
+							extensions: reviewExtensions,
 							onEvent: (event) => progressTracker?.handleEvent(model, event),
 							onUsage: (usage) => progressTracker?.addUsage(model, usage),
 						});

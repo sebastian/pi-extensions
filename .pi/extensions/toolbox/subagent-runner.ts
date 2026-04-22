@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { access, readdir } from "node:fs/promises";
+import { type Dirent, existsSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import type { Message, TextContent } from "@mariozechner/pi-ai";
 
@@ -11,6 +12,8 @@ export interface SubagentInvocation {
 	tools?: string[];
 	model?: string;
 	thinkingLevel?: string;
+	loadExtensions?: boolean;
+	extensions?: string[];
 	signal?: AbortSignal;
 	onEvent?: (event: SubagentEvent) => void;
 	onUsage?: (usage: SubagentUsageTotals) => void;
@@ -58,8 +61,88 @@ function getPiInvocation(args: string[]): { command: string; args: string[] } {
 	return { command: "pi", args };
 }
 
+const EXTENSION_SOURCE_PATTERN = /\.(?:[cm]?[jt]s)$/i;
+const EXTENSION_INDEX_FILES = ["index.ts", "index.js", "index.mts", "index.mjs", "index.cts", "index.cjs"] as const;
+
 function isObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function uniqueStrings(values: string[]): string[] {
+	return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+}
+
+async function pathExists(path: string): Promise<boolean> {
+	try {
+		await access(path);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+export async function discoverProjectExtensionPaths(repoRoot: string): Promise<string[]> {
+	const extensionsRoot = resolve(repoRoot, ".pi", "extensions");
+	let entries: Dirent[];
+	try {
+		entries = await readdir(extensionsRoot, { withFileTypes: true });
+	} catch {
+		return [];
+	}
+
+	const extensionPaths: string[] = [];
+	for (const entry of [...entries].sort((left, right) => left.name.localeCompare(right.name))) {
+		if (entry.name.startsWith(".")) continue;
+		const entryPath = resolve(extensionsRoot, entry.name);
+		if (entry.isFile()) {
+			if (EXTENSION_SOURCE_PATTERN.test(entry.name)) extensionPaths.push(entryPath);
+			continue;
+		}
+		if (!entry.isDirectory()) continue;
+		if (await pathExists(resolve(entryPath, "package.json"))) {
+			extensionPaths.push(entryPath);
+			continue;
+		}
+		for (const candidate of EXTENSION_INDEX_FILES) {
+			const indexPath = resolve(entryPath, candidate);
+			if (await pathExists(indexPath)) {
+				extensionPaths.push(indexPath);
+				break;
+			}
+		}
+	}
+
+	return uniqueStrings(extensionPaths);
+}
+
+export function buildSubagentArgs(invocation: SubagentInvocation): string[] {
+	const args = [
+		"--mode",
+		"json",
+		"-p",
+		"--no-session",
+	] as string[];
+
+	if (!invocation.loadExtensions) args.push("--no-extensions");
+	for (const extension of uniqueStrings(invocation.extensions ?? [])) {
+		args.push("-e", resolve(extension));
+	}
+
+	args.push("--no-skills", "--no-prompt-templates", "--no-themes");
+
+	if (invocation.model) args.push("--model", invocation.model);
+	if (invocation.thinkingLevel) args.push("--thinking", invocation.thinkingLevel);
+	if (invocation.tools && invocation.tools.length > 0) {
+		args.push("--tools", invocation.tools.join(","));
+	}
+	if (invocation.systemPrompt.trim()) {
+		args.push("--append-system-prompt", invocation.systemPrompt.trim());
+	}
+	for (const file of invocation.files ?? []) {
+		args.push(`@${resolve(file)}`);
+	}
+	args.push(invocation.prompt);
+	return args;
 }
 
 function isMessageArray(value: unknown): value is Message[] {
@@ -133,30 +216,7 @@ export function addSubagentUsageTotals(total: SubagentUsageTotals, delta: Subage
 }
 
 export async function runSubagent(invocation: SubagentInvocation): Promise<SubagentRunResult> {
-	const args = [
-		"--mode",
-		"json",
-		"-p",
-		"--no-session",
-		"--no-extensions",
-		"--no-skills",
-		"--no-prompt-templates",
-		"--no-themes",
-	] as string[];
-
-	if (invocation.model) args.push("--model", invocation.model);
-	if (invocation.thinkingLevel) args.push("--thinking", invocation.thinkingLevel);
-	if (invocation.tools && invocation.tools.length > 0) {
-		args.push("--tools", invocation.tools.join(","));
-	}
-	if (invocation.systemPrompt.trim()) {
-		args.push("--append-system-prompt", invocation.systemPrompt.trim());
-	}
-	for (const file of invocation.files ?? []) {
-		args.push(`@${resolve(file)}`);
-	}
-	args.push(invocation.prompt);
-
+	const args = buildSubagentArgs(invocation);
 	const spawned = getPiInvocation(args);
 
 	return await new Promise<SubagentRunResult>((resolvePromise, rejectPromise) => {
