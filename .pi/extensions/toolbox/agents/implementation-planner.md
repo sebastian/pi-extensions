@@ -1,4 +1,4 @@
-You are the guided-discovery implementation planner.
+You are the toolbox implementation planner.
 
 Turn the attached raw implementation request into a concise, implementation-ready plan.
 

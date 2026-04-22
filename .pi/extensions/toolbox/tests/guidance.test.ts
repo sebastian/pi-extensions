@@ -11,7 +11,7 @@ import {
 } from "../guidance.ts";
 
 test("discoverAncestorDocumentPaths returns existing AGENTS files from root to leaf", async () => {
-	const root = await mkdtemp(join(tmpdir(), "guided-discovery-guidance-"));
+	const root = await mkdtemp(join(tmpdir(), "toolbox-guidance-"));
 	await mkdir(join(root, ".jj"));
 	await mkdir(join(root, "src", "feature"), { recursive: true });
 	await writeFile(join(root, "AGENTS.md"), "root guidance", "utf8");
@@ -22,7 +22,7 @@ test("discoverAncestorDocumentPaths returns existing AGENTS files from root to l
 });
 
 test("discoverRelevantGuidance walks changed-file ancestors up to repo root", async () => {
-	const root = await mkdtemp(join(tmpdir(), "guided-discovery-guidance-"));
+	const root = await mkdtemp(join(tmpdir(), "toolbox-guidance-"));
 	await mkdir(join(root, ".jj"));
 	await mkdir(join(root, "src", "feature"), { recursive: true });
 	await writeFile(join(root, "AGENTS.md"), "root guidance", "utf8");
@@ -40,7 +40,7 @@ test("discoverRelevantGuidance walks changed-file ancestors up to repo root", as
 });
 
 test("discoverRelevantGuidance also handles directory touched paths", async () => {
-	const root = await mkdtemp(join(tmpdir(), "guided-discovery-guidance-"));
+	const root = await mkdtemp(join(tmpdir(), "toolbox-guidance-"));
 	await mkdir(join(root, ".jj"));
 	await mkdir(join(root, "src", "feature"), { recursive: true });
 	await writeFile(join(root, "AGENTS.md"), "root guidance", "utf8");
@@ -58,7 +58,7 @@ test("discoverRelevantGuidance also handles directory touched paths", async () =
 });
 
 test("collectRelevantGuidancePaths deduplicates shared AGENTS files across touched paths", async () => {
-	const root = await mkdtemp(join(tmpdir(), "guided-discovery-guidance-"));
+	const root = await mkdtemp(join(tmpdir(), "toolbox-guidance-"));
 	await mkdir(join(root, ".jj"));
 	await mkdir(join(root, "src", "feature"), { recursive: true });
 	await mkdir(join(root, "tests"), { recursive: true });
@@ -70,7 +70,7 @@ test("collectRelevantGuidancePaths deduplicates shared AGENTS files across touch
 });
 
 test("discoverRelevantGuidance ignores absolute and escaping touched paths", async () => {
-	const root = await mkdtemp(join(tmpdir(), "guided-discovery-guidance-"));
+	const root = await mkdtemp(join(tmpdir(), "toolbox-guidance-"));
 	await mkdir(join(root, ".jj"));
 	await mkdir(join(root, "src", "feature"), { recursive: true });
 	await writeFile(join(root, "AGENTS.md"), "root guidance", "utf8");
@@ -82,8 +82,8 @@ test("discoverRelevantGuidance ignores absolute and escaping touched paths", asy
 });
 
 test("discoverRelevantGuidance ignores touched paths that escape through repo-local symlinks", async () => {
-	const root = await mkdtemp(join(tmpdir(), "guided-discovery-guidance-"));
-	const outside = await mkdtemp(join(tmpdir(), "guided-discovery-guidance-outside-"));
+	const root = await mkdtemp(join(tmpdir(), "toolbox-guidance-"));
+	const outside = await mkdtemp(join(tmpdir(), "toolbox-guidance-outside-"));
 	await mkdir(join(root, ".jj"));
 	await writeFile(join(root, "AGENTS.md"), "root guidance", "utf8");
 	await writeFile(join(outside, "AGENTS.md"), "outside guidance", "utf8");

@@ -1,10 +1,10 @@
-<!-- Generated automatically by guided-discovery on 2026-04-12T13:38:05.510Z -->
+<!-- Generated automatically by toolbox on 2026-04-12T13:38:05.510Z -->
 
 ## Problem
 
 The subagent workspace lifecycle currently has a jj-specific collision/leak risk:
 
-- `.pi/extensions/guided-discovery/workspaces.ts` always creates the checkout at `join(cleanupRoot, "workspace")`
+- `.pi/extensions/toolbox/workspaces.ts` always creates the checkout at `join(cleanupRoot, "workspace")`
 - for `jj workspace add`, the default workspace name is the basename of the destination directory
 - that means every created jj workspace ends up named `workspace`
 - stale failed runs can leave that name behind, and concurrent same-repo runs can collide immediately
@@ -14,10 +14,10 @@ The subagent workspace lifecycle currently has a jj-specific collision/leak risk
 ## What I learned
 
 - Relevant code:
-  - `.pi/extensions/guided-discovery/workspaces.ts`
-  - `.pi/extensions/guided-discovery/implement-workflow.ts`
-  - `.pi/extensions/guided-discovery/tests/workspaces.test.ts`
-  - `.pi/extensions/guided-discovery/README.md`
+  - `.pi/extensions/toolbox/workspaces.ts`
+  - `.pi/extensions/toolbox/implement-workflow.ts`
+  - `.pi/extensions/toolbox/tests/workspaces.test.ts`
+  - `.pi/extensions/toolbox/README.md`
 
 - Current creation flow in `workspaces.ts`:
   - creates a unique temp root via `mkdtemp(...)`
@@ -33,7 +33,7 @@ The subagent workspace lifecycle currently has a jj-specific collision/leak risk
   - that strongly supports your concern: the fixed `workspace` basename is the real collision source, and forgetting by path is not the right contract
 
 - Current lifecycle gaps:
-  - `runGuidedDiscoveryImplementationWorkflow()` creates `runWorkspace` and calls `runWorkspace.refresh()` **before** entering its `try/finally`
+  - `runToolboxImplementationWorkflow()` creates `runWorkspace` and calls `runWorkspace.refresh()` **before** entering its `try/finally`
   - `createChildWorkspace()` creates a managed workspace, then builds a baseline snapshot without its own cleanup guard
   - child workspaces are cleaned in the batch `finally`, which is good once they are fully returned, but not for setup failures before that point
 
@@ -53,8 +53,8 @@ The subagent workspace lifecycle currently has a jj-specific collision/leak risk
 
 Refactor workspace creation so each workspace gets a generated name like:
 
-- `guided-discovery-run-<shortid>`
-- `guided-discovery-phase-1-<shortid>`
+- `toolbox-run-<shortid>`
+- `toolbox-phase-1-<shortid>`
 
 Then use that generated name consistently for:
 
@@ -77,7 +77,7 @@ That fixes both classes of problems you called out:
 
 ## Implementation plan
 
-1. **Change workspace identity in `.pi/extensions/guided-discovery/workspaces.ts`**
+1. **Change workspace identity in `.pi/extensions/toolbox/workspaces.ts`**
    - Add a helper that builds a unique workspace name from:
      - sanitized label
      - short random suffix
@@ -106,12 +106,12 @@ That fixes both classes of problems you called out:
 4. **Make `createChildWorkspace()` failure-safe**
    - If `createWorkspaceSnapshot()` fails after the child workspace is created, clean up that child workspace before rethrowing
 
-5. **Close the top-level workflow leak in `.pi/extensions/guided-discovery/implement-workflow.ts`**
+5. **Close the top-level workflow leak in `.pi/extensions/toolbox/implement-workflow.ts`**
    - Move the top-level run workspace lifecycle under `try/finally`
    - Specifically ensure `runWorkspace.refresh()` is covered by the same cleanup guard as the rest of the workflow
    - Use `await runWorkspace?.cleanup()` in `finally` only after successful creation
 
-6. **Add regression tests in `.pi/extensions/guided-discovery/tests/workspaces.test.ts`**
+6. **Add regression tests in `.pi/extensions/toolbox/tests/workspaces.test.ts`**
    - Verify jj managed workspaces no longer use the literal name `workspace`
    - Verify two same-label workspaces get different names
    - Verify jj cleanup forgets by generated workspace name

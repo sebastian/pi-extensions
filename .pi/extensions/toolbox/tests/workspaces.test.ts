@@ -34,17 +34,17 @@ async function pathExists(path: string): Promise<boolean> {
 }
 
 test("detectWorkspaceRepoKind prefers jj repositories", async () => {
-	const root = await createRepoRoot("guided-discovery-workspaces-");
+	const root = await createRepoRoot("toolbox-workspaces-");
 	assert.equal(detectWorkspaceRepoKind(root), "jj");
 });
 
 test("detectWorkspaceRepoKind falls back to git repositories", async () => {
-	const root = await createRepoRoot("guided-discovery-workspaces-", "git");
+	const root = await createRepoRoot("toolbox-workspaces-", "git");
 	assert.equal(detectWorkspaceRepoKind(root), "git");
 });
 
 test("createManagedWorkspace seeds source checkout changes into a jj workspace and cleans it up", async () => {
-	const root = await createRepoRoot("guided-discovery-jj-workspace-");
+	const root = await createRepoRoot("toolbox-jj-workspace-");
 	const sourceCwd = join(root, "src");
 	await writeFile(join(root, "src", "changed.ts"), "source-change\n", "utf8");
 
@@ -90,7 +90,7 @@ test("createManagedWorkspace seeds source checkout changes into a jj workspace a
 	assert.equal(workspace.sourceCwd, sourceCwd);
 	assert.equal(workspace.sourceRelativeCwd, "src");
 	assert.notEqual(workspace.workspaceName, "workspace");
-	assert.match(workspace.workspaceName, /^guided-discovery-run-[0-9a-f]{8}$/);
+	assert.match(workspace.workspaceName, /^toolbox-run-[0-9a-f]{8}$/);
 	assert.equal(basename(workspace.cwd), workspace.workspaceName);
 	assert.deepEqual(seededChangedFiles, ["src/changed.ts", "src/deleted.ts"]);
 	assert.deepEqual(workspace.seededChangedFiles, seededChangedFiles);
@@ -117,7 +117,7 @@ test("createManagedWorkspace seeds source checkout changes into a jj workspace a
 });
 
 test("reviveManagedWorkspace recreates a cleanup-capable handle from persisted metadata", async () => {
-	const root = await createRepoRoot("guided-discovery-jj-workspace-");
+	const root = await createRepoRoot("toolbox-jj-workspace-");
 	const calls: Array<{ command: string; args: string[]; cwd?: string }> = [];
 	const exec: ExecLike = async (command, args, options) => {
 		calls.push({ command, args, cwd: options?.cwd });
@@ -153,7 +153,7 @@ test("reviveManagedWorkspace recreates a cleanup-capable handle from persisted m
 });
 
 test("createManagedWorkspace gives same-label jj workspaces distinct generated names", async () => {
-	const root = await createRepoRoot("guided-discovery-jj-workspace-");
+	const root = await createRepoRoot("toolbox-jj-workspace-");
 
 	const calls: Array<{ command: string; args: string[]; cwd?: string }> = [];
 	const exec: ExecLike = async (command, args, options) => {
@@ -206,7 +206,7 @@ test("createManagedWorkspace gives same-label jj workspaces distinct generated n
 });
 
 test("createManagedWorkspace bounds cleanup-root names for long labels", async () => {
-	const root = await createRepoRoot("guided-discovery-jj-workspace-");
+	const root = await createRepoRoot("toolbox-jj-workspace-");
 	const longLabel = `phase-${"very-long-segment-".repeat(40)}`;
 
 	const exec: ExecLike = async (command, args, options) => {
@@ -240,7 +240,7 @@ test("createManagedWorkspace bounds cleanup-root names for long labels", async (
 });
 
 test("createManagedWorkspace does not forget a jj workspace when add fails before registration", async () => {
-	const root = await createRepoRoot("guided-discovery-jj-workspace-");
+	const root = await createRepoRoot("toolbox-jj-workspace-");
 
 	const calls: Array<{ command: string; args: string[]; cwd?: string }> = [];
 	let workspacePath = "";
@@ -274,7 +274,7 @@ test("createManagedWorkspace does not forget a jj workspace when add fails befor
 });
 
 test("createManagedWorkspace forgets a registered jj workspace when jj new fails", async () => {
-	const root = await createRepoRoot("guided-discovery-jj-workspace-");
+	const root = await createRepoRoot("toolbox-jj-workspace-");
 
 	const calls: Array<{ command: string; args: string[]; cwd?: string }> = [];
 	let workspacePath = "";
@@ -315,10 +315,10 @@ test("createManagedWorkspace forgets a registered jj workspace when jj new fails
 });
 
 test("createManagedWorkspace cleans up a jj workspace when setup fails after creation", async () => {
-	const root = await createRepoRoot("guided-discovery-jj-workspace-");
+	const root = await createRepoRoot("toolbox-jj-workspace-");
 	const sourceCwd = join(root, "src");
 	await writeFile(join(sourceCwd, "changed.ts"), "source-change\n", "utf8");
-	const outside = await mkdtemp(join(tmpdir(), "guided-discovery-outside-"));
+	const outside = await mkdtemp(join(tmpdir(), "toolbox-outside-"));
 
 	const calls: Array<{ command: string; args: string[]; cwd?: string }> = [];
 	let workspacePath = "";
@@ -363,7 +363,7 @@ test("createManagedWorkspace cleans up a jj workspace when setup fails after cre
 });
 
 test("createManagedWorkspace seeds source checkout changes into a git worktree and cleans it up", async () => {
-	const root = await createRepoRoot("guided-discovery-git-workspace-", "git");
+	const root = await createRepoRoot("toolbox-git-workspace-", "git");
 	await writeFile(join(root, "src", "changed.ts"), "source-change\n", "utf8");
 	await writeFile(join(root, "src", "new.ts"), "new-file\n", "utf8");
 
@@ -424,7 +424,7 @@ test("createManagedWorkspace seeds source checkout changes into a git worktree a
 });
 
 test("child workspace edits stay isolated until integration", async () => {
-	const root = await createRepoRoot("guided-discovery-child-isolation-");
+	const root = await createRepoRoot("toolbox-child-isolation-");
 	await writeFile(join(root, "src", "isolated.ts"), "source-change\n", "utf8");
 
 	const exec: ExecLike = async (command, args, options) => {
@@ -459,7 +459,7 @@ test("child workspace edits stay isolated until integration", async () => {
 });
 
 test("createChildWorkspace baseline includes seeded changes outside the touched paths", async () => {
-	const root = await createRepoRoot("guided-discovery-child-workspace-");
+	const root = await createRepoRoot("toolbox-child-workspace-");
 	await writeFile(join(root, "package.json"), '{"name":"changed"}\n', "utf8");
 
 	const exec: ExecLike = async (command, args, options) => {
@@ -495,9 +495,9 @@ test("createChildWorkspace baseline includes seeded changes outside the touched 
 });
 
 test("createChildWorkspace cleans up its jj workspace when baseline snapshot creation fails", async () => {
-	const root = await createRepoRoot("guided-discovery-child-workspace-");
+	const root = await createRepoRoot("toolbox-child-workspace-");
 	await writeFile(join(root, "src", "changed.ts"), "source-change\n", "utf8");
-	const outside = await mkdtemp(join(tmpdir(), "guided-discovery-outside-"));
+	const outside = await mkdtemp(join(tmpdir(), "toolbox-outside-"));
 
 	const calls: Array<{ command: string; args: string[]; cwd?: string }> = [];
 	let workspacePath = "";
@@ -547,7 +547,7 @@ test("createChildWorkspace cleans up its jj workspace when baseline snapshot cre
 });
 
 test("createWorkspaceSnapshot ignores escaping touched paths", async () => {
-	const root = await createRepoRoot("guided-discovery-workspaces-");
+	const root = await createRepoRoot("toolbox-workspaces-");
 	await writeFile(join(root, "src", "tracked.ts"), "tracked\n", "utf8");
 
 	const snapshot = await createWorkspaceSnapshot({
@@ -560,8 +560,8 @@ test("createWorkspaceSnapshot ignores escaping touched paths", async () => {
 });
 
 test("createWorkspaceSnapshot skips symlinked directories that point outside the workspace", async () => {
-	const root = await createRepoRoot("guided-discovery-workspaces-");
-	const outside = await mkdtemp(join(tmpdir(), "guided-discovery-outside-"));
+	const root = await createRepoRoot("toolbox-workspaces-");
+	const outside = await mkdtemp(join(tmpdir(), "toolbox-outside-"));
 	await writeFile(join(outside, "outside.ts"), "outside\n", "utf8");
 	await symlink(outside, join(root, "linked"), "dir");
 
@@ -575,8 +575,8 @@ test("createWorkspaceSnapshot skips symlinked directories that point outside the
 });
 
 test("captureWorkspaceRevision reads the active git or jj revision", async () => {
-	const jjRoot = await createRepoRoot("guided-discovery-workspaces-");
-	const gitRoot = await createRepoRoot("guided-discovery-workspaces-", "git");
+	const jjRoot = await createRepoRoot("toolbox-workspaces-");
+	const gitRoot = await createRepoRoot("toolbox-workspaces-", "git");
 	const calls: Array<{ command: string; args: string[]; cwd?: string }> = [];
 	const exec: ExecLike = async (command, args, options) => {
 		calls.push({ command, args, cwd: options?.cwd });
@@ -597,8 +597,8 @@ test("captureWorkspaceRevision reads the active git or jj revision", async () =>
 });
 
 test("planWorkspaceIntegration separates non-conflicting and conflicting child changes", async () => {
-	const parentRoot = await createRepoRoot("guided-discovery-parent-");
-	const childRoot = await createRepoRoot("guided-discovery-child-");
+	const parentRoot = await createRepoRoot("toolbox-parent-");
+	const childRoot = await createRepoRoot("toolbox-child-");
 
 	await writeFile(join(parentRoot, "src", "same.ts"), "baseline-same\n", "utf8");
 	await writeFile(join(parentRoot, "src", "safe.ts"), "baseline-safe\n", "utf8");
@@ -648,8 +648,8 @@ test("planWorkspaceIntegration separates non-conflicting and conflicting child c
 });
 
 test("planWorkspaceIntegration allows child edits to initially-clean parent files without a full-tree baseline", async () => {
-	const parentRoot = await createRepoRoot("guided-discovery-parent-");
-	const childRoot = await createRepoRoot("guided-discovery-child-");
+	const parentRoot = await createRepoRoot("toolbox-parent-");
+	const childRoot = await createRepoRoot("toolbox-child-");
 
 	await writeFile(join(parentRoot, "src", "fresh.ts"), "baseline\n", "utf8");
 	await writeFile(join(childRoot, "src", "fresh.ts"), "baseline\n", "utf8");
@@ -683,8 +683,8 @@ test("planWorkspaceIntegration allows child edits to initially-clean parent file
 });
 
 test("integrateWorkspaceChanges syncs only non-conflicting child files", async () => {
-	const parentRoot = await createRepoRoot("guided-discovery-parent-");
-	const childRoot = await createRepoRoot("guided-discovery-child-");
+	const parentRoot = await createRepoRoot("toolbox-parent-");
+	const childRoot = await createRepoRoot("toolbox-child-");
 
 	await writeFile(join(parentRoot, "src", "same.ts"), "baseline-same\n", "utf8");
 	await writeFile(join(parentRoot, "src", "safe.ts"), "baseline-safe\n", "utf8");
@@ -729,8 +729,8 @@ test("integrateWorkspaceChanges syncs only non-conflicting child files", async (
 });
 
 test("integrateWorkspaceChanges can withhold syncing when conflicts remain", async () => {
-	const parentRoot = await createRepoRoot("guided-discovery-parent-");
-	const childRoot = await createRepoRoot("guided-discovery-child-");
+	const parentRoot = await createRepoRoot("toolbox-parent-");
+	const childRoot = await createRepoRoot("toolbox-child-");
 
 	await writeFile(join(parentRoot, "src", "same.ts"), "baseline-same\n", "utf8");
 	await writeFile(join(parentRoot, "src", "safe.ts"), "baseline-safe\n", "utf8");
@@ -773,8 +773,8 @@ test("integrateWorkspaceChanges can withhold syncing when conflicts remain", asy
 });
 
 test("planWorkspaceIntegration treats unexpected edits to existing parent files as conflicts", async () => {
-	const parentRoot = await createRepoRoot("guided-discovery-parent-");
-	const childRoot = await createRepoRoot("guided-discovery-child-");
+	const parentRoot = await createRepoRoot("toolbox-parent-");
+	const childRoot = await createRepoRoot("toolbox-child-");
 
 	await writeFile(join(parentRoot, "package.json"), "baseline\n", "utf8");
 	await writeFile(join(childRoot, "package.json"), "baseline\n", "utf8");

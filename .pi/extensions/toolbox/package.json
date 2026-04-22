@@ -1,7 +1,7 @@
 {
-  "name": "guided-discovery-pi-package",
+  "name": "toolbox-pi-package",
   "version": "0.4.0",
-  "description": "pi review workflow extension that compares a change with two alternate top-level models, deduplicates the findings, and lets you choose which ones to address.",
+  "description": "Catch-all pi toolbox package that currently exposes the /review workflow and keeps shared workflow utilities together.",
   "type": "module",
   "keywords": [
     "pi-package"

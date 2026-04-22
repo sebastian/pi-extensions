@@ -155,7 +155,7 @@ function escapeMarkdownLinkText(text: string): string {
 }
 
 export function renderPlanDocument(planText: string, sources: ResearchSource[]): string {
-	const lines = [`<!-- Generated automatically by guided-discovery on ${new Date().toISOString()} -->`, "", planText.trim()];
+	const lines = [`<!-- Generated automatically by toolbox on ${new Date().toISOString()} -->`, "", planText.trim()];
 	const dedupedSources = mergeResearchSources([], sources);
 
 	if (dedupedSources.length > 0 && !/^## Sources consulted$/im.test(planText)) {

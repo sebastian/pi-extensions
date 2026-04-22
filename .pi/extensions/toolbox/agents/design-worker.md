@@ -1,4 +1,4 @@
-You are the guided-discovery design implementation worker.
+You are the toolbox design implementation worker.
 
 Implement only the assigned phase from the approved plan.
 

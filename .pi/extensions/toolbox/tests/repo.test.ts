@@ -13,7 +13,7 @@ import {
 } from "../repo.ts";
 
 test("findRepoLocation prefers jj over colocated git metadata", async () => {
-	const root = await mkdtemp(join(tmpdir(), "guided-discovery-repo-"));
+	const root = await mkdtemp(join(tmpdir(), "toolbox-repo-"));
 	await mkdir(join(root, ".jj"), { recursive: true });
 	await writeFile(join(root, ".git"), "gitdir: /fake/worktree\n", "utf8");
 	await mkdir(join(root, "src"), { recursive: true });
@@ -22,7 +22,7 @@ test("findRepoLocation prefers jj over colocated git metadata", async () => {
 });
 
 test("detectRepoKind identifies jj repositories from nested paths", async () => {
-	const root = await mkdtemp(join(tmpdir(), "guided-discovery-repo-"));
+	const root = await mkdtemp(join(tmpdir(), "toolbox-repo-"));
 	await mkdir(join(root, ".jj"), { recursive: true });
 	await mkdir(join(root, "src", "nested"), { recursive: true });
 
@@ -49,7 +49,7 @@ test("formatJjRepoMetadata renders a footer-friendly label", () => {
 });
 
 test("readJjRepoMetadata queries the current jj change", async () => {
-	const root = await mkdtemp(join(tmpdir(), "guided-discovery-repo-"));
+	const root = await mkdtemp(join(tmpdir(), "toolbox-repo-"));
 	await mkdir(join(root, ".jj"), { recursive: true });
 
 	const calls: Array<{ command: string; args: string[]; cwd?: string }> = [];
@@ -83,7 +83,7 @@ test("readJjRepoMetadata queries the current jj change", async () => {
 });
 
 test("readJjRepoMetadata returns null outside jj repositories", async () => {
-	const root = await mkdtemp(join(tmpdir(), "guided-discovery-repo-"));
+	const root = await mkdtemp(join(tmpdir(), "toolbox-repo-"));
 	const exec: ExecLike = async () => {
 		throw new Error("should not be called");
 	};

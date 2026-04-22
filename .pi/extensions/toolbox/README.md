@@ -1,8 +1,8 @@
-# Review Workflow Extension
+# Toolbox Extension
 
-> Historical note: this package still lives in `.pi/extensions/guided-discovery/`, but the guided discovery / planning mode has been removed.
+This directory is the catch-all home for my pi extension experiments, shared workflow code, prompts, and tests.
 
-This extension now adds a single high-signal review workflow for pi.
+Right now, the extension manifest exposed to pi registers one main command: `/review`.
 
 ## What it does
 
@@ -40,21 +40,21 @@ This extension now adds a single high-signal review workflow for pi.
 Because this directory contains a `package.json` with a `pi` manifest, you can install it globally with a local path:
 
 ```text
-pi install /absolute/path/to/.pi/extensions/guided-discovery
+pi install /absolute/path/to/.pi/extensions/toolbox
 ```
 
 Or project-locally:
 
 ```text
-pi install -l /absolute/path/to/.pi/extensions/guided-discovery
+pi install -l /absolute/path/to/.pi/extensions/toolbox
 ```
 
 ## Project-local usage
 
-This extension still works as a project-local auto-discovered extension because it lives in:
+This extension is also auto-discovered when it lives at:
 
 ```text
-.pi/extensions/guided-discovery/
+.pi/extensions/toolbox/
 ```
 
 So in this repo you can just run `pi` and then `/reload` if pi was already open.

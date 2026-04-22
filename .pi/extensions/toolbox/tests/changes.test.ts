@@ -38,7 +38,7 @@ test("pathsOverlap is conservative for empty and broad scopes", () => {
 });
 
 test("detectChangedFiles includes untracked git files", async () => {
-	const root = await mkdtemp(join(tmpdir(), "guided-discovery-changes-"));
+	const root = await mkdtemp(join(tmpdir(), "toolbox-changes-"));
 	await mkdir(join(root, ".git"));
 
 	const changed = await detectChangedFiles(root, async (command, args) => {

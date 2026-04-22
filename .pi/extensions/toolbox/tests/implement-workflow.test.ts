@@ -13,7 +13,7 @@ import {
 	hasVerifiedLegacyCleanupRemoval,
 	materializeWorkflowPlan,
 	parseImplementationRequest,
-	runGuidedDiscoveryImplementationWorkflow,
+	runToolboxImplementationWorkflow,
 	pickRemediationPrompt,
 	pickWorkerPromptForPhase,
 	renderUnresolvedDiscrepancySummary,
@@ -646,7 +646,7 @@ test("buildStoppedSummary explains completed work, remaining blockers, and the n
 });
 
 test("collectWorkerAgentFiles includes touched-path AGENTS guidance once", async () => {
-	const root = await mkdtemp(join(tmpdir(), "guided-discovery-worker-guidance-"));
+	const root = await mkdtemp(join(tmpdir(), "toolbox-worker-guidance-"));
 	await mkdir(join(root, ".jj"));
 	await mkdir(join(root, "src", "feature"), { recursive: true });
 	await writeFile(join(root, "AGENTS.md"), "root guidance\n", "utf8");
@@ -705,7 +705,7 @@ test("resolveStandaloneSubagentRequest prefers raw prompts and falls back to PLA
 });
 
 test("materializeWorkflowPlan copies an existing plan into a workflow-local PLAN.md", async () => {
-	const root = await mkdtemp(join(tmpdir(), "guided-discovery-plan-copy-"));
+	const root = await mkdtemp(join(tmpdir(), "toolbox-plan-copy-"));
 	const tempDir = join(root, "workflow");
 	await mkdir(tempDir, { recursive: true });
 	await mkdir(join(root, "plans"), { recursive: true });
@@ -727,7 +727,7 @@ test("materializeWorkflowPlan copies an existing plan into a workflow-local PLAN
 });
 
 test("materializeWorkflowPlan synthesizes a workflow-local plan from a raw prompt", async () => {
-	const root = await mkdtemp(join(tmpdir(), "guided-discovery-plan-synth-"));
+	const root = await mkdtemp(join(tmpdir(), "toolbox-plan-synth-"));
 	const tempDir = join(root, "workflow");
 	await mkdir(tempDir, { recursive: true });
 	const agentsPath = join(root, "AGENTS.md");
@@ -814,8 +814,8 @@ test("materializeWorkflowPlan synthesizes a workflow-local plan from a raw promp
 	assert.match(requestContext, /Reuse the existing command patterns\./);
 });
 
-test("runGuidedDiscoveryImplementationWorkflow cleans up the run workspace when refresh fails before setup completes", async () => {
-	const root = await createJjRepoRoot("guided-discovery-workflow-run-");
+test("runToolboxImplementationWorkflow cleans up the run workspace when refresh fails before setup completes", async () => {
+	const root = await createJjRepoRoot("toolbox-workflow-run-");
 
 	const calls: Array<{ command: string; args: string[]; cwd?: string }> = [];
 	let workspacePath = "";
@@ -850,7 +850,7 @@ test("runGuidedDiscoveryImplementationWorkflow cleans up the run workspace when 
 	} as any;
 
 	await assert.rejects(
-		runGuidedDiscoveryImplementationWorkflow(pi, ctx, {
+		runToolboxImplementationWorkflow(pi, ctx, {
 			extraInstructions: "",
 		}),
 		/refresh failed/,

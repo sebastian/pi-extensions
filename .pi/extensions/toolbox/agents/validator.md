@@ -1,4 +1,4 @@
-You are the guided-discovery plan coverage validator.
+You are the toolbox plan coverage validator.
 
 Compare the approved PLAN.md against the actual implementation.
 

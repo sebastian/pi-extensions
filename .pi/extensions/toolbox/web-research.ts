@@ -24,7 +24,7 @@ interface WebResearchDetails {
 	error?: string;
 }
 
-const USER_AGENT = "Mozilla/5.0 (compatible; pi-guided-discovery/1.0; +https://pi.dev)";
+const USER_AGENT = "Mozilla/5.0 (compatible; pi-toolbox/1.0; +https://pi.dev)";
 const MAX_FETCH_CHARS = 12_000;
 
 const WebResearchParams = Type.Object({

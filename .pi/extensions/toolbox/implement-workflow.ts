@@ -4723,7 +4723,7 @@ async function runQualitySuite(options: {
 	throw new Error(`Quality suite exhausted ${QUALITY_SUITE_MAX_ROUNDS + QUALITY_SUITE_MAX_EXTRA_ROUNDS + manualContinueBudget} round(s).`);
 }
 
-export async function runGuidedDiscoveryImplementationWorkflow(
+export async function runToolboxImplementationWorkflow(
 	pi: ExtensionAPI,
 	ctx: ExtensionContext,
 	options: WorkflowOptions,

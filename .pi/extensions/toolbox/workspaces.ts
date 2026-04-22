@@ -77,12 +77,12 @@ function createWorkspaceLabelSegment(label: string, maxLength: number): string {
 function createWorkspaceName(label: string): string {
 	const sanitizedLabel = createWorkspaceLabelSegment(label, WORKSPACE_LABEL_MAX_LENGTH);
 	const suffix = randomBytes(4).toString("hex");
-	return `guided-discovery-${sanitizedLabel}-${suffix}`;
+	return `toolbox-${sanitizedLabel}-${suffix}`;
 }
 
 function createCleanupRootPrefix(label: string): string {
 	const sanitizedLabel = createWorkspaceLabelSegment(label, CLEANUP_ROOT_LABEL_MAX_LENGTH);
-	return join(tmpdir(), `guided-discovery-${sanitizedLabel}-`);
+	return join(tmpdir(), `toolbox-${sanitizedLabel}-`);
 }
 
 function normalizeWorkspaceRelativeDirectory(repoRoot: string, cwd: string): string {
