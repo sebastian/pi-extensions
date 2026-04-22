@@ -10,9 +10,20 @@ import {
 } from "./changes.ts";
 import { discoverRelevantGuidance } from "./guidance.ts";
 import { resolveReviewModels } from "./models.ts";
+import {
+	appendBoundedReviewText,
+	compactReviewText,
+	createEmptyReviewUsageTotals,
+	formatReviewProgressLines,
+	formatReviewUsageSummary,
+	summarizeReviewTool,
+	type ReviewModelProgress,
+	type ReviewProgressSnapshot,
+	addReviewUsageTotals,
+} from "./review-progress.ts";
 import { detectRepoKind, findRepoLocation, findRepoRootOrSelf } from "./repo.ts";
 import { type CheckerFinding, parseCheckerReport } from "./structured-output.ts";
-import { runSubagent } from "./subagent-runner.ts";
+import { runSubagent, type SubagentEvent, type SubagentUsageTotals } from "./subagent-runner.ts";
 
 const REVIEW_STATUS_KEY = "guided-review";
 const REVIEW_WIDGET_KEY = "guided-review";
@@ -89,6 +100,7 @@ interface ModelReviewRun {
 	model: string;
 	report?: ReturnType<typeof parseCheckerReport>;
 	error?: string;
+	usage: SubagentUsageTotals;
 }
 
 function modelRef(model: { provider: string; id: string } | null | undefined): string | undefined {
@@ -255,8 +267,9 @@ function buildReviewSummary(options: {
 	];
 
 	for (const run of options.runs) {
-		if (run.error) lines.push(`- ${run.model}: error - ${run.error}`);
-		else lines.push(`- ${run.model}: ${run.report?.findings.length ?? 0} finding(s) • ${run.report?.overallAssessment || "completed"}`);
+		const usage = formatReviewUsageSummary(run.usage);
+		if (run.error) lines.push(`- ${run.model}: error - ${run.error}${usage ? ` • ${usage}` : ""}`);
+		else lines.push(`- ${run.model}: ${run.report?.findings.length ?? 0} finding(s) • ${run.report?.overallAssessment || "completed"}${usage ? ` • ${usage}` : ""}`);
 	}
 
 	lines.push("", `## Deduplicated findings (${options.findings.length})`, "");
@@ -487,10 +500,137 @@ async function prepareReviewTarget(exec: ExecLike, cwd: string, args: string): P
 	return await prepareSpecifiedReviewTarget(exec, cwd, revision);
 }
 
+class ReviewProgressTracker {
+	private renderTimer: ReturnType<typeof setTimeout> | undefined;
+	private lastRenderAt = 0;
+	private readonly ctx: ExtensionContext;
+	private readonly snapshot: ReviewProgressSnapshot;
+
+	constructor(ctx: ExtensionContext, snapshot: ReviewProgressSnapshot) {
+		this.ctx = ctx;
+		this.snapshot = snapshot;
+		this.renderNow();
+	}
+
+	markRunning(model: string): void {
+		this.updateModel(model, (entry) => {
+			entry.state = "running";
+			entry.latestActivity = "starting reviewer";
+		});
+	}
+
+	handleEvent(model: string, event: SubagentEvent): void {
+		switch (event.type) {
+			case "tool": {
+				const tool = summarizeReviewTool(event.toolName, event.args) ?? event.toolName ?? "tool";
+				this.updateModel(model, (entry) => {
+					entry.currentTool = tool;
+					entry.latestActivity = `inspecting ${tool}`;
+				});
+				break;
+			}
+			case "thinking": {
+				this.updateModel(model, (entry) => {
+					entry.latestActivity = entry.currentTool
+						? `reasoning about ${entry.currentTool}`
+						: entry.latestOutput
+							? "reasoning about the latest evidence"
+							: "analyzing the change";
+				});
+				break;
+			}
+			case "assistant": {
+				if (!event.message?.trim()) break;
+				this.updateModel(model, (entry) => {
+					entry.latestOutput = appendBoundedReviewText(entry.latestOutput, event.message ?? "");
+					entry.latestActivity = "updating visible output";
+				});
+				break;
+			}
+			case "status": {
+				if (!event.message?.trim()) break;
+				this.updateModel(model, (entry) => {
+					entry.latestOutput = event.message;
+					entry.latestActivity = "finalizing review output";
+				});
+				break;
+			}
+		}
+	}
+
+	addUsage(model: string, usage: SubagentUsageTotals): void {
+		this.updateModel(model, (entry) => {
+			entry.usage = addReviewUsageTotals(entry.usage, usage);
+		});
+	}
+
+	finish(run: ModelReviewRun): void {
+		this.updateModel(run.model, (entry) => {
+			entry.usage = run.usage;
+			if (run.error) {
+				entry.state = "error";
+				entry.error = run.error;
+				entry.latestActivity = `failed: ${compactReviewText(run.error, 90)}`;
+				return;
+			}
+			entry.state = "done";
+			entry.findings = run.report?.findings.length ?? 0;
+			entry.overallAssessment = run.report?.overallAssessment || "completed";
+			entry.latestActivity = run.report?.overallAssessment || `completed with ${entry.findings} finding(s)`;
+			entry.latestOutput = run.report?.overallAssessment || entry.latestOutput;
+		});
+	}
+
+	dispose(): void {
+		if (this.renderTimer) clearTimeout(this.renderTimer);
+		this.renderTimer = undefined;
+	}
+
+	private getModel(model: string): ReviewModelProgress {
+		const entry = this.snapshot.models.find((candidate) => candidate.model === model);
+		if (!entry) throw new Error(`Unknown review model: ${model}`);
+		return entry;
+	}
+
+	private updateModel(model: string, mutator: (entry: ReviewModelProgress) => void): void {
+		mutator(this.getModel(model));
+		this.scheduleRender();
+	}
+
+	private scheduleRender(): void {
+		if (!this.ctx.hasUI) return;
+		const now = Date.now();
+		const remaining = Math.max(0, 120 - (now - this.lastRenderAt));
+		if (this.renderTimer) return;
+		this.renderTimer = setTimeout(() => {
+			this.renderTimer = undefined;
+			this.renderNow();
+		}, remaining);
+	}
+
+	private renderNow(): void {
+		if (!this.ctx.hasUI) return;
+		if (this.renderTimer) {
+			clearTimeout(this.renderTimer);
+			this.renderTimer = undefined;
+		}
+		this.lastRenderAt = Date.now();
+		const completed = this.snapshot.models.filter((model) => model.state === "done" || model.state === "error").length;
+		const total = this.snapshot.models.length;
+		this.ctx.ui.setStatus(
+			REVIEW_STATUS_KEY,
+			this.ctx.ui.theme.fg("accent", `🔎 review ${completed}/${total}`),
+		);
+		this.ctx.ui.setWidget(REVIEW_WIDGET_KEY, [this.ctx.ui.theme.fg("accent", "Cross-model review"), ...formatReviewProgressLines(this.snapshot)]);
+	}
+}
+
 async function runModelReview(options: {
 	target: ReviewTarget;
 	model: string;
 	thinkingLevel?: string;
+	onEvent?: (event: SubagentEvent) => void;
+	onUsage?: (usage: SubagentUsageTotals) => void;
 }): Promise<ModelReviewRun> {
 	try {
 		const result = await runSubagent({
@@ -502,17 +642,21 @@ async function runModelReview(options: {
 			tools: REVIEW_TOOLS,
 			model: options.model,
 			thinkingLevel: options.thinkingLevel,
+			onEvent: options.onEvent,
+			onUsage: options.onUsage,
 		});
 		if (result.exitCode !== 0 && !result.assistantText.trim()) {
 			return {
 				model: options.model,
+				usage: result.usage,
 				error: result.errorMessage || result.stderr.trim() || `Review process exited with code ${result.exitCode}`,
 			};
 		}
-		return { model: options.model, report: parseCheckerReport(result.assistantText) };
+		return { model: options.model, report: parseCheckerReport(result.assistantText), usage: result.usage };
 	} catch (error) {
 		return {
 			model: options.model,
+			usage: createEmptyReviewUsageTotals(),
 			error: error instanceof Error ? error.message : String(error),
 		};
 	}
@@ -545,12 +689,6 @@ async function chooseFindingsToAddress(
 	return selected;
 }
 
-function setRunningReviewUi(ctx: ExtensionContext, message: string): void {
-	if (!ctx.hasUI) return;
-	ctx.ui.setStatus(REVIEW_STATUS_KEY, ctx.ui.theme.fg("accent", "🔎 review"));
-	ctx.ui.setWidget(REVIEW_WIDGET_KEY, [ctx.ui.theme.fg("accent", "Cross-model review"), ctx.ui.theme.fg("dim", message)]);
-}
-
 function clearReviewUi(ctx: ExtensionContext): void {
 	if (!ctx.hasUI) return;
 	ctx.ui.setStatus(REVIEW_STATUS_KEY, undefined);
@@ -577,23 +715,37 @@ export default function registerReviewCommand(pi: ExtensionAPI): void {
 			}
 
 			let target: ReviewTarget | null = null;
+			let progressTracker: ReviewProgressTracker | null = null;
 			try {
 				target = await prepareReviewTarget(exec, ctx.cwd, args);
-				setRunningReviewUi(
-					ctx,
-					`Reviewing ${target.label} with ${modelPlan.reviewers.join(", ")} against ${modelPlan.implementation ?? modelRef(ctx.model) ?? "the current implementation model"}.`,
-				);
+				progressTracker = new ReviewProgressTracker(ctx, {
+					targetLabel: target.label,
+					implementationModel: modelPlan.implementation ?? modelRef(ctx.model),
+					reviewerModels: modelPlan.reviewers,
+					startedAt: Date.now(),
+					models: modelPlan.reviewers.map((model) => ({
+						model,
+						state: "queued",
+						latestActivity: "queued",
+						usage: createEmptyReviewUsageTotals(),
+					})),
+				});
 				if (ctx.hasUI) ctx.ui.notify(`Running review for ${target.label}`, "info");
 
 				const thinkingLevel = pi.getThinkingLevel() || undefined;
 				const runs = await Promise.all(
-					modelPlan.reviewers.map((model) =>
-						runModelReview({
+					modelPlan.reviewers.map(async (model) => {
+						progressTracker?.markRunning(model);
+						const run = await runModelReview({
 							target,
 							model,
 							thinkingLevel,
-						}),
-					),
+							onEvent: (event) => progressTracker?.handleEvent(model, event),
+							onUsage: (usage) => progressTracker?.addUsage(model, usage),
+						});
+						progressTracker?.finish(run);
+						return run;
+					}),
 				);
 
 				const findings = deduplicateReviewFindings(
@@ -643,6 +795,7 @@ export default function registerReviewCommand(pi: ExtensionAPI): void {
 				if (ctx.hasUI) ctx.ui.notify(`Review failed: ${message}`, "error");
 				else console.error(`Review failed: ${message}`);
 			} finally {
+				progressTracker?.dispose();
 				clearReviewUi(ctx);
 				await target?.cleanup?.().catch(() => {});
 			}

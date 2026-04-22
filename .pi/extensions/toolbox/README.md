@@ -12,6 +12,7 @@ Right now, the extension manifest exposed to pi registers one main command: `/re
 - runs the two other strongest available top-level models as reviewers
 - asks those reviewer models for structured PR-style findings
 - deduplicates overlapping findings while preserving which model reported what
+- shows a live per-model review widget while the reviewers run, including current state, safe reasoning/activity summaries, latest visible output, and usage
 - shows a review summary in the conversation
 - lets you choose which findings should be addressed now
 - sends only the selected findings back into the main session for implementation

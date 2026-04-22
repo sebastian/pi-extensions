@@ -17,7 +17,7 @@ export interface SubagentInvocation {
 }
 
 export interface SubagentEvent {
-	type: "tool" | "assistant" | "status";
+	type: "tool" | "assistant" | "thinking" | "status";
 	message?: string;
 	toolName?: string;
 	args?: unknown;
@@ -90,7 +90,19 @@ function parseEventLine(line: string): Record<string, unknown> | null {
 	}
 }
 
-function emptySubagentUsageTotals(): SubagentUsageTotals {
+function getAssistantUpdateText(event: Record<string, unknown>): string | undefined {
+	const assistantMessageEvent = event.assistantMessageEvent;
+	if (!assistantMessageEvent || !isObject(assistantMessageEvent)) return undefined;
+	if (typeof assistantMessageEvent.delta === "string") return assistantMessageEvent.delta;
+	const partial = assistantMessageEvent.partial;
+	if (partial && isObject(partial)) {
+		const text = getAssistantText([partial as Message]);
+		if (text) return text;
+	}
+	return undefined;
+}
+
+export function emptySubagentUsageTotals(): SubagentUsageTotals {
 	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: 0, turns: 0 };
 }
 
@@ -108,7 +120,7 @@ function extractAssistantUsage(message: Message): SubagentUsageTotals {
 	};
 }
 
-function addSubagentUsageTotals(total: SubagentUsageTotals, delta: SubagentUsageTotals): SubagentUsageTotals {
+export function addSubagentUsageTotals(total: SubagentUsageTotals, delta: SubagentUsageTotals): SubagentUsageTotals {
 	return {
 		input: total.input + delta.input,
 		output: total.output + delta.output,
@@ -172,6 +184,19 @@ export async function runSubagent(invocation: SubagentInvocation): Promise<Subag
 						toolName: typeof event.toolName === "string" ? event.toolName : undefined,
 						args: event.args,
 					});
+					break;
+				}
+				case "message_update": {
+					const assistantMessageEvent = event.assistantMessageEvent;
+					if (!assistantMessageEvent || !isObject(assistantMessageEvent) || typeof assistantMessageEvent.type !== "string") break;
+					if (assistantMessageEvent.type.startsWith("thinking_")) {
+						invocation.onEvent?.({ type: "thinking" });
+						break;
+					}
+					if (assistantMessageEvent.type.startsWith("text_")) {
+						const assistantText = getAssistantUpdateText(event);
+						if (assistantText) invocation.onEvent?.({ type: "assistant", message: assistantText });
+					}
 					break;
 				}
 				case "message_end": {

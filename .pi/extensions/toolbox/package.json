@@ -20,6 +20,7 @@
     "questionnaire-model.ts",
     "questionnaire.ts",
     "repo.ts",
+    "review-progress.ts",
     "review-workflow.ts",
     "structured-output.ts",
     "subagent-runner.ts",
