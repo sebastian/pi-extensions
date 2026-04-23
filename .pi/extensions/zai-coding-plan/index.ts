@@ -106,6 +106,7 @@ export const ZAI_CODING_PLAN_MODELS = [
 ] as const;
 
 interface UsageTrackerState {
+	active: boolean;
 	activeKey: string | null;
 	snapshot: ReturnType<typeof parseZaiQuotaSnapshot> | null;
 	loading: boolean;
@@ -331,6 +332,7 @@ function buildInlineFooter(
 
 function createUsageTracker(syncInlineFooter: (ctx: ExtensionContext) => void) {
 	const state: UsageTrackerState = {
+		active: false,
 		activeKey: null,
 		snapshot: null,
 		loading: false,
@@ -370,7 +372,7 @@ function createUsageTracker(syncInlineFooter: (ctx: ExtensionContext) => void) {
 	}
 
 	function syncStatus(ctx: ExtensionContext): void {
-		if (!ctx.hasUI) return;
+		if (!state.active || !ctx.hasUI) return;
 		if (!ctx.model || !isZaiUsageModel(ctx.model)) {
 			resetUsageState(null);
 			clearStatus(ctx);
@@ -401,6 +403,7 @@ function createUsageTracker(syncInlineFooter: (ctx: ExtensionContext) => void) {
 	}
 
 	async function refresh(ctx: ExtensionContext, options?: { force?: boolean }): Promise<void> {
+		if (!state.active) return;
 		if (!ctx.model || !isZaiUsageModel(ctx.model)) {
 			syncStatus(ctx);
 			return;
@@ -486,6 +489,7 @@ function createUsageTracker(syncInlineFooter: (ctx: ExtensionContext) => void) {
 		if (state.deferredHandle) clearTimeout(state.deferredHandle);
 		state.deferredHandle = setTimeout(() => {
 			state.deferredHandle = null;
+			if (!state.active) return;
 			void refresh(ctx, { force });
 		}, delayMs);
 		state.deferredHandle.unref?.();
@@ -493,6 +497,7 @@ function createUsageTracker(syncInlineFooter: (ctx: ExtensionContext) => void) {
 
 	function start(ctx: ExtensionContext): void {
 		clearTimers();
+		state.active = true;
 		syncStatus(ctx);
 		syncInlineFooter(ctx);
 		if (!ctx.hasUI) return;
@@ -506,6 +511,7 @@ function createUsageTracker(syncInlineFooter: (ctx: ExtensionContext) => void) {
 	}
 
 	function stop(ctx: ExtensionContext): void {
+		state.active = false;
 		clearTimers();
 		resetUsageState(null);
 		clearStatus(ctx);

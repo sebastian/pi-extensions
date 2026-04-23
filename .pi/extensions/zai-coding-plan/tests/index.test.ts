@@ -207,6 +207,69 @@ test("usage tracker uses footer integration and no widget row", async () => {
 	assert.equal(typeof footers[0], "function");
 });
 
+test("usage tracker does not touch stale session ui after shutdown", async () => {
+	const { pi, getHandlers } = createPiStub();
+	zaiCodingPlan(pi as never);
+
+	const sessionStartHandlers = getHandlers<(event: unknown, ctx: any) => Promise<void>>("session_start");
+	const sessionShutdownHandlers = getHandlers<(event: unknown, ctx: any) => Promise<void>>("session_shutdown");
+	assert.equal(sessionStartHandlers.length, 1);
+	assert.equal(sessionShutdownHandlers.length, 1);
+
+	let resolveAuth:
+		| ((value: { ok: false; error: string }) => void)
+		| undefined;
+	let staleStatusCalls = 0;
+	let stale = false;
+	const ctx = {
+		hasUI: true,
+		model: { provider: ZAI_CODING_PLAN_PROVIDER_ID, id: "glm-5.1", baseUrl: ZAI_CODING_PLAN_BASE_URL, reasoning: true, contextWindow: 131072 },
+		ui: {
+			theme: { fg: (_color: string, text: string) => text, bold: (text: string) => text },
+			setStatus() {
+				if (stale) staleStatusCalls += 1;
+			},
+			setWidget() {},
+			setFooter() {},
+		},
+		getContextUsage() {
+			return { tokens: 1000, contextWindow: 131072, percent: 0.8 };
+		},
+		sessionManager: {
+			getEntries() {
+				return [];
+			},
+			getBranch() {
+				return [];
+			},
+			getCwd() {
+				return "/tmp/project";
+			},
+			getSessionName() {
+				return undefined;
+			},
+		},
+		modelRegistry: {
+			isUsingOAuth() {
+				return false;
+			},
+			getApiKeyAndHeaders() {
+				return new Promise<{ ok: false; error: string }>((resolve) => {
+					resolveAuth = resolve;
+				});
+			},
+		},
+	};
+
+	await sessionStartHandlers[0]({}, ctx);
+	await sessionShutdownHandlers[0]({}, ctx);
+	stale = true;
+	resolveAuth?.({ ok: false, error: "auth not configured" });
+	await new Promise((resolve) => setTimeout(resolve, 0));
+
+	assert.equal(staleStatusCalls, 0);
+});
+
 test("non-z.ai session start does not clear another extension footer", async () => {
 	const { pi, getHandlers } = createPiStub();
 	zaiCodingPlan(pi as never);
