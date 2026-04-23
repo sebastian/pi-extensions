@@ -7,7 +7,8 @@ Right now, the extension manifest exposed to pi registers one main command: `/re
 ## What it does
 
 - adds `/review` to review the current uncommitted change
-- adds `/review <change>` to review a specific jj or git change / revision
+- adds freeform `/review ...` scope and focus parsing, so you can say things like `/review for security`, `/review the two last changes`, or `/review all changes since prod with an extra focus on security`
+- still supports `/review <change>` to review a specific jj or git change / revision
 - treats the current session model as the implementation model
 - runs the two other strongest available top-level models as reviewers
 - asks those reviewer models for structured PR-style findings
@@ -20,6 +21,9 @@ Right now, the extension manifest exposed to pi registers one main command: `/re
 ## Command
 
 - `/review` — review the current uncommitted change
+- `/review for <focus>` — keep the default scope but add extra focus, e.g. `/review for security`
+- `/review <natural-language scope>` — review a broader or alternate scope, e.g. `/review the two last changes`
+- `/review <scope> with an extra focus on <focus>` — combine both, e.g. `/review all changes since prod with an extra focus on security`
 - `/review <change>` — review a specific jj change or git revision
 
 ## Typical flow
@@ -35,6 +39,7 @@ Right now, the extension manifest exposed to pi registers one main command: `/re
 - If there are fewer than two alternate reviewer models available, the command uses as many as it can.
 - For historical jj/git changes, the command reviews a snapshot of that change rather than your current working copy.
 - The review is intentionally bounded toward concrete bugs, regressions, security issues, side effects, and guidance violations.
+- Natural-language scope parsing is intentionally lightweight: it understands common phrasings for recent changes, `since <ref>`, explicit revision/range text, and optional extra-focus clauses.
 
 ## Install globally as a pi package
 

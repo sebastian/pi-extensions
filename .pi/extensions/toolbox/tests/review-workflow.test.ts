@@ -3,7 +3,11 @@ import assert from "node:assert/strict";
 import {
 	buildFindingDecisionPrompt,
 	buildFindingsOverviewPrompt,
+	buildModelReviewPrompt,
+	chooseBestReferenceMatch,
 	deduplicateReviewFindings,
+	parseRecentChangeCount,
+	parseReviewRequest,
 } from "../review-workflow.ts";
 
 test("deduplicateReviewFindings merges overlapping findings from different reviewer models", () => {
@@ -129,4 +133,50 @@ test("review finding prompts include the full finding list and details", () => {
 	assert.match(decisionPrompt, /Reported by: openai-codex\/gpt-5\.3-codex/);
 	assert.match(decisionPrompt, /Combined suggested fix: Quote or avoid the shell entirely\./);
 	assert.match(decisionPrompt, /Address this finding\?/);
+});
+
+test("parseReviewRequest splits optional scope and focus text", () => {
+	assert.deepEqual(parseReviewRequest(""), { rawText: "", scopeText: "", focusText: "" });
+	assert.deepEqual(parseReviewRequest("for security"), { rawText: "for security", scopeText: "", focusText: "security" });
+	assert.deepEqual(parseReviewRequest("the two last changes"), {
+		rawText: "the two last changes",
+		scopeText: "the two last changes",
+		focusText: "",
+	});
+	assert.deepEqual(
+		parseReviewRequest("all changes since the past prod bookmark with an extra focus on security"),
+		{
+			rawText: "all changes since the past prod bookmark with an extra focus on security",
+			scopeText: "all changes since the past prod bookmark",
+			focusText: "security",
+		},
+	);
+});
+
+test("parseRecentChangeCount understands common recent-change phrasings", () => {
+	assert.equal(parseRecentChangeCount("latest change"), 1);
+	assert.equal(parseRecentChangeCount("last 3 commits"), 3);
+	assert.equal(parseRecentChangeCount("the two last changes"), 2);
+	assert.equal(parseRecentChangeCount("all changes since main"), null);
+});
+
+test("chooseBestReferenceMatch favors exact and fuzzy local ref matches", () => {
+	assert.equal(chooseBestReferenceMatch("main", ["origin/main", "main"]), "main");
+	assert.equal(chooseBestReferenceMatch("the past prod bookmark", ["origin/past-prod", "past-prod", "main"]), "past-prod");
+	assert.equal(chooseBestReferenceMatch("missing ref", ["main", "origin/main"]), null);
+});
+
+test("buildModelReviewPrompt includes requested scope and focus instructions", () => {
+	const prompt = buildModelReviewPrompt({
+		label: "changes since past-prod",
+		repoRoot: "/repo",
+		reviewCwd: "/repo",
+		changedFiles: ["src/run.ts"],
+		attachments: [],
+		requestedScope: "all changes since the past prod bookmark",
+		focusText: "security",
+	});
+	assert.match(prompt, /attached diff already reflects this requested scope: all changes since the past prod bookmark/i);
+	assert.match(prompt, /Extra requested review focus: security/i);
+	assert.match(prompt, /Return JSON only\.$/);
 });

@@ -98,14 +98,215 @@ interface ReviewTarget {
 	reviewCwd: string;
 	changedFiles: string[];
 	attachments: string[];
+	requestedScope?: string;
+	focusText?: string;
 	cleanup?: () => Promise<void>;
 }
+
+export interface ReviewRequest {
+	rawText: string;
+	scopeText: string;
+	focusText: string;
+}
+
+type ReviewScopePlan =
+	| {
+			kind: "working-copy";
+			label: string;
+	  }
+	| {
+			kind: "single-revision";
+			revision: string;
+	  }
+	| {
+			kind: "current-range";
+			fromRevision: string;
+			label: string;
+	  }
+	| {
+			kind: "explicit-range";
+			spec: string;
+			toRevision: string;
+			label: string;
+	  };
 
 interface ModelReviewRun {
 	model: string;
 	report?: ReturnType<typeof parseCheckerReport>;
 	error?: string;
 	usage: SubagentUsageTotals;
+}
+
+const REVIEW_FOCUS_PREFIXES = [
+	"with an extra focus on ",
+	"with extra focus on ",
+	"with a focus on ",
+	"with focus on ",
+	"focus on ",
+	"focused on ",
+	"focusing on ",
+	"for ",
+] as const;
+
+const REVIEW_SCOPE_FOCUS_MARKERS = [
+	" with an extra focus on ",
+	" with extra focus on ",
+	" with a focus on ",
+	" with focus on ",
+	" focused on ",
+	" focusing on ",
+] as const;
+
+const REVIEW_NUMBER_WORDS = new Map<string, number>([
+	["a", 1],
+	["an", 1],
+	["one", 1],
+	["two", 2],
+	["three", 3],
+	["four", 4],
+	["five", 5],
+	["six", 6],
+	["seven", 7],
+	["eight", 8],
+	["nine", 9],
+	["ten", 10],
+	["eleven", 11],
+	["twelve", 12],
+]);
+
+const REVIEW_REFERENCE_NOISE = new Set([
+	"a",
+	"an",
+	"the",
+	"bookmark",
+	"bookmarks",
+	"branch",
+	"branches",
+	"tag",
+	"tags",
+	"revision",
+	"revisions",
+	"rev",
+	"commit",
+	"commits",
+	"change",
+	"changes",
+]);
+
+function normalizeWhitespace(text: string): string {
+	return text.replace(/\s+/g, " ").trim();
+}
+
+function stripTrailingPunctuation(text: string): string {
+	return text.trim().replace(/[.,;:!?]+$/g, "").trim();
+}
+
+function stripOuterQuotes(text: string): string {
+	return text.trim().replace(/^[`"']+|[`"']+$/g, "").trim();
+}
+
+function parseCountValue(value: string | undefined): number | null {
+	if (!value) return null;
+	const trimmed = value.trim().toLowerCase();
+	if (!trimmed) return null;
+	if (/^\d+$/.test(trimmed)) return Number.parseInt(trimmed, 10);
+	return REVIEW_NUMBER_WORDS.get(trimmed) ?? null;
+}
+
+export function parseRecentChangeCount(scopeText: string): number | null {
+	const normalized = normalizeWhitespace(scopeText).toLowerCase();
+	if (!normalized) return null;
+
+	const matchers = [
+		/^(?:the\s+)?(?:last|latest|most recent)\s+(changes?|commits?|revisions?)$/i,
+		/^(?:the\s+)?(?:last|latest|most recent)\s+([a-z0-9]+)\s+(changes?|commits?|revisions?)$/i,
+		/^(?:the\s+)?([a-z0-9]+)\s+(?:last|latest|most recent)\s+(changes?|commits?|revisions?)$/i,
+	] as const;
+
+	for (const matcher of matchers) {
+		const match = normalized.match(matcher);
+		if (!match) continue;
+		const count = parseCountValue(match[1]);
+		if (count !== null) return count;
+		if (matcher === matchers[0]) return 1;
+	}
+
+	return null;
+}
+
+function parseSinceReference(scopeText: string): string | null {
+	const normalized = normalizeWhitespace(scopeText);
+	const match =
+		normalized.match(/^(?:all\s+)?(?:changes?|commits?|revisions?)\s+since\s+(.+)$/i) ?? normalized.match(/^since\s+(.+)$/i);
+	return match ? stripTrailingPunctuation(match[1] ?? "") : null;
+}
+
+function parseExplicitRange(scopeText: string): { spec: string; toRevision: string } | null {
+	const normalized = normalizeWhitespace(scopeText);
+	const match = normalized.match(/^(.+?)(::|\.{2,3})(.+)$/);
+	if (!match) return null;
+	const fromRevision = stripTrailingPunctuation(match[1] ?? "");
+	const operator = match[2] ?? "";
+	const toRevision = stripTrailingPunctuation(match[3] ?? "");
+	if (!fromRevision || !toRevision) return null;
+	return { spec: `${fromRevision}${operator}${toRevision}`, toRevision };
+}
+
+function looksLikeReviewScopeText(text: string): boolean {
+	const normalized = normalizeWhitespace(text);
+	if (!normalized) return false;
+	if (parseRecentChangeCount(normalized) !== null) return true;
+	if (parseSinceReference(normalized)) return true;
+	if (parseExplicitRange(normalized)) return true;
+	if (
+		[
+			"uncommitted",
+			"uncommitted changes",
+			"uncommitted code",
+			"current changes",
+			"current change",
+			"working copy",
+			"current working copy",
+		].includes(normalized.toLowerCase())
+	) {
+		return true;
+	}
+	return normalized.split(" ").length <= 4;
+}
+
+export function parseReviewRequest(args: string): ReviewRequest {
+	const normalized = normalizeWhitespace(args);
+	if (!normalized) return { rawText: "", scopeText: "", focusText: "" };
+	const lower = normalized.toLowerCase();
+
+	for (const prefix of REVIEW_FOCUS_PREFIXES) {
+		if (!lower.startsWith(prefix)) continue;
+		return {
+			rawText: normalized,
+			scopeText: "",
+			focusText: stripTrailingPunctuation(normalized.slice(prefix.length)),
+		};
+	}
+
+	for (const marker of REVIEW_SCOPE_FOCUS_MARKERS) {
+		const index = lower.indexOf(marker);
+		if (index <= 0) continue;
+		const scopeText = stripTrailingPunctuation(normalized.slice(0, index));
+		const focusText = stripTrailingPunctuation(normalized.slice(index + marker.length));
+		if (!scopeText || !focusText) continue;
+		return { rawText: normalized, scopeText, focusText };
+	}
+
+	const trailingForMatch = normalized.match(/^(.*?)\s+for\s+(.+)$/i);
+	if (trailingForMatch) {
+		const scopeText = stripTrailingPunctuation(trailingForMatch[1] ?? "");
+		const focusText = stripTrailingPunctuation(trailingForMatch[2] ?? "");
+		if (scopeText && focusText && looksLikeReviewScopeText(scopeText)) {
+			return { rawText: normalized, scopeText, focusText };
+		}
+	}
+
+	return { rawText: normalized, scopeText: stripTrailingPunctuation(normalized), focusText: "" };
 }
 
 function modelRef(model: { provider: string; id: string } | null | undefined): string | undefined {
@@ -279,10 +480,12 @@ function buildReviewSummary(options: {
 		`- Implementation model: ${options.implementationModel ?? "unknown"}`,
 		`- Reviewer models: ${options.reviewerModels.length > 0 ? options.reviewerModels.join(", ") : "none available"}`,
 		`- Changed files: ${options.target.changedFiles.length}`,
-		"",
-		"## Reviewer run status",
-		"",
 	];
+	if (options.target.requestedScope && normalizeText(options.target.requestedScope) !== normalizeText(options.target.label)) {
+		lines.push(`- Requested scope text: ${options.target.requestedScope}`);
+	}
+	if (options.target.focusText) lines.push(`- Extra focus: ${options.target.focusText}`);
+	lines.push("", "## Reviewer run status", "");
 
 	for (const run of options.runs) {
 		const usage = formatReviewUsageSummary(run.usage);
@@ -310,6 +513,9 @@ function buildApplyPrompt(options: {
 	const lines = [
 		`Review target: ${options.target.label}`,
 		`Implementation model: ${options.implementationModel ?? "unknown"}`,
+	];
+	if (options.target.focusText) lines.push(`Review focus: ${options.target.focusText}`);
+	lines.push(
 		"",
 		"A review command already ran two other top-level models against this change and deduplicated the findings.",
 		"Address only the selected findings below.",
@@ -318,13 +524,35 @@ function buildApplyPrompt(options: {
 		"",
 		"Selected review findings:",
 		"",
-	];
+	);
 
 	for (const [index, finding] of options.selectedFindings.entries()) {
 		lines.push(...renderFindingLine(index, finding), "");
 	}
 
 	return lines.join("\n").trim();
+}
+
+function buildReviewRequestDocument(label: string, request: ReviewRequest): string {
+	const lines = ["# Review request", "", `Resolved scope: ${label}`];
+	if (request.scopeText) lines.push(`Requested scope text: ${request.scopeText}`);
+	if (request.focusText) lines.push(`Extra focus: ${request.focusText}`);
+	if (request.rawText) lines.push(`Raw command text: ${request.rawText}`);
+	return lines.join("\n").trim();
+}
+
+export function buildModelReviewPrompt(target: ReviewTarget): string {
+	const lines = [
+		"Review the attached change. Use the diff, changed-file snapshots, and any attached AGENTS.md guidance. Inspect nearby code only if needed.",
+	];
+	if (target.requestedScope) {
+		lines.push(`The attached diff already reflects this requested scope: ${target.requestedScope}.`);
+	}
+	if (target.focusText) {
+		lines.push(`Extra requested review focus: ${target.focusText}. Keep the same high-signal bar and do not force findings that are not well-supported.`);
+	}
+	lines.push("Return JSON only.");
+	return lines.join(" ").trim();
 }
 
 async function writeSnapshotFile(root: string, relativePath: string, content: string): Promise<string> {
@@ -334,13 +562,174 @@ async function writeSnapshotFile(root: string, relativePath: string, content: st
 	return destination;
 }
 
+function normalizeReferenceQuery(text: string): string {
+	const cleaned = normalizeText(stripOuterQuotes(stripTrailingPunctuation(text)));
+	const tokens = cleaned.split(" ").filter((token) => token && !REVIEW_REFERENCE_NOISE.has(token));
+	return tokens.join(" ").trim();
+}
+
+function scoreReferenceCandidate(query: string, candidate: string): number {
+	const rawCandidate = candidate.trim();
+	if (!rawCandidate) return Number.NEGATIVE_INFINITY;
+
+	const rawQuery = stripOuterQuotes(stripTrailingPunctuation(query)).toLowerCase();
+	const candidateTail = rawCandidate.split("/").pop() ?? rawCandidate;
+	const rawCandidateLower = rawCandidate.toLowerCase();
+	const candidateTailLower = candidateTail.toLowerCase();
+	const normalizedQuery = normalizeReferenceQuery(query) || normalizeText(query);
+	const normalizedCandidate = normalizeText(rawCandidate);
+	const normalizedTail = normalizeText(candidateTail);
+	if (!normalizedQuery || !normalizedCandidate) return Number.NEGATIVE_INFINITY;
+
+	let score = 0;
+	if (rawCandidateLower === rawQuery) score = Math.max(score, 1_000);
+	if (candidateTailLower === rawQuery) score = Math.max(score, 960);
+	if (normalizedCandidate === normalizedQuery) score = Math.max(score, 920);
+	if (normalizedTail === normalizedQuery) score = Math.max(score, 900);
+	if (normalizedCandidate.includes(normalizedQuery) || normalizedTail.includes(normalizedQuery)) score = Math.max(score, 820);
+
+	const queryTokens = tokenize(normalizedQuery);
+	const candidateTokens = new Set(tokenize(normalizedCandidate));
+	const overlap = queryTokens.filter((token) => candidateTokens.has(token)).length;
+	if (overlap > 0) {
+		score = Math.max(score, 650 + overlap * 40 - Math.max(0, candidateTokens.size - overlap) * 5);
+	}
+	const similarity = similarityScore(normalizedQuery, normalizedCandidate);
+	if (similarity > 0) score = Math.max(score, Math.round(similarity * 700));
+	if (rawCandidate.includes("/")) score -= 15;
+	if (rawCandidate.startsWith("@")) score -= 10;
+	return score;
+}
+
+export function chooseBestReferenceMatch(query: string, candidates: string[]): string | null {
+	const normalizedQuery = normalizeReferenceQuery(query) || normalizeText(query);
+	if (!normalizedQuery) return null;
+
+	const scored = uniqueStrings(candidates)
+		.map((candidate) => ({ candidate, score: scoreReferenceCandidate(normalizedQuery, candidate) }))
+		.filter((candidate) => Number.isFinite(candidate.score) && candidate.score > 0)
+		.sort(
+			(left, right) =>
+				right.score - left.score || left.candidate.length - right.candidate.length || left.candidate.localeCompare(right.candidate),
+		);
+	const best = scored[0];
+	if (!best) return null;
+	const runnerUp = scored[1];
+	if (runnerUp && runnerUp.score === best.score && runnerUp.candidate !== best.candidate) return null;
+	return best.candidate;
+}
+
+async function canResolveJjRevision(exec: ExecLike, repoRoot: string, revision: string): Promise<boolean> {
+	const result = await exec("jj", ["log", "-r", revision, "--no-graph", "-T", "commit_id.short()"], {
+		cwd: repoRoot,
+		timeout: 30_000,
+	});
+	return result.code === 0 && Boolean(result.stdout.trim());
+}
+
+async function canResolveGitRevision(exec: ExecLike, repoRoot: string, revision: string): Promise<boolean> {
+	const result = await exec("git", ["rev-parse", "--verify", "--quiet", `${revision}^{commit}`], {
+		cwd: repoRoot,
+		timeout: 30_000,
+	});
+	return result.code === 0 && Boolean(result.stdout.trim());
+}
+
+async function listJjReferences(exec: ExecLike, repoRoot: string): Promise<string[]> {
+	const result = await exec("jj", ["bookmark", "list", "-a"], { cwd: repoRoot, timeout: 30_000 });
+	if (result.code !== 0) return [];
+	return uniqueStrings(
+		result.stdout
+			.split(/\r?\n/)
+			.map((line) => line.match(/^\s*([^:\s]+):/)?.[1] ?? "")
+			.filter(Boolean),
+	);
+}
+
+async function listGitReferences(exec: ExecLike, repoRoot: string): Promise<string[]> {
+	const result = await exec(
+		"git",
+		["for-each-ref", "--format=%(refname:short)", "refs/heads", "refs/remotes", "refs/tags"],
+		{ cwd: repoRoot, timeout: 30_000 },
+	);
+	if (result.code !== 0) return ["HEAD"];
+	return uniqueStrings(["HEAD", ...result.stdout.split(/\r?\n/)]);
+}
+
+async function resolveRepoReference(exec: ExecLike, repoRoot: string, repoKind: "jj" | "git", referenceText: string): Promise<string> {
+	const normalized = stripOuterQuotes(stripTrailingPunctuation(referenceText));
+	if (!normalized) throw new Error(`Couldn't resolve review scope reference "${referenceText}".`);
+
+	if (repoKind === "jj") {
+		if (await canResolveJjRevision(exec, repoRoot, normalized)) return normalized;
+		const matchedReference = chooseBestReferenceMatch(normalized, await listJjReferences(exec, repoRoot));
+		if (matchedReference) return matchedReference;
+		throw new Error(`Couldn't resolve review scope reference "${referenceText}" to a jj revision or bookmark.`);
+	}
+
+	if (await canResolveGitRevision(exec, repoRoot, normalized)) return normalized;
+	const matchedReference = chooseBestReferenceMatch(normalized, await listGitReferences(exec, repoRoot));
+	if (matchedReference) return matchedReference;
+	throw new Error(`Couldn't resolve review scope reference "${referenceText}" to a git revision, branch, or tag.`);
+}
+
+async function addRequestAttachment(root: string, attachments: string[], label: string, request: ReviewRequest): Promise<void> {
+	if (!request.rawText && !request.scopeText && !request.focusText) return;
+	attachments.push(await writeSnapshotFile(root, "review-request.md", buildReviewRequestDocument(label, request)));
+}
+
+async function prepareLiveReviewTarget(options: {
+	repoRoot: string;
+	label: string;
+	changedFiles: string[];
+	diffText: string;
+	request: ReviewRequest;
+}): Promise<ReviewTarget> {
+	const tempRoot = await mkdtemp(join(tmpdir(), "guided-review-"));
+	const attachments: string[] = [];
+	attachments.push(await writeSnapshotFile(tempRoot, "review-target.md", `# Review target\n\n${options.label}\n`));
+	attachments.push(await writeSnapshotFile(tempRoot, "review-diff.patch", options.diffText));
+	attachments.push(
+		await writeSnapshotFile(
+			tempRoot,
+			"review-changed-files.md",
+			options.changedFiles.length > 0 ? options.changedFiles.map((file) => `- ${file}`).join("\n") : "No changed files detected.",
+		),
+	);
+	await addRequestAttachment(tempRoot, attachments, options.label, options.request);
+
+	for (const changedFile of options.changedFiles) {
+		const absolutePath = resolve(options.repoRoot, changedFile);
+		if (await pathExists(absolutePath)) attachments.push(absolutePath);
+	}
+
+	const guidance = discoverRelevantGuidance(options.repoRoot, options.changedFiles);
+	for (const document of guidance.documents) {
+		attachments.push(document.path);
+	}
+
+	return {
+		label: options.label,
+		repoRoot: options.repoRoot,
+		reviewCwd: options.repoRoot,
+		changedFiles: options.changedFiles,
+		attachments: uniqueStrings(attachments),
+		requestedScope: options.request.scopeText || undefined,
+		focusText: options.request.focusText || undefined,
+		cleanup: async () => {
+			await rm(tempRoot, { recursive: true, force: true });
+		},
+	};
+}
+
 async function snapshotJjChange(options: {
 	exec: ExecLike;
 	repoRoot: string;
-	revision: string;
+	contentRevision: string;
 	changedFiles: string[];
 	diffText: string;
 	label: string;
+	request: ReviewRequest;
 }): Promise<ReviewTarget> {
 	const snapshotRoot = await mkdtemp(join(tmpdir(), "guided-review-"));
 	const attachments: string[] = [];
@@ -353,10 +742,11 @@ async function snapshotJjChange(options: {
 			options.changedFiles.length > 0 ? options.changedFiles.map((file) => `- ${file}`).join("\n") : "No changed files detected.",
 		),
 	);
+	await addRequestAttachment(snapshotRoot, attachments, options.label, options.request);
 
 	for (const changedFile of options.changedFiles) {
 		try {
-			const contents = await runChecked(options.exec, options.repoRoot, "jj", ["file", "show", "-r", options.revision, changedFile]);
+			const contents = await runChecked(options.exec, options.repoRoot, "jj", ["file", "show", "-r", options.contentRevision, changedFile]);
 			attachments.push(await writeSnapshotFile(snapshotRoot, changedFile, contents));
 		} catch {
 			// Deleted files and binary-ish paths are still represented by the diff.
@@ -373,7 +763,9 @@ async function snapshotJjChange(options: {
 		repoRoot: options.repoRoot,
 		reviewCwd: snapshotRoot,
 		changedFiles: options.changedFiles,
-		attachments,
+		attachments: uniqueStrings(attachments),
+		requestedScope: options.request.scopeText || undefined,
+		focusText: options.request.focusText || undefined,
 		cleanup: async () => {
 			await rm(snapshotRoot, { recursive: true, force: true });
 		},
@@ -383,10 +775,11 @@ async function snapshotJjChange(options: {
 async function snapshotGitChange(options: {
 	exec: ExecLike;
 	repoRoot: string;
-	revision: string;
+	contentRevision: string;
 	changedFiles: string[];
 	diffText: string;
 	label: string;
+	request: ReviewRequest;
 }): Promise<ReviewTarget> {
 	const snapshotRoot = await mkdtemp(join(tmpdir(), "guided-review-"));
 	const attachments: string[] = [];
@@ -399,10 +792,11 @@ async function snapshotGitChange(options: {
 			options.changedFiles.length > 0 ? options.changedFiles.map((file) => `- ${file}`).join("\n") : "No changed files detected.",
 		),
 	);
+	await addRequestAttachment(snapshotRoot, attachments, options.label, options.request);
 
 	for (const changedFile of options.changedFiles) {
 		try {
-			const contents = await runChecked(options.exec, options.repoRoot, "git", ["show", `${options.revision}:${changedFile}`]);
+			const contents = await runChecked(options.exec, options.repoRoot, "git", ["show", `${options.contentRevision}:${changedFile}`]);
 			attachments.push(await writeSnapshotFile(snapshotRoot, changedFile, contents));
 		} catch {
 			// Deleted files and binary-ish paths are still represented by the diff.
@@ -419,14 +813,72 @@ async function snapshotGitChange(options: {
 		repoRoot: options.repoRoot,
 		reviewCwd: snapshotRoot,
 		changedFiles: options.changedFiles,
-		attachments,
+		attachments: uniqueStrings(attachments),
+		requestedScope: options.request.scopeText || undefined,
+		focusText: options.request.focusText || undefined,
 		cleanup: async () => {
 			await rm(snapshotRoot, { recursive: true, force: true });
 		},
 	};
 }
 
-async function prepareCurrentReviewTarget(exec: ExecLike, cwd: string): Promise<ReviewTarget> {
+async function resolveReviewScopePlan(exec: ExecLike, cwd: string, request: ReviewRequest): Promise<ReviewScopePlan> {
+	if (!request.scopeText) return { kind: "working-copy", label: "uncommitted changes" };
+	if (
+		[
+			"uncommitted",
+			"uncommitted changes",
+			"uncommitted code",
+			"current changes",
+			"current change",
+			"working copy",
+			"current working copy",
+		].includes(request.scopeText.toLowerCase())
+	) {
+		return { kind: "working-copy", label: "uncommitted changes" };
+	}
+
+	const repo = findRepoLocation(cwd);
+	if (!repo) throw new Error(`No jj or git repository detected from ${cwd}`);
+
+	const recentChangeCount = parseRecentChangeCount(request.scopeText);
+	if (recentChangeCount !== null && recentChangeCount > 0) {
+		return {
+			kind: "current-range",
+			fromRevision: repo.kind === "jj" ? `@${"-".repeat(recentChangeCount)}` : `HEAD~${recentChangeCount}`,
+			label: recentChangeCount === 1 ? "last change" : `last ${recentChangeCount} changes`,
+		};
+	}
+
+	const sinceReference = parseSinceReference(request.scopeText);
+	if (sinceReference) {
+		const fromRevision = await resolveRepoReference(exec, repo.root, repo.kind, sinceReference);
+		return { kind: "current-range", fromRevision, label: `changes since ${fromRevision}` };
+	}
+
+	const explicitRange = parseExplicitRange(request.scopeText);
+	if (explicitRange) {
+		return {
+			kind: "explicit-range",
+			spec: explicitRange.spec,
+			toRevision: explicitRange.toRevision,
+			label: request.scopeText,
+		};
+	}
+
+	const revision = stripOuterQuotes(stripTrailingPunctuation(request.scopeText));
+	if (!revision) return { kind: "working-copy", label: "uncommitted changes" };
+	if (repo.kind === "jj") {
+		if (!(await canResolveJjRevision(exec, repo.root, revision))) {
+			throw new Error(`Couldn't resolve review scope "${request.scopeText}" to a jj revision or bookmark.`);
+		}
+	} else if (!(await canResolveGitRevision(exec, repo.root, revision))) {
+		throw new Error(`Couldn't resolve review scope "${request.scopeText}" to a git revision, branch, or tag.`);
+	}
+	return { kind: "single-revision", revision };
+}
+
+async function prepareCurrentReviewTarget(exec: ExecLike, cwd: string, request: ReviewRequest): Promise<ReviewTarget> {
 	const repoRoot = findRepoRootOrSelf(cwd);
 	const repoKind = detectRepoKind(cwd);
 	const changedFiles = await detectChangedFiles(cwd, exec);
@@ -434,10 +886,7 @@ async function prepareCurrentReviewTarget(exec: ExecLike, cwd: string): Promise<
 		throw new Error("No uncommitted changes found to review.");
 	}
 
-	const tempRoot = await mkdtemp(join(tmpdir(), "guided-review-"));
-	const attachments: string[] = [];
 	let diffText = "";
-
 	if (repoKind === "jj") {
 		diffText = await runChecked(exec, repoRoot, "jj", ["diff", "--git", "--context", "5"]);
 	} else if (repoKind === "git") {
@@ -446,35 +895,51 @@ async function prepareCurrentReviewTarget(exec: ExecLike, cwd: string): Promise<
 		throw new Error(`Unsupported repository type at ${repoRoot}`);
 	}
 
-	attachments.push(await writeSnapshotFile(tempRoot, "review-target.md", "# Review target\n\nUncommitted changes in the current working copy.\n"));
-	attachments.push(await writeSnapshotFile(tempRoot, "review-diff.patch", diffText));
-	attachments.push(
-		await writeSnapshotFile(tempRoot, "review-changed-files.md", changedFiles.map((file) => `- ${file}`).join("\n")),
-	);
-
-	for (const changedFile of changedFiles) {
-		const absolutePath = resolve(repoRoot, changedFile);
-		if (await pathExists(absolutePath)) attachments.push(absolutePath);
-	}
-
-	const guidance = discoverRelevantGuidance(repoRoot, changedFiles);
-	for (const document of guidance.documents) {
-		attachments.push(document.path);
-	}
-
-	return {
-		label: "uncommitted changes",
+	return await prepareLiveReviewTarget({
 		repoRoot,
-		reviewCwd: repoRoot,
+		label: "uncommitted changes",
 		changedFiles,
-		attachments: uniqueStrings(attachments),
-		cleanup: async () => {
-			await rm(tempRoot, { recursive: true, force: true });
-		},
-	};
+		diffText,
+		request,
+	});
 }
 
-async function prepareSpecifiedReviewTarget(exec: ExecLike, cwd: string, revision: string): Promise<ReviewTarget> {
+async function prepareCurrentRangeReviewTarget(
+	exec: ExecLike,
+	cwd: string,
+	fromRevision: string,
+	label: string,
+	request: ReviewRequest,
+): Promise<ReviewTarget> {
+	const repo = findRepoLocation(cwd);
+	if (!repo) throw new Error(`No jj or git repository detected from ${cwd}`);
+
+	let changedFiles: string[] = [];
+	let diffText = "";
+	if (repo.kind === "jj") {
+		changedFiles = parseGitDiffNameOnly(await runChecked(exec, repo.root, "jj", ["diff", "--from", fromRevision, "--name-only"]));
+		diffText = await runChecked(exec, repo.root, "jj", ["diff", "--from", fromRevision, "--git", "--context", "5"]);
+	} else {
+		changedFiles = parseGitDiffNameOnly(await runChecked(exec, repo.root, "git", ["diff", "--name-only", "--relative", fromRevision]));
+		diffText = await runChecked(exec, repo.root, "git", ["diff", "--relative", "--find-renames", "--patch", "--stat", fromRevision]);
+	}
+	if (changedFiles.length === 0) throw new Error(`${label} has no file changes to review.`);
+
+	return await prepareLiveReviewTarget({
+		repoRoot: repo.root,
+		label,
+		changedFiles,
+		diffText,
+		request,
+	});
+}
+
+async function prepareSpecifiedReviewTarget(
+	exec: ExecLike,
+	cwd: string,
+	revision: string,
+	request: ReviewRequest,
+): Promise<ReviewTarget> {
 	const repo = findRepoLocation(cwd);
 	if (!repo) throw new Error(`No jj or git repository detected from ${cwd}`);
 
@@ -492,7 +957,15 @@ async function prepareSpecifiedReviewTarget(exec: ExecLike, cwd: string, revisio
 				'change_id.short(8) ++ " • " ++ description.first_line()',
 			])
 		).trim() || `change ${revision}`;
-		return await snapshotJjChange({ exec, repoRoot: repo.root, revision, changedFiles, diffText, label });
+		return await snapshotJjChange({
+			exec,
+			repoRoot: repo.root,
+			contentRevision: revision,
+			changedFiles,
+			diffText,
+			label,
+			request,
+		});
 	}
 
 	const changedFiles = parseGitDiffNameOnly(
@@ -509,13 +982,66 @@ async function prepareSpecifiedReviewTarget(exec: ExecLike, cwd: string, revisio
 		revision,
 	]);
 	const label = (await runChecked(exec, repo.root, "git", ["show", "-s", "--format=%h • %s", revision])).trim() || revision;
-	return await snapshotGitChange({ exec, repoRoot: repo.root, revision, changedFiles, diffText, label });
+	return await snapshotGitChange({
+		exec,
+		repoRoot: repo.root,
+		contentRevision: revision,
+		changedFiles,
+		diffText,
+		label,
+		request,
+	});
+}
+
+async function prepareExplicitRangeReviewTarget(
+	exec: ExecLike,
+	cwd: string,
+	spec: string,
+	toRevision: string,
+	label: string,
+	request: ReviewRequest,
+): Promise<ReviewTarget> {
+	const repo = findRepoLocation(cwd);
+	if (!repo) throw new Error(`No jj or git repository detected from ${cwd}`);
+
+	if (repo.kind === "jj") {
+		const changedFiles = parseGitDiffNameOnly(await runChecked(exec, repo.root, "jj", ["diff", "-r", spec, "--name-only"]));
+		if (changedFiles.length === 0) throw new Error(`${label} has no file changes to review.`);
+		const diffText = await runChecked(exec, repo.root, "jj", ["diff", "-r", spec, "--git", "--context", "5"]);
+		return await snapshotJjChange({
+			exec,
+			repoRoot: repo.root,
+			contentRevision: toRevision,
+			changedFiles,
+			diffText,
+			label,
+			request,
+		});
+	}
+
+	const changedFiles = parseGitDiffNameOnly(await runChecked(exec, repo.root, "git", ["diff", "--name-only", "--relative", spec]));
+	if (changedFiles.length === 0) throw new Error(`${label} has no file changes to review.`);
+	const diffText = await runChecked(exec, repo.root, "git", ["diff", "--relative", "--find-renames", "--patch", "--stat", spec]);
+	return await snapshotGitChange({
+		exec,
+		repoRoot: repo.root,
+		contentRevision: toRevision,
+		changedFiles,
+		diffText,
+		label,
+		request,
+	});
 }
 
 async function prepareReviewTarget(exec: ExecLike, cwd: string, args: string): Promise<ReviewTarget> {
-	const revision = args.trim();
-	if (!revision) return await prepareCurrentReviewTarget(exec, cwd);
-	return await prepareSpecifiedReviewTarget(exec, cwd, revision);
+	const request = parseReviewRequest(args);
+	const plan = await resolveReviewScopePlan(exec, cwd, request);
+	if (plan.kind === "working-copy") return await prepareCurrentReviewTarget(exec, cwd, request);
+	if (plan.kind === "single-revision") return await prepareSpecifiedReviewTarget(exec, cwd, plan.revision, request);
+	if (plan.kind === "current-range") {
+		return await prepareCurrentRangeReviewTarget(exec, cwd, plan.fromRevision, plan.label, request);
+	}
+	return await prepareExplicitRangeReviewTarget(exec, cwd, plan.spec, plan.toRevision, plan.label, request);
 }
 
 class ReviewProgressTracker {
@@ -656,8 +1182,7 @@ async function runModelReview(options: {
 		const result = await runSubagent({
 			cwd: options.target.reviewCwd,
 			systemPrompt: REVIEW_SYSTEM_PROMPT,
-			prompt:
-				"Review the attached change. Use the diff, changed-file snapshots, and any attached AGENTS.md guidance. Inspect nearby code only if needed. Return JSON only.",
+			prompt: buildModelReviewPrompt(options.target),
 			files: options.target.attachments,
 			tools: REVIEW_TOOLS,
 			model: options.model,
@@ -715,7 +1240,7 @@ function clearReviewUi(ctx: ExtensionContext): void {
 export default function registerReviewCommand(pi: ExtensionAPI): void {
 	pi.registerCommand("review", {
 		description:
-			"Review uncommitted changes or a specified change with the two other top-level models, deduplicate the findings, and optionally send selected fixes back to the main session",
+			"Review uncommitted changes by default, or accept extra scope/focus text such as specific revisions, recent changes, or security-focused review instructions",
 		handler: async (args, ctx) => {
 			if (!ctx.isIdle()) {
 				if (ctx.hasUI) ctx.ui.notify("Wait until the agent is idle before starting a review.", "warning");
