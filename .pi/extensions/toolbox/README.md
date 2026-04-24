@@ -10,7 +10,7 @@ Right now, the extension manifest exposed to pi registers one main command: `/re
 - adds freeform `/review ...` scope and focus parsing, so you can say things like `/review for security`, `/review the two last changes`, or `/review all changes since prod with an extra focus on security`
 - still supports `/review <change>` to review a specific jj or git change / revision
 - treats the current session model as the implementation model
-- runs the two other strongest available top-level models as reviewers
+- prefers GPT-5.4 at `xhigh` reasoning plus one GLM-5.1 reviewer when they are available and distinct from the current implementation model, falling back to other available top-level models only when needed
 - asks those reviewer models for structured PR-style findings
 - deduplicates overlapping findings while preserving which model reported what
 - shows a live per-model review widget while the reviewers run, including current state, safe reasoning/activity summaries, latest visible output, and usage

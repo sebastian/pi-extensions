@@ -11,12 +11,26 @@ export interface ReviewModelPlan {
 	topLevel: string[];
 }
 
-const PREFERRED_MODEL_ORDER = [
-	"openai-codex/gpt-5.4",
-	"openai-codex/gpt-5.3-codex",
+const GPT_55_MODEL_REF = "openai-codex/gpt-5.5";
+const GPT_54_MODEL_REF = "openai-codex/gpt-5.4";
+const GPT_53_CODEX_MODEL_REF = "openai-codex/gpt-5.3-codex";
+const GLM_51_MODEL_REFS = [
 	"zai-coding-plan/glm-5.1",
 	"huggingface/zai-org/GLM-5.1",
 	"zai/zai-org/GLM-5.1",
+] as const;
+
+const PREFERRED_MODEL_ORDER = [
+	GPT_55_MODEL_REF,
+	GPT_54_MODEL_REF,
+	...GLM_51_MODEL_REFS,
+	GPT_53_CODEX_MODEL_REF,
+] as const;
+const PREFERRED_REVIEWER_MODEL_ORDER = [
+	GPT_54_MODEL_REF,
+	...GLM_51_MODEL_REFS,
+	GPT_55_MODEL_REF,
+	GPT_53_CODEX_MODEL_REF,
 ] as const;
 
 function normalizeRef(ref: string): string {
@@ -40,25 +54,52 @@ function pickFirstAvailable(availableRefs: string[], candidates: string[]): stri
 	return undefined;
 }
 
-function preferredModelIndex(ref: string): number {
+function preferredModelIndex(ref: string, preferredOrder: readonly string[]): number {
 	const normalized = normalizeRef(ref);
-	const index = PREFERRED_MODEL_ORDER.findIndex((candidate) => normalizeRef(candidate) === normalized);
+	const index = preferredOrder.findIndex((candidate) => normalizeRef(candidate) === normalized);
 	return index === -1 ? Number.MAX_SAFE_INTEGER : index;
 }
 
-export function rankModelRefs(availableRefs: string[]): string[] {
+function reviewModelFamily(ref: string): string {
+	const normalized = normalizeRef(ref);
+	if (GLM_51_MODEL_REFS.some((candidate) => normalizeRef(candidate) === normalized)) return "glm-5.1";
+	return normalized;
+}
+
+function pickReviewers(ranked: string[], implementation: string | undefined): string[] {
+	const implementationRef = normalizeRef(implementation ?? "");
+	const usedFamilies = new Set<string>();
+	if (implementation) usedFamilies.add(reviewModelFamily(implementation));
+
+	const reviewers: string[] = [];
+	for (const ref of ranked) {
+		if (normalizeRef(ref) === implementationRef) continue;
+		const family = reviewModelFamily(ref);
+		if (usedFamilies.has(family)) continue;
+		reviewers.push(ref);
+		usedFamilies.add(family);
+		if (reviewers.length === 2) break;
+	}
+	return reviewers;
+}
+
+function rankModelRefsByOrder(availableRefs: string[], preferredOrder: readonly string[]): string[] {
 	return uniqueRefs(availableRefs).sort((left, right) => {
-		const preferredDiff = preferredModelIndex(left) - preferredModelIndex(right);
+		const preferredDiff = preferredModelIndex(left, preferredOrder) - preferredModelIndex(right, preferredOrder);
 		if (preferredDiff !== 0) return preferredDiff;
 		return normalizeRef(left).localeCompare(normalizeRef(right));
 	});
+}
+
+export function rankModelRefs(availableRefs: string[]): string[] {
+	return rankModelRefsByOrder(availableRefs, PREFERRED_MODEL_ORDER);
 }
 
 export function resolveWorkflowModelsFromRefs(availableRefs: string[], currentModelRef?: string): WorkflowModelPlan {
 	const available = uniqueRefs(availableRefs);
 	const ranked = rankModelRefs(available);
 	const primary =
-		pickFirstAvailable(available, ["openai-codex/gpt-5.4"]) ??
+		pickFirstAvailable(available, [GPT_54_MODEL_REF]) ??
 		(currentModelRef && pickFirstAvailable(available, [currentModelRef])) ??
 		ranked[0];
 
@@ -68,10 +109,8 @@ export function resolveWorkflowModelsFromRefs(availableRefs: string[], currentMo
 	const companion = pickFirstAvailable(
 		available.filter((ref) => normalizeRef(ref) !== normalizeRef(primary ?? "")),
 		[
-			"openai-codex/gpt-5.3-codex",
-			"zai-coding-plan/glm-5.1",
-			"huggingface/zai-org/GLM-5.1",
-			"zai/zai-org/GLM-5.1",
+			GPT_53_CODEX_MODEL_REF,
+			...GLM_51_MODEL_REFS,
 		],
 	);
 	if (companion && !checkers.includes(companion)) checkers.push(companion);
@@ -82,10 +121,11 @@ export function resolveWorkflowModelsFromRefs(availableRefs: string[], currentMo
 
 export function resolveReviewModelsFromRefs(availableRefs: string[], currentModelRef?: string): ReviewModelPlan {
 	const ranked = rankModelRefs(availableRefs);
+	const rankedReviewers = rankModelRefsByOrder(availableRefs, PREFERRED_REVIEWER_MODEL_ORDER);
 	const implementation =
 		(currentModelRef && pickFirstAvailable(ranked, [currentModelRef])) ??
 		ranked[0];
-	const reviewers = ranked.filter((ref) => normalizeRef(ref) !== normalizeRef(implementation ?? "")).slice(0, 2);
+	const reviewers = pickReviewers(rankedReviewers, implementation);
 	const topLevel = implementation
 		? [implementation, ...reviewers]
 		: reviewers.slice(0, 3);

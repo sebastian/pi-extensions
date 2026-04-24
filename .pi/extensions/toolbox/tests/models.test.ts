@@ -43,7 +43,22 @@ test("resolveWorkflowModelsFromRefs prefers the dedicated coding-plan GLM-5.1 be
 	assert.deepEqual(models.checkers, ["openai-codex/gpt-5.4", "zai-coding-plan/glm-5.1"]);
 });
 
-test("resolveReviewModelsFromRefs picks the two other strongest models besides the current implementation model", () => {
+test("resolveReviewModelsFromRefs uses gpt-5.4 and GLM-5.1 when gpt-5.5 is the implementation model", () => {
+	const models = resolveReviewModelsFromRefs(
+		[
+			"openai-codex/gpt-5.5",
+			"openai-codex/gpt-5.4",
+			"openai-codex/gpt-5.3-codex",
+			"zai-coding-plan/glm-5.1",
+			"huggingface/zai-org/GLM-5.1",
+		],
+		"openai-codex/gpt-5.5",
+	);
+	assert.equal(models.implementation, "openai-codex/gpt-5.5");
+	assert.deepEqual(models.reviewers, ["openai-codex/gpt-5.4", "zai-coding-plan/glm-5.1"]);
+});
+
+test("resolveReviewModelsFromRefs avoids selecting multiple GLM-5.1 provider aliases", () => {
 	const models = resolveReviewModelsFromRefs(
 		[
 			"openai-codex/gpt-5.4",
@@ -54,13 +69,14 @@ test("resolveReviewModelsFromRefs picks the two other strongest models besides t
 		"openai-codex/gpt-5.4",
 	);
 	assert.equal(models.implementation, "openai-codex/gpt-5.4");
-	assert.deepEqual(models.reviewers, ["openai-codex/gpt-5.3-codex", "zai-coding-plan/glm-5.1"]);
+	assert.deepEqual(models.reviewers, ["zai-coding-plan/glm-5.1", "openai-codex/gpt-5.3-codex"]);
 });
 
 test("resolveReviewModelsFromRefs keeps the current implementation model even when it is not the top-ranked default", () => {
 	const models = resolveReviewModelsFromRefs(
 		[
 			"custom/provider-model",
+			"openai-codex/gpt-5.5",
 			"openai-codex/gpt-5.4",
 			"openai-codex/gpt-5.3-codex",
 			"zai-coding-plan/glm-5.1",
@@ -68,5 +84,5 @@ test("resolveReviewModelsFromRefs keeps the current implementation model even wh
 		"custom/provider-model",
 	);
 	assert.equal(models.implementation, "custom/provider-model");
-	assert.deepEqual(models.reviewers, ["openai-codex/gpt-5.4", "openai-codex/gpt-5.3-codex"]);
+	assert.deepEqual(models.reviewers, ["openai-codex/gpt-5.4", "zai-coding-plan/glm-5.1"]);
 });

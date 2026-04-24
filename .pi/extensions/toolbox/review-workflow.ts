@@ -33,6 +33,17 @@ import {
 const REVIEW_STATUS_KEY = "guided-review";
 const REVIEW_WIDGET_KEY = "guided-review";
 const REVIEW_TOOLS = ["read", "bash", "grep", "find", "ls"];
+const GPT_54_REVIEW_MODEL_REF = "openai-codex/gpt-5.4";
+const GPT_54_REVIEW_THINKING_LEVEL = "xhigh";
+
+function normalizeModelRef(ref: string): string {
+	return ref.trim().toLowerCase();
+}
+
+export function getReviewThinkingLevel(model: string, fallbackThinkingLevel?: string): string | undefined {
+	if (normalizeModelRef(model) === normalizeModelRef(GPT_54_REVIEW_MODEL_REF)) return GPT_54_REVIEW_THINKING_LEVEL;
+	return fallbackThinkingLevel || undefined;
+}
 
 const REVIEW_SYSTEM_PROMPT = `You are a high-signal code reviewer.
 
@@ -1274,7 +1285,7 @@ export default function registerReviewCommand(pi: ExtensionAPI): void {
 				});
 				if (ctx.hasUI) ctx.ui.notify(`Running review for ${target.label}`, "info");
 
-				const thinkingLevel = pi.getThinkingLevel() || undefined;
+				const fallbackThinkingLevel = pi.getThinkingLevel() || undefined;
 				const reviewExtensions =
 					target.reviewCwd === target.repoRoot ? [] : await discoverProjectExtensionPaths(target.repoRoot);
 				const runs = await Promise.all(
@@ -1283,7 +1294,7 @@ export default function registerReviewCommand(pi: ExtensionAPI): void {
 						const run = await runModelReview({
 							target,
 							model,
-							thinkingLevel,
+							thinkingLevel: getReviewThinkingLevel(model, fallbackThinkingLevel),
 							loadExtensions: true,
 							extensions: reviewExtensions,
 							onEvent: (event) => progressTracker?.handleEvent(model, event),

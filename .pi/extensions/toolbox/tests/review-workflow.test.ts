@@ -5,6 +5,7 @@ import {
 	buildFindingsOverviewPrompt,
 	buildModelReviewPrompt,
 	chooseBestReferenceMatch,
+	getReviewThinkingLevel,
 	deduplicateReviewFindings,
 	parseRecentChangeCount,
 	parseReviewRequest,
@@ -133,6 +134,13 @@ test("review finding prompts include the full finding list and details", () => {
 	assert.match(decisionPrompt, /Reported by: openai-codex\/gpt-5\.3-codex/);
 	assert.match(decisionPrompt, /Combined suggested fix: Quote or avoid the shell entirely\./);
 	assert.match(decisionPrompt, /Address this finding\?/);
+});
+
+test("getReviewThinkingLevel forces gpt-5.4 reviewers to xhigh", () => {
+	assert.equal(getReviewThinkingLevel("openai-codex/gpt-5.4", "high"), "xhigh");
+	assert.equal(getReviewThinkingLevel("OPENAI-CODEX/GPT-5.4", "low"), "xhigh");
+	assert.equal(getReviewThinkingLevel("zai-coding-plan/glm-5.1", "high"), "high");
+	assert.equal(getReviewThinkingLevel("zai-coding-plan/glm-5.1"), undefined);
 });
 
 test("parseReviewRequest splits optional scope and focus text", () => {
