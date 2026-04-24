@@ -494,3 +494,95 @@ test("custom footer suppresses detached git chrome in jj repositories", async ()
 	assert.doesNotMatch(rendered, /\(detached\)/);
 	assert.ok(renderCount >= 1);
 });
+
+test("custom footer falls back to cached lines when the session ctx goes stale", async () => {
+	const { pi, getHandlers } = createPiStub();
+	zaiCodingPlan(pi as never);
+
+	const sessionStartHandlers = getHandlers<(event: unknown, ctx: any) => Promise<void>>("session_start");
+	assert.equal(sessionStartHandlers.length, 1);
+
+	let footerFactory: any;
+	let stale = false;
+	const liveModel = {
+		provider: ZAI_CODING_PLAN_PROVIDER_ID,
+		id: "glm-5.1",
+		baseUrl: ZAI_CODING_PLAN_BASE_URL,
+		reasoning: true,
+		contextWindow: 131072,
+	};
+	const ctx = {
+		hasUI: true,
+		get model() {
+			if (stale) throw new Error("stale model");
+			return liveModel;
+		},
+		ui: {
+			theme: { fg: (_color: string, text: string) => text, bold: (text: string) => text },
+			setStatus() {},
+			setWidget() {},
+			setFooter(factory: unknown) {
+				footerFactory = factory;
+			},
+		},
+		getContextUsage() {
+			if (stale) throw new Error("stale usage");
+			return { tokens: 1000, contextWindow: 131072, percent: 12.3 };
+		},
+		sessionManager: {
+			getEntries() {
+				if (stale) throw new Error("stale entries");
+				return [];
+			},
+			getBranch() {
+				if (stale) throw new Error("stale branch");
+				return [];
+			},
+			getCwd() {
+				if (stale) throw new Error("stale cwd");
+				return "/tmp/project";
+			},
+			getSessionName() {
+				if (stale) throw new Error("stale session name");
+				return undefined;
+			},
+		},
+		modelRegistry: {
+			isUsingOAuth() {
+				if (stale) throw new Error("stale auth");
+				return false;
+			},
+			async getApiKeyAndHeaders() {
+				return { ok: false, error: "auth not configured" };
+			},
+		},
+	};
+
+	await sessionStartHandlers[0]({}, ctx);
+
+	let branchChangeHandler: (() => void) | undefined;
+	const component = footerFactory(
+		{ requestRender() {} },
+		{ fg: (_color: string, text: string) => text, bold: (text: string) => text },
+		{
+			getGitBranch() {
+				return "main";
+			},
+			getExtensionStatuses() {
+				return new Map([["zai-usage-indicator", "● z.ai 5h 78% · 7d 96%"]]);
+			},
+			getAvailableProviderCount() {
+				return 1;
+			},
+			onBranchChange(handler: () => void) {
+				branchChangeHandler = handler;
+				return () => {};
+			},
+		},
+	);
+
+	const renderedBeforeStale = component.render(120);
+	stale = true;
+	assert.deepEqual(component.render(120), renderedBeforeStale);
+	assert.doesNotThrow(() => branchChangeHandler?.());
+});

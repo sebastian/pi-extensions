@@ -330,6 +330,18 @@ function buildInlineFooter(
 	return lines;
 }
 
+function buildFooterFallbackLines(
+	theme: ExtensionContext["ui"]["theme"],
+	width: number,
+	lastLines?: string[] | null,
+): string[] {
+	const ellipsis = theme.fg("dim", "...");
+	if (lastLines && lastLines.length > 0) {
+		return lastLines.map((line) => truncateToWidth(line, width, ellipsis));
+	}
+	return [truncateToWidth(theme.fg("dim", "z.ai footer unavailable"), width, ellipsis)];
+}
+
 function createUsageTracker(syncInlineFooter: (ctx: ExtensionContext) => void) {
 	const state: UsageTrackerState = {
 		active: false,
@@ -652,18 +664,26 @@ export default function zaiCodingPlan(pi: ExtensionAPI): void {
 		if (!ctx.hasUI) return;
 		if (ctx.model && isZaiUsageModel(ctx.model)) {
 			ctx.ui.setFooter((tui, theme, footerData) => {
+				let lastLines: string[] | null = null;
 				const unsubscribe = footerData.onBranchChange(() => {
-					invalidateJjFooterMetadata(ctx.sessionManager.getCwd());
+					try {
+						invalidateJjFooterMetadata(ctx.sessionManager.getCwd());
+					} catch {}
 					tui.requestRender();
 				});
 				return {
 					dispose: unsubscribe,
 					invalidate() {},
 					render(width: number): string[] {
-						const repoChromeLabel = getRepoChromeLabel(ctx.sessionManager.getCwd(), footerData.getGitBranch(), () =>
-							tui.requestRender(),
-						);
-						return buildInlineFooter(ctx, footerData, theme, width, repoChromeLabel);
+						try {
+							const repoChromeLabel = getRepoChromeLabel(ctx.sessionManager.getCwd(), footerData.getGitBranch(), () =>
+								tui.requestRender(),
+							);
+							lastLines = buildInlineFooter(ctx, footerData, theme, width, repoChromeLabel);
+							return lastLines;
+						} catch {
+							return buildFooterFallbackLines(theme, width, lastLines);
+						}
 					},
 				};
 			});
