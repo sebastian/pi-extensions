@@ -8,6 +8,7 @@
   ],
   "files": [
     "index.ts",
+    "normal-mode-keys.ts",
     "vim-controller.ts",
     "vim-editor.ts",
     "README.md"

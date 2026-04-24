@@ -1,6 +1,7 @@
 import { CustomEditor } from "@mariozechner/pi-coding-agent";
 import type { AppKeybinding, KeybindingsManager } from "@mariozechner/pi-coding-agent/dist/core/keybindings.js";
-import { Key, matchesKey, parseKey, truncateToWidth, type EditorTheme, type TUI, visibleWidth } from "@mariozechner/pi-tui";
+import { decodeKittyPrintable, Key, matchesKey, parseKey, truncateToWidth, type EditorTheme, type TUI, visibleWidth } from "@mariozechner/pi-tui";
+import { normalizeParsedNormalModeKey } from "./normal-mode-keys.ts";
 import type { BufferState, Cursor, VimBuffer } from "./vim-controller.ts";
 import { VimController } from "./vim-controller.ts";
 
@@ -184,7 +185,10 @@ export class VimEditor extends CustomEditor {
 			return;
 		}
 
-		const key = parseKey(data) ?? (data.length === 1 && data.charCodeAt(0) >= 32 ? data : undefined);
+		const key = normalizeParsedNormalModeKey(
+			parseKey(data) ?? (data.length === 1 && data.charCodeAt(0) >= 32 ? data : undefined),
+			decodeKittyPrintable(data),
+		);
 		if (key !== undefined) {
 			this.controller.handleNormalKey(key);
 			rerender();
