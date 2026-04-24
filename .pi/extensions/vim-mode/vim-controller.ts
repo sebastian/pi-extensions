@@ -1012,8 +1012,10 @@ export class VimController {
 			case "0":
 				return { target: { line: state.cursor.line, col: 0 } };
 			case "^":
+			case "I":
 				return { target: { line: state.cursor.line, col: firstNonBlankCol(currentLine(state)) } };
 			case "$":
+			case "A":
 				return { target: { line: state.cursor.line, col: lastGraphemeCol(currentLine(state)) }, inclusive: true };
 			case "%": {
 				const target = findMatchingBracket(state);

@@ -100,6 +100,15 @@ test("cf deletes through the found character and enters insert mode", () => {
 	assert.equal(controller.getMode(), "insert");
 });
 
+test("cA changes to the end of the line and enters insert mode", () => {
+	const { buffer, controller } = createController("|hello world");
+
+	feed(controller, "c", "A");
+
+	assert.equal(renderMarked(buffer), "|");
+	assert.equal(controller.getMode(), "insert");
+});
+
 test("counts work with operator motions like d2w", () => {
 	const { buffer, controller } = createController("|one two three four");
 
