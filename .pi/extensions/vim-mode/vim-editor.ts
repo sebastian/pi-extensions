@@ -107,13 +107,17 @@ export class VimEditor extends CustomEditor {
 	}
 
 	override handleInput(data: string): void {
+		const rerender = (): void => this.tui.requestRender();
+
 		if (matchesKey(data, Key.escape)) {
 			if (this.controller.isInsertMode()) {
 				this.controller.enterNormalModeFromInsert();
+				rerender();
 				return;
 			}
 			if (this.controller.hasPendingState()) {
 				this.controller.clearPendingState();
+				rerender();
 				return;
 			}
 			super.handleInput(data);
@@ -129,26 +133,32 @@ export class VimEditor extends CustomEditor {
 
 		if (matchesKey(data, Key.left)) {
 			this.controller.handleNormalKey("h");
+			rerender();
 			return;
 		}
 		if (matchesKey(data, Key.right)) {
 			this.controller.handleNormalKey("l");
+			rerender();
 			return;
 		}
 		if (matchesKey(data, Key.up)) {
 			this.controller.handleNormalKey("k");
+			rerender();
 			return;
 		}
 		if (matchesKey(data, Key.down)) {
 			this.controller.handleNormalKey("j");
+			rerender();
 			return;
 		}
 		if (matchesKey(data, Key.home)) {
 			this.controller.handleNormalKey("0");
+			rerender();
 			return;
 		}
 		if (matchesKey(data, Key.end)) {
 			this.controller.handleNormalKey("$");
+			rerender();
 			return;
 		}
 		if (matchesKey(data, Key.enter) || matchesKey(data, Key.return) || matchesKey(data, Key.shift("enter"))) {
@@ -173,6 +183,7 @@ export class VimEditor extends CustomEditor {
 		const printable = decodePrintableKey(data) ?? (data.length === 1 && data.charCodeAt(0) >= 32 ? data : undefined);
 		if (printable !== undefined) {
 			this.controller.handleNormalKey(printable);
+			rerender();
 			return;
 		}
 	}
