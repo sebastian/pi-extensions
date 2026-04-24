@@ -99,6 +99,8 @@ export class VimEditor extends CustomEditor {
 	private readonly labelTheme: EditorTheme;
 	private readonly appKeybindings: KeybindingsManager;
 	private readonly controller: VimController;
+	private lastInsertEscapeAt = 0;
+	private readonly insertEscapeRecoveryWindowMs = 180;
 
 	constructor(tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) {
 		super(tui, theme, keybindings);
@@ -117,6 +119,7 @@ export class VimEditor extends CustomEditor {
 		if (matchesKey(data, Key.escape)) {
 			if (this.controller.isInsertMode()) {
 				this.controller.enterNormalModeFromInsert();
+				this.lastInsertEscapeAt = Date.now();
 				rerender();
 				return;
 			}
@@ -185,10 +188,13 @@ export class VimEditor extends CustomEditor {
 			return;
 		}
 
+		const recoveringFromInsertEscape = Date.now() - this.lastInsertEscapeAt <= this.insertEscapeRecoveryWindowMs;
 		const key = normalizeParsedNormalModeKey(
 			parseKey(data) ?? (data.length === 1 && data.charCodeAt(0) >= 32 ? data : undefined),
 			decodeKittyPrintable(data),
+			{ recoveringFromInsertEscape },
 		);
+		this.lastInsertEscapeAt = 0;
 		if (key !== undefined) {
 			this.controller.handleNormalKey(key);
 			rerender();

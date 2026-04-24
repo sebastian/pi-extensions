@@ -22,3 +22,10 @@ test("normalizeParsedNormalModeKey prefers kitty printable characters when prese
 	assert.equal(normalizeParsedNormalModeKey("shift+a", "A"), "A");
 	assert.equal(normalizeParsedNormalModeKey("shift+9", "("), "(");
 });
+
+test("normalizeParsedNormalModeKey strips alt after insert-escape recovery so fast esc sequences still act like vim", () => {
+	assert.equal(normalizeParsedNormalModeKey("alt+c", undefined, { recoveringFromInsertEscape: true }), "c");
+	assert.equal(normalizeParsedNormalModeKey("shift+alt+9", undefined, { recoveringFromInsertEscape: true }), "(");
+	assert.equal(normalizeParsedNormalModeKey("shift+alt+'", undefined, { recoveringFromInsertEscape: true }), '"');
+	assert.equal(normalizeParsedNormalModeKey("alt+c", undefined, { recoveringFromInsertEscape: false }), "alt+c");
+});
