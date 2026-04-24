@@ -39,6 +39,12 @@ interface PendingReplace {
 	count: number;
 }
 
+interface PendingTextObject {
+	operator: PendingOperator;
+	kind: "inner" | "around";
+	count: number;
+}
+
 interface LastFind {
 	char: string;
 	direction: "forward" | "backward";
@@ -49,6 +55,11 @@ interface Motion {
 	target: Cursor;
 	inclusive?: boolean;
 	linewise?: boolean;
+}
+
+interface SelectionRange {
+	start: number;
+	end: number;
 }
 
 const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
@@ -413,6 +424,129 @@ function linewiseSelection(state: BufferState, targetLine: number): { startLine:
 	};
 }
 
+function isEscapedAt(line: string, index: number): boolean {
+	let backslashes = 0;
+	for (let cursor = index - 1; cursor >= 0 && line[cursor] === "\\"; cursor--) backslashes++;
+	return backslashes % 2 === 1;
+}
+
+function findQuotedSelection(state: BufferState, quote: string, around: boolean): SelectionRange | null {
+	const line = currentLine(state);
+	const quotePositions: number[] = [];
+	for (let index = 0; index < line.length; index++) {
+		if (line[index] === quote && !isEscapedAt(line, index)) quotePositions.push(index);
+	}
+	let bestPair: { open: number; close: number } | null = null;
+	for (let index = 0; index + 1 < quotePositions.length; index += 2) {
+		const open = quotePositions[index]!;
+		const close = quotePositions[index + 1]!;
+		if (state.cursor.col < open || state.cursor.col > close) continue;
+		if (!bestPair || close - open < bestPair.close - bestPair.open) bestPair = { open, close };
+	}
+	if (!bestPair) return null;
+	const lineStartOffset = stateOffset(state.lines, { line: state.cursor.line, col: 0 });
+	return {
+		start: lineStartOffset + (around ? bestPair.open : bestPair.open + 1),
+		end: lineStartOffset + (around ? bestPair.close + 1 : bestPair.close),
+	};
+}
+
+function findDelimitedPair(state: BufferState, open: string, close: string): { openOffset: number; closeOffset: number } | null {
+	const text = linesToText(state.lines);
+	const cursorOffset = stateOffset(state.lines, state.cursor);
+	const stack: number[] = [];
+	let bestPair: { openOffset: number; closeOffset: number } | null = null;
+	for (let index = 0; index < text.length; index++) {
+		const char = text[index];
+		if (char === open) stack.push(index);
+		else if (char === close && stack.length > 0) {
+			const openOffset = stack.pop()!;
+			if (cursorOffset < openOffset || cursorOffset > index) continue;
+			if (!bestPair || openOffset > bestPair.openOffset) bestPair = { openOffset, closeOffset: index };
+		}
+	}
+	return bestPair;
+}
+
+function findDelimitedSelection(state: BufferState, open: string, close: string, around: boolean): SelectionRange | null {
+	const pair = findDelimitedPair(state, open, close);
+	if (!pair) return null;
+	const text = linesToText(state.lines);
+	return {
+		start: around ? pair.openOffset : nextGraphemeOffset(text, pair.openOffset),
+		end: around ? nextGraphemeOffset(text, pair.closeOffset) : pair.closeOffset,
+	};
+}
+
+function findWordSelection(state: BufferState, around: boolean, count: number, bigWord = false): SelectionRange | null {
+	const text = linesToText(state.lines);
+	const segments = segmentGraphemes(text);
+	if (segments.length === 0) return null;
+	const cursorOffset = stateOffset(state.lines, state.cursor);
+	let index = graphemeIndexAtOrAfter(segments, cursorOffset);
+	if (index >= segments.length) index = segments.length - 1;
+	while (index < segments.length && charClass(segments[index]!.segment, bigWord) === "space") index++;
+	if (index >= segments.length) {
+		index = Math.max(0, graphemeIndexAtOrAfter(segments, Math.max(0, cursorOffset - 1)));
+		while (index > 0 && charClass(segments[index]!.segment, bigWord) === "space") index--;
+		if (charClass(segments[index]!.segment, bigWord) === "space") return null;
+	}
+	const category = charClass(segments[index]!.segment, bigWord);
+	let startIndex = index;
+	while (startIndex > 0 && charClass(segments[startIndex - 1]!.segment, bigWord) === category) startIndex--;
+	let endIndex = index;
+	while (endIndex + 1 < segments.length && charClass(segments[endIndex + 1]!.segment, bigWord) === category) endIndex++;
+	for (let step = 1; step < count; step++) {
+		let nextIndex = endIndex + 1;
+		while (nextIndex < segments.length && charClass(segments[nextIndex]!.segment, bigWord) === "space") nextIndex++;
+		if (nextIndex >= segments.length) break;
+		const nextCategory = charClass(segments[nextIndex]!.segment, bigWord);
+		endIndex = nextIndex;
+		while (endIndex + 1 < segments.length && charClass(segments[endIndex + 1]!.segment, bigWord) === nextCategory) endIndex++;
+	}
+	let start = segments[startIndex]!.index;
+	let end = endIndex + 1 < segments.length ? segments[endIndex + 1]!.index : text.length;
+	if (around) {
+		let trailingIndex = endIndex + 1;
+		while (trailingIndex < segments.length && charClass(segments[trailingIndex]!.segment, bigWord) === "space") trailingIndex++;
+		if (trailingIndex > endIndex + 1) {
+			end = trailingIndex < segments.length ? segments[trailingIndex]!.index : text.length;
+		} else {
+			let leadingIndex = startIndex;
+			while (leadingIndex > 0 && charClass(segments[leadingIndex - 1]!.segment, bigWord) === "space") leadingIndex--;
+			start = segments[leadingIndex]!.index;
+		}
+	}
+	return { start, end };
+}
+
+function resolveTextObjectSelection(state: BufferState, key: string, around: boolean, count: number): SelectionRange | null {
+	switch (key) {
+		case '"':
+		case "'":
+		case "`":
+			return findQuotedSelection(state, key, around);
+		case "(":
+		case ")":
+			return findDelimitedSelection(state, "(", ")", around);
+		case "[":
+		case "]":
+			return findDelimitedSelection(state, "[", "]", around);
+		case "{":
+		case "}":
+			return findDelimitedSelection(state, "{", "}", around);
+		case "<":
+		case ">":
+			return findDelimitedSelection(state, "<", ">", around);
+		case "w":
+			return findWordSelection(state, around, count);
+		case "W":
+			return findWordSelection(state, around, count, true);
+		default:
+			return null;
+	}
+}
+
 function deleteLineRange(state: BufferState, startLine: number, endLine: number): BufferState {
 	const before = state.lines.slice(0, startLine);
 	const after = state.lines.slice(endLine + 1);
@@ -486,6 +620,7 @@ export class VimController {
 	private pendingOperator: PendingOperator | null = null;
 	private pendingFind: PendingFind | null = null;
 	private pendingReplace: PendingReplace | null = null;
+	private pendingTextObject: PendingTextObject | null = null;
 	private pendingG: { operator?: PendingOperator } | null = null;
 	private lastFind: LastFind | null = null;
 	private preferredColumn: number | null = null;
@@ -505,7 +640,7 @@ export class VimController {
 	}
 
 	hasPendingState(): boolean {
-		return Boolean(this.countBuffer || this.pendingOperator || this.pendingFind || this.pendingReplace || this.pendingG);
+		return Boolean(this.countBuffer || this.pendingOperator || this.pendingFind || this.pendingReplace || this.pendingTextObject || this.pendingG);
 	}
 
 	clearPendingState(): void {
@@ -513,6 +648,7 @@ export class VimController {
 		this.pendingOperator = null;
 		this.pendingFind = null;
 		this.pendingReplace = null;
+		this.pendingTextObject = null;
 		this.pendingG = null;
 	}
 
@@ -525,6 +661,7 @@ export class VimController {
 		}
 		if (this.pendingFind) pieces.push(`${this.pendingFind.key}…`);
 		if (this.pendingReplace) pieces.push(`r…`);
+		if (this.pendingTextObject) pieces.push(`${this.pendingTextObject.kind === "inner" ? "i" : "a"}…`);
 		if (this.pendingG) pieces.push("g…");
 		return ` ${pieces.join(" ")} `;
 	}
@@ -549,6 +686,7 @@ export class VimController {
 			return true;
 		}
 		if (this.pendingReplace) return this.handlePendingReplace(key);
+		if (this.pendingTextObject) return this.handlePendingTextObject(key);
 		if (this.pendingFind) return this.handlePendingFind(key);
 		if (this.pendingG) return this.handlePendingG(key);
 		if (this.pendingOperator) {
@@ -814,6 +952,15 @@ export class VimController {
 			this.pendingOperator = null;
 			return true;
 		}
+		if (key === "i" || key === "a") {
+			this.pendingTextObject = {
+				operator,
+				kind: key === "i" ? "inner" : "around",
+				count: operator.count * this.consumeMotionCount(),
+			};
+			this.pendingOperator = null;
+			return true;
+		}
 		const motion = this.resolveOperatorMotion(key, operator.count * this.consumeMotionCount(), operator.kind);
 		if (!motion) {
 			if (this.pendingG) {
@@ -923,10 +1070,19 @@ export class VimController {
 		}
 		const range = buildCharwiseRange(state, state.cursor, motion);
 		if (!range) return;
-		const text = linesToText(state.lines).slice(range.start, range.end);
+		this.applyOperatorSelection(kind, range);
+	}
+
+	private applyOperatorSelection(kind: VimOperatorKind, selection: SelectionRange): void {
+		const state = this.buffer.getState();
+		const text = linesToText(state.lines).slice(selection.start, selection.end);
 		this.register = { kind: "char", text };
 		if (kind === "yank") return;
-		const nextState = editStateByOffsets(state, range.start, range.end, "", range.start);
+		if (selection.start === selection.end) {
+			if (kind === "change") this.enterInsertMode(cursorFromOffset(state.lines, selection.start));
+			return;
+		}
+		const nextState = editStateByOffsets(state, selection.start, selection.end, "", selection.start);
 		if (kind === "delete") {
 			nextState.cursor = normalizeNormalCursor(nextState.lines, nextState.cursor);
 			this.buffer.applyState(nextState);
@@ -936,6 +1092,21 @@ export class VimController {
 		nextState.cursor = normalizeInsertCursor(nextState.lines, nextState.cursor);
 		this.buffer.applyState(nextState);
 		this.mode = "insert";
+	}
+
+	private handlePendingTextObject(key: string): boolean {
+		const pending = this.pendingTextObject;
+		this.pendingTextObject = null;
+		if (!pending) return true;
+		const selection = resolveTextObjectSelection(
+			this.buffer.getState(),
+			key,
+			pending.kind === "around",
+			Math.max(1, pending.count),
+		);
+		if (!selection) return true;
+		this.applyOperatorSelection(pending.operator.kind, selection);
+		return true;
 	}
 
 	private handlePendingFind(key: string): boolean {

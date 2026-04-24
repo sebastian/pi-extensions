@@ -70,6 +70,27 @@ test("cw changes only the current word and leaves following spacing intact", () 
 	assert.equal(controller.getMode(), "insert");
 });
 
+test("ci quote and paren text objects delete inside delimiters and enter insert mode", () => {
+	const quoteCase = createController('"|hello"');
+	feed(quoteCase.controller, "c", "i", '"');
+	assert.equal(renderMarked(quoteCase.buffer), '"|"');
+	assert.equal(quoteCase.controller.getMode(), "insert");
+
+	const parenCase = createController("(|hello)");
+	feed(parenCase.controller, "c", "i", "(");
+	assert.equal(renderMarked(parenCase.buffer), "(|)");
+	assert.equal(parenCase.controller.getMode(), "insert");
+});
+
+test("ciw changes the current word object", () => {
+	const { buffer, controller } = createController("|hello world");
+
+	feed(controller, "c", "i", "w");
+
+	assert.equal(renderMarked(buffer), "| world");
+	assert.equal(controller.getMode(), "insert");
+});
+
 test("cf deletes through the found character and enters insert mode", () => {
 	const { buffer, controller } = createController("|hello world");
 

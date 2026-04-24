@@ -10,6 +10,10 @@ A more capable vim-style modal editor for pi.
 - find motions: `f`, `F`, `t`, `T`, repeat with `;` and `,`
 - insert/edit commands: `i`, `a`, `I`, `A`, `o`, `O`, `x`, `X`, `s`, `S`, `r`, `J`, `u`
 - operators: `d`, `c`, `y` with the motions above
+- text objects for operators:
+  - words: `iw`, `aw`, `iW`, `aW`
+  - quotes: `i"`, `a"`, `i'`, `a'`, ``i` ``, ``a` ``
+  - delimiters: `i(`, `a(`, `i[`, `a[`, `i{`, `a{`, `i<`, `a<`
 - linewise variants: `dd`, `cc`, `yy`, `D`, `C`, `Y`
 - paste with `p` and `P`
 - vim-like `cw` special-casing so changing a word usually does not swallow the following space
