@@ -1,0 +1,31 @@
+{
+  "name": "vim-mode-pi-package",
+  "version": "0.1.0",
+  "description": "A much more capable vim-style modal editor for pi.",
+  "type": "module",
+  "keywords": [
+    "pi-package"
+  ],
+  "files": [
+    "index.ts",
+    "vim-controller.ts",
+    "vim-editor.ts",
+    "README.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-agent-core": "*",
+    "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*",
+    "typebox": "*"
+  },
+  "scripts": {
+    "check": "node --test ./tests/*.test.ts",
+    "test": "node --test ./tests/*.test.ts"
+  }
+}

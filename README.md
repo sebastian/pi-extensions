@@ -13,6 +13,7 @@ I maintain this repo for my own workflows and experiments.
 ## Current contents
 
 - `.pi/extensions/toolbox/` — a catch-all pi extension package where I keep shared workflows, prompts, utilities, and tests; its current public entrypoint adds a flexible `/review` command that can review the current change or broader user-described scopes, compare them against the two other strongest available models, deduplicate the findings, and let you choose which ones to address
+- `.pi/extensions/vim-mode/` — a much more capable vim-style modal editor for pi, with counts, word motions, find/till motions, operator-pending `d`/`c`/`y`, linewise commands, paste, joins, and a stronger normal-mode editing surface
 - `.pi/extensions/zai-coding-plan/` — a pi provider extension that adds Z.AI **coding plan only** models via the official coding-plan endpoint so usage counts against plan quota rather than separate API billing
 
 ## License
