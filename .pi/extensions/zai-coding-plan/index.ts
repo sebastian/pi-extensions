@@ -264,7 +264,7 @@ function buildInlineFooter(
 	const contextUsage = ctx.getContextUsage();
 	const contextWindow = contextUsage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
 	const contextPercentValue = contextUsage?.percent ?? 0;
-	const contextPercent = contextUsage?.percent !== null ? contextPercentValue.toFixed(1) : "?";
+	const contextPercent = typeof contextUsage?.percent === "number" ? contextPercentValue.toFixed(1) : "?";
 
 	let pwd = ctx.sessionManager.getCwd();
 	const home = process.env.HOME || process.env.USERPROFILE;

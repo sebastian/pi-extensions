@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { Editor, type EditorTheme, Key, Text, matchesKey, truncateToWidth } from "@mariozechner/pi-tui";
+import { Editor, type Component, type EditorTheme, type Focusable, Key, Text, matchesKey, truncateToWidth } from "@mariozechner/pi-tui";
 import { Type } from "typebox";
 import {
 	buildRenderOptions,
@@ -77,7 +77,7 @@ export default function registerQuestionnaire(pi: ExtensionAPI): void {
 			const isMulti = questions.length > 1;
 			const totalTabs = questions.length + 1;
 
-			const result = await ctx.ui.custom<QuestionnaireResult>((tui, theme, _kb, done) => {
+			const result = await ctx.ui.custom<QuestionnaireResult>((tui, theme, keybindings, done) => {
 				let currentTab = 0;
 				let optionIndex = 0;
 				let inputMode = false;
@@ -96,6 +96,15 @@ export default function registerQuestionnaire(pi: ExtensionAPI): void {
 					},
 				};
 				const editor = new Editor(tui, editorTheme);
+
+				const isSelectUp = (data: string): boolean => keybindings.matches(data, "tui.select.up");
+				const isSelectDown = (data: string): boolean => keybindings.matches(data, "tui.select.down");
+				const isSelectConfirm = (data: string): boolean => keybindings.matches(data, "tui.select.confirm");
+				const isSelectCancel = (data: string): boolean => keybindings.matches(data, "tui.select.cancel");
+				const isNextTab = (data: string): boolean =>
+					keybindings.matches(data, "tui.input.tab") || keybindings.matches(data, "tui.editor.cursorRight");
+				const isPreviousTab = (data: string): boolean =>
+					matchesKey(data, Key.shift("tab")) || keybindings.matches(data, "tui.editor.cursorLeft");
 
 				function refresh(): void {
 					cachedLines = undefined;
@@ -158,7 +167,7 @@ export default function registerQuestionnaire(pi: ExtensionAPI): void {
 
 				function handleInput(data: string): void {
 					if (inputMode) {
-						if (matchesKey(data, Key.escape)) {
+						if (isSelectCancel(data)) {
 							inputMode = false;
 							inputQuestionId = null;
 							editor.setText("");
@@ -174,13 +183,13 @@ export default function registerQuestionnaire(pi: ExtensionAPI): void {
 					const options = currentOptions();
 
 					if (isMulti) {
-						if (matchesKey(data, Key.tab) || matchesKey(data, Key.right)) {
+						if (isNextTab(data)) {
 							currentTab = (currentTab + 1) % totalTabs;
 							optionIndex = 0;
 							refresh();
 							return;
 						}
-						if (matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left)) {
+						if (isPreviousTab(data)) {
 							currentTab = (currentTab - 1 + totalTabs) % totalTabs;
 							optionIndex = 0;
 							refresh();
@@ -189,28 +198,28 @@ export default function registerQuestionnaire(pi: ExtensionAPI): void {
 					}
 
 					if (currentTab === questions.length) {
-						if (matchesKey(data, Key.enter) && allAnswered()) {
+						if (isSelectConfirm(data) && allAnswered()) {
 							submit(false);
 							return;
 						}
-						if (matchesKey(data, Key.escape)) {
+						if (isSelectCancel(data)) {
 							submit(true);
 						}
 						return;
 					}
 
-					if (matchesKey(data, Key.up)) {
+					if (isSelectUp(data)) {
 						optionIndex = Math.max(0, optionIndex - 1);
 						refresh();
 						return;
 					}
-					if (matchesKey(data, Key.down)) {
+					if (isSelectDown(data)) {
 						optionIndex = Math.min(options.length - 1, optionIndex + 1);
 						refresh();
 						return;
 					}
 
-					if (matchesKey(data, Key.enter) && question) {
+					if (isSelectConfirm(data) && question) {
 						const option = options[optionIndex];
 						if (option.isOther) {
 							inputMode = true;
@@ -224,7 +233,7 @@ export default function registerQuestionnaire(pi: ExtensionAPI): void {
 						return;
 					}
 
-					if (matchesKey(data, Key.escape)) {
+					if (isSelectCancel(data)) {
 						submit(true);
 					}
 				}
@@ -333,13 +342,22 @@ export default function registerQuestionnaire(pi: ExtensionAPI): void {
 					return lines;
 				}
 
-				return {
+				const component: Component & Focusable = {
+					get focused() {
+						return editor.focused;
+					},
+					set focused(value: boolean) {
+						editor.focused = value;
+					},
 					render,
 					invalidate: () => {
 						cachedLines = undefined;
+						editor.invalidate();
 					},
 					handleInput,
 				};
+
+				return component;
 			});
 
 			if (result.cancelled) {
