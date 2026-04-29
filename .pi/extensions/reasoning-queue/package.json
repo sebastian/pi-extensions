@@ -1,0 +1,26 @@
+{
+  "name": "reasoning-queue-pi-package",
+  "version": "0.1.0",
+  "description": "Per-message reasoning-level controls for queued pi messages.",
+  "type": "module",
+  "keywords": [
+    "pi-package"
+  ],
+  "files": [
+    "index.ts",
+    "README.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-coding-agent": "*"
+  },
+  "scripts": {
+    "check": "node --test ./tests/*.test.ts",
+    "test": "node --test ./tests/*.test.ts"
+  }
+}
