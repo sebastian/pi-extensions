@@ -28,6 +28,7 @@ You can also use the inline fields shown below the editor instead of typing a di
 - Press `Tab` from an empty prompt (or from vim-mode normal mode) to focus `model`, then `reasoning`, then back to `prompt`.
 - Press `Shift+Tab` to move backward through those fields.
 - In the `model` or `reasoning` field, press `←`/`→` or `↑`/`↓` to cycle values, or `Enter` to pick from a selector.
+- The model field follows pi's scoped model configuration (`/scoped-models` / `enabledModels`) when present.
 - The reasoning field only shows levels valid for the selected model, so switching to GLM/Z.AI models clamps choices to the closest supported level.
 
 ## Notes
@@ -35,4 +36,5 @@ You can also use the inline fields shown below the editor instead of typing a di
 - Directives are stripped before the message is sent to the model.
 - If the selected model cannot use a requested level, the extension applies the closest supported level instead. For example, boolean on/off thinking models such as GLM/Z.AI clamp any non-`off` request, including `xhigh`, to `high`.
 - The extension tracks queued messages in order and rewrites provider requests so steering messages inside an active agent run can still use their queued reasoning level.
+- Model changes made while the agent is working are deferred until the queued message starts, so the in-flight request keeps its original model and reasoning payload shape.
 - The footer status shows the current inherited default as `reasoning:<level>`.

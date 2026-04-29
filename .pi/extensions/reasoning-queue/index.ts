@@ -1,5 +1,8 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import type { Model } from "@mariozechner/pi-ai";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
@@ -208,9 +211,212 @@ function modelRefsEqual(a: ModelRef | undefined, b: ModelRef | undefined): boole
 	return !!a && !!b && a.provider === b.provider && a.id === b.id;
 }
 
+function modelRefKey(model: Pick<ReasoningModel, "provider" | "id"> | ModelRef): string {
+	return `${model.provider}/${model.id}`.toLowerCase();
+}
+
 function formatModelRef(model: Pick<ReasoningModel, "provider" | "id"> | ModelRef | undefined): string {
 	if (!model) return "no model";
 	return `${model.provider}/${model.id}`;
+}
+
+function isModelLike(value: unknown): value is Model<any> {
+	return isRecord(value) && typeof value.provider === "string" && typeof value.id === "string";
+}
+
+function normalizeModelReference(value: string): string {
+	return value.trim().toLowerCase();
+}
+
+function getModelReference(model: Pick<ReasoningModel, "provider" | "id">): string {
+	return `${model.provider}/${model.id}`;
+}
+
+function modelMatchesReference(model: Pick<ReasoningModel, "provider" | "id"> | undefined, value: string | undefined): boolean {
+	if (!model || !value) return false;
+	const normalized = normalizeModelReference(value);
+	return model.id.toLowerCase() === normalized || getModelReference(model).toLowerCase() === normalized;
+}
+
+function uniqueModels(models: Model<any>[]): Model<any>[] {
+	const seen = new Set<string>();
+	const result: Model<any>[] = [];
+	for (const model of models) {
+		const key = modelRefKey(model as ReasoningModel);
+		if (seen.has(key)) continue;
+		seen.add(key);
+		result.push(model);
+	}
+	return result;
+}
+
+function findExactModelReferenceMatch(modelReference: string, models: Model<any>[]): Model<any> | undefined {
+	const normalized = normalizeModelReference(modelReference);
+	if (!normalized) return undefined;
+	const canonicalMatches = models.filter((model) => getModelReference(model as ReasoningModel).toLowerCase() === normalized);
+	if (canonicalMatches.length === 1) return canonicalMatches[0];
+	if (canonicalMatches.length > 1) return undefined;
+
+	const slashIndex = modelReference.indexOf("/");
+	if (slashIndex !== -1) {
+		const provider = modelReference.slice(0, slashIndex).trim().toLowerCase();
+		const id = modelReference.slice(slashIndex + 1).trim().toLowerCase();
+		const providerMatches = models.filter((model) => model.provider.toLowerCase() === provider && model.id.toLowerCase() === id);
+		if (providerMatches.length === 1) return providerMatches[0];
+		if (providerMatches.length > 1) return undefined;
+	}
+
+	const idMatches = models.filter((model) => model.id.toLowerCase() === normalized);
+	return idMatches.length === 1 ? idMatches[0] : undefined;
+}
+
+function isAliasModelId(id: string): boolean {
+	return id.endsWith("-latest") || !/-\d{8}$/.test(id);
+}
+
+function chooseBestPatternMatch(matches: Model<any>[]): Model<any> | undefined {
+	if (matches.length === 0) return undefined;
+	const aliases = matches.filter((model) => isAliasModelId(model.id));
+	const candidates = aliases.length > 0 ? aliases : matches;
+	return [...candidates].sort((a, b) => b.id.localeCompare(a.id))[0];
+}
+
+function stripThinkingSuffix(pattern: string): string {
+	const index = pattern.lastIndexOf(":");
+	if (index === -1) return pattern;
+	const suffix = pattern.slice(index + 1);
+	return normalizeThinkingLevel(suffix) ? pattern.slice(0, index) : pattern;
+}
+
+function hasGlobSyntax(pattern: string): boolean {
+	return /[*?\[]/.test(pattern);
+}
+
+function globToRegExp(pattern: string): RegExp {
+	let source = "^";
+	for (let i = 0; i < pattern.length; i++) {
+		const char = pattern[i];
+		if (char === "*") source += ".*";
+		else if (char === "?") source += ".";
+		else if (char === "[") {
+			const end = pattern.indexOf("]", i + 1);
+			if (end === -1) source += "\\[";
+			else {
+				const body = pattern.slice(i + 1, end).replace(/\\/g, "\\\\").replace(/\]/g, "\\]");
+				source += `[${body}]`;
+				i = end;
+			}
+		} else source += char.replace(/[\\^$+?.()|{}\[\]]/g, "\\$&");
+	}
+	return new RegExp(`${source}$`, "i");
+}
+
+function modelsForPattern(pattern: string, models: Model<any>[]): Model<any>[] {
+	const modelPattern = stripThinkingSuffix(pattern.trim());
+	if (!modelPattern) return [];
+
+	if (hasGlobSyntax(modelPattern)) {
+		const re = globToRegExp(modelPattern);
+		return models.filter((model) => re.test(getModelReference(model as ReasoningModel)) || re.test(model.id));
+	}
+
+	const exact = findExactModelReferenceMatch(modelPattern, models);
+	if (exact) return [exact];
+
+	const lower = modelPattern.toLowerCase();
+	const matches = models.filter((model) => model.id.toLowerCase().includes(lower) || model.name?.toLowerCase().includes(lower));
+	const best = chooseBestPatternMatch(matches);
+	return best ? [best] : [];
+}
+
+function resolveScopedModelsFromPatterns(patterns: string[], models: Model<any>[]): Model<any>[] {
+	const resolved: Model<any>[] = [];
+	for (const pattern of patterns) {
+		resolved.push(...modelsForPattern(pattern, models));
+	}
+	return uniqueModels(resolved);
+}
+
+function getContextScopedModels(ctx: ExtensionContext): Model<any>[] | undefined {
+	const scopedModels = (ctx as unknown as { scopedModels?: unknown }).scopedModels;
+	if (!Array.isArray(scopedModels) || scopedModels.length === 0) return undefined;
+	const models = scopedModels.flatMap((item): Model<any>[] => {
+		if (isModelLike(item)) return [item];
+		if (isRecord(item) && isModelLike(item.model)) return [item.model];
+		return [];
+	});
+	return models.length > 0 ? uniqueModels(models) : undefined;
+}
+
+function expandHome(path: string): string {
+	if (path === "~") return homedir();
+	return path.startsWith("~/") ? join(homedir(), path.slice(2)) : path;
+}
+
+function getAgentDirFromEnv(): string {
+	return expandHome(process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"));
+}
+
+function readSettings(path: string): JsonRecord {
+	if (!existsSync(path)) return {};
+	const parsed = JSON.parse(readFileSync(path, "utf-8"));
+	return isRecord(parsed) ? parsed : {};
+}
+
+function getConfiguredModelPatterns(ctx: ExtensionContext): string[] | undefined {
+	const cwd = (ctx as unknown as { cwd?: unknown }).cwd;
+	if (typeof cwd !== "string") return undefined;
+	try {
+		const globalSettings = readSettings(join(getAgentDirFromEnv(), "settings.json"));
+		const projectSettings = readSettings(join(cwd, ".pi", "settings.json"));
+		const patterns = Array.isArray(projectSettings.enabledModels) ? projectSettings.enabledModels : globalSettings.enabledModels;
+		if (!Array.isArray(patterns)) return undefined;
+		const cleaned = patterns.flatMap((pattern) => (typeof pattern === "string" && pattern.trim() ? [pattern.trim()] : []));
+		return cleaned.length > 0 ? cleaned : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function getScopedConfiguredModels(ctx: ExtensionContext): Model<any>[] | undefined {
+	const contextScopedModels = getContextScopedModels(ctx);
+	if (contextScopedModels) return contextScopedModels;
+
+	const patterns = getConfiguredModelPatterns(ctx);
+	if (!patterns) return undefined;
+	const resolved = resolveScopedModelsFromPatterns(patterns, ctx.modelRegistry.getAvailable());
+	return resolved.length > 0 ? resolved : undefined;
+}
+
+function getPayloadModelReference(payload: unknown): string | undefined {
+	if (!isRecord(payload)) return undefined;
+	if (typeof payload.model === "string") return payload.model;
+	if (typeof payload.modelId === "string") return payload.modelId;
+	return undefined;
+}
+
+function getRegistryModels(ctx: ExtensionContext): Model<any>[] {
+	const models: Model<any>[] = [];
+	try {
+		models.push(...ctx.modelRegistry.getAvailable());
+	} catch {
+		// Ignore registry failures and fall back to the active model.
+	}
+	try {
+		const all = ctx.modelRegistry.getAll?.() ?? [];
+		models.push(...all);
+	} catch {
+		// getAll is best-effort for older test doubles and runtimes.
+	}
+	if (ctx.model) models.push(ctx.model);
+	return uniqueModels(models);
+}
+
+function resolvePayloadModel(payload: unknown, ctx: ExtensionContext): Model<any> | undefined {
+	const payloadModel = getPayloadModelReference(payload);
+	if (!payloadModel) return ctx.model;
+	if (modelMatchesReference(ctx.model as ReasoningModel | undefined, payloadModel)) return ctx.model;
+	return findExactModelReferenceMatch(payloadModel, getRegistryModels(ctx));
 }
 
 const MODIFIER_SHIFT = 1;
@@ -607,6 +813,11 @@ function formatValidLevels(): string {
 	return THINKING_LEVELS.join(", ");
 }
 
+function contextIsIdle(ctx: ExtensionContext): boolean {
+	const isIdle = (ctx as unknown as { isIdle?: unknown }).isIdle;
+	return typeof isIdle === "function" ? Boolean(isIdle.call(ctx)) : true;
+}
+
 export default function reasoningQueueExtension(pi: ExtensionAPI): void {
 	let defaultLevel: ThinkingLevel = "medium";
 	let activeLevel: ThinkingLevel = defaultLevel;
@@ -625,9 +836,10 @@ export default function reasoningQueueExtension(pi: ExtensionAPI): void {
 	});
 
 	function getAvailableModels(ctx: ExtensionContext): Model<any>[] {
-		const models = ctx.modelRegistry.getAvailable();
+		const scopedModels = getScopedConfiguredModels(ctx);
+		const models = scopedModels ?? ctx.modelRegistry.getAvailable();
 		const current = ctx.model;
-		if (!current || models.some((model) => model.provider === current.provider && model.id === current.id)) return models;
+		if (scopedModels || !current || models.some((model) => model.provider === current.provider && model.id === current.id)) return models;
 		return [current, ...models];
 	}
 
@@ -659,7 +871,7 @@ export default function reasoningQueueExtension(pi: ExtensionAPI): void {
 	function clampDefaultLevelToSelectedModel(ctx: ExtensionContext): ThinkingLevel {
 		const effective = clampReasoningLevel(defaultLevel, getSelectedModel(ctx) as ReasoningModel | undefined);
 		defaultLevel = effective;
-		if (ctx.isIdle()) activeLevel = effective;
+		if (contextIsIdle(ctx)) activeLevel = effective;
 		return effective;
 	}
 
@@ -679,7 +891,7 @@ export default function reasoningQueueExtension(pi: ExtensionAPI): void {
 		const effectiveLevel = clampReasoningLevel(defaultLevel, selectedModel);
 		if (effectiveLevel !== defaultLevel) {
 			defaultLevel = effectiveLevel;
-			if (ctx.isIdle()) activeLevel = effectiveLevel;
+			if (contextIsIdle(ctx)) activeLevel = effectiveLevel;
 		}
 
 		ctx.ui.setStatus("reasoning-queue", ctx.ui.theme.fg("dim", `reasoning:${defaultLevel}`));
@@ -714,7 +926,7 @@ export default function reasoningQueueExtension(pi: ExtensionAPI): void {
 	function setDefaultLevel(level: ThinkingLevel, ctx: ExtensionContext): ThinkingLevel {
 		const effectiveLevel = setEffectiveThinkingLevel(level, ctx);
 		defaultLevel = effectiveLevel;
-		if (ctx.isIdle()) activeLevel = effectiveLevel;
+		if (contextIsIdle(ctx)) activeLevel = effectiveLevel;
 		updateStatus(ctx);
 		return effectiveLevel;
 	}
@@ -723,7 +935,7 @@ export default function reasoningQueueExtension(pi: ExtensionAPI): void {
 		const selectedModel = getSelectedModel(ctx) as ReasoningModel | undefined;
 		const effectiveLevel = clampReasoningLevel(level, selectedModel);
 		defaultLevel = effectiveLevel;
-		if (ctx.isIdle()) activeLevel = effectiveLevel;
+		if (contextIsIdle(ctx)) activeLevel = effectiveLevel;
 		if (currentModelMatchesSelected(ctx)) {
 			return setDefaultLevel(effectiveLevel, ctx);
 		}
@@ -770,18 +982,19 @@ export default function reasoningQueueExtension(pi: ExtensionAPI): void {
 		if (models.length === 0) return;
 		const current = getSelectedModel(ctx) ?? ctx.model;
 		let index = current ? models.findIndex((model) => model.provider === current.provider && model.id === current.id) : -1;
-		if (index === -1) index = 0;
+		if (index === -1) index = direction === 1 ? -1 : 0;
 		const next = models[(index + direction + models.length) % models.length];
 		selectedModelRef = getModelRef(next as ReasoningModel);
 		clampDefaultLevelToSelectedModel(ctx);
 		updateStatus(ctx);
+		if (!contextIsIdle(ctx)) return;
 
 		const sequence = ++modelChangeSequence;
 		void (async () => {
 			await applyModelRef(selectedModelRef, ctx);
 			if (sequence !== modelChangeSequence) return;
 			defaultLevel = setEffectiveThinkingLevel(defaultLevel, ctx);
-			if (ctx.isIdle()) activeLevel = defaultLevel;
+			if (contextIsIdle(ctx)) activeLevel = defaultLevel;
 			updateStatus(ctx);
 		})();
 	}
@@ -808,9 +1021,11 @@ export default function reasoningQueueExtension(pi: ExtensionAPI): void {
 				if (!model) return;
 				selectedModelRef = getModelRef(model as ReasoningModel);
 				clampDefaultLevelToSelectedModel(ctx);
-				await applyModelRef(selectedModelRef, ctx);
-				defaultLevel = setEffectiveThinkingLevel(defaultLevel, ctx);
-				if (ctx.isIdle()) activeLevel = defaultLevel;
+				if (contextIsIdle(ctx)) {
+					await applyModelRef(selectedModelRef, ctx);
+					defaultLevel = setEffectiveThinkingLevel(defaultLevel, ctx);
+					activeLevel = defaultLevel;
+				}
 			} finally {
 				pickerOpen = false;
 				updateStatus(ctx);
@@ -927,7 +1142,7 @@ export default function reasoningQueueExtension(pi: ExtensionAPI): void {
 	pi.on("model_select", (_event, ctx) => {
 		selectedModelRef = getModelRef(ctx.model as ReasoningModel | undefined);
 		defaultLevel = setEffectiveThinkingLevel(pi.getThinkingLevel(), ctx);
-		activeLevel = defaultLevel;
+		if (contextIsIdle(ctx)) activeLevel = defaultLevel;
 		pendingLevels = pendingLevels.map((pending) => {
 			const pendingModel = resolveModelRef(ctx, pending.model) ?? (ctx.model as ReasoningModel | undefined);
 			return { ...pending, level: clampReasoningLevel(pending.level, pendingModel as ReasoningModel | undefined) };
@@ -938,7 +1153,7 @@ export default function reasoningQueueExtension(pi: ExtensionAPI): void {
 	pi.on("input", async (event, ctx) => {
 		if (event.source === "extension") return { action: "continue" as const };
 		fieldFocus = "prompt";
-		if (ctx.isIdle() && pendingLevels.length > 0) pendingLevels = [];
+		if (contextIsIdle(ctx) && pendingLevels.length > 0) pendingLevels = [];
 
 		const parsed = parseReasoningDirective(event.text);
 		if (parsed?.kind === "invalid") {
@@ -947,7 +1162,7 @@ export default function reasoningQueueExtension(pi: ExtensionAPI): void {
 		}
 
 		if (!parsed) {
-			if (ctx.isIdle() && pendingLevels.length === 0 && currentModelMatchesSelected(ctx)) {
+			if (contextIsIdle(ctx) && pendingLevels.length === 0 && currentModelMatchesSelected(ctx)) {
 				defaultLevel = setEffectiveThinkingLevel(pi.getThinkingLevel(), ctx);
 				activeLevel = defaultLevel;
 				selectedModelRef = getModelRef(ctx.model as ReasoningModel | undefined);
@@ -979,8 +1194,8 @@ export default function reasoningQueueExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("before_provider_request", (event, ctx) => {
-		const model = ctx.model as ReasoningModel | undefined;
-		const level = ctx.model?.reasoning ? clampReasoningLevel(activeLevel, model) : "off";
+		const model = resolvePayloadModel(event.payload, ctx) as ReasoningModel | undefined;
+		const level = model?.reasoning ? clampReasoningLevel(activeLevel, model) : "off";
 		return rewriteProviderPayload(event.payload, level, model);
 	});
 

@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import reasoningQueueExtension, { clampReasoningLevel, getSupportedReasoningLevels, parseReasoningDirective, rewriteProviderPayload } from "../index.ts";
 
 function createEventBusStub() {
@@ -54,6 +57,12 @@ const glmReasoningModel = {
 	name: "GLM-5.1",
 	provider: "zai-coding-plan",
 	compat: { thinkingFormat: "zai" },
+} as const;
+
+const olderReasoningModel = {
+	...reasoningModel,
+	id: "gpt-5.3-codex",
+	name: "GPT-5.3 Codex",
 } as const;
 
 test("parses slash, colon, and bracket reasoning directives", () => {
@@ -225,6 +234,220 @@ test("tab field controls change model and clamp queued reasoning", async () => {
 	assert.deepEqual(terminalInputHandlers[0]("\x1b[9:9;2u"), { consume: true });
 	assert.match(widgetLines[0], /\[prompt\]/);
 	assert.equal(terminalInputHandlers[0]("\x1b[9:9;1u"), undefined);
+});
+
+test("queued model changes while busy are deferred until the queued message starts", async () => {
+	const events = createEventBusStub();
+	const handlers = new Map<string, Function[]>();
+	const terminalInputHandlers: Function[] = [];
+	let currentModel: typeof reasoningModel | typeof glmReasoningModel = reasoningModel;
+	let thinkingLevel = "xhigh";
+	const setModelCalls: string[] = [];
+	const models = [reasoningModel, glmReasoningModel];
+	const pi = {
+		events,
+		on(name: string, handler: Function) {
+			handlers.set(name, [...(handlers.get(name) ?? []), handler]);
+		},
+		getThinkingLevel() {
+			return thinkingLevel;
+		},
+		setThinkingLevel(level: string) {
+			thinkingLevel = level;
+		},
+		async setModel(model: typeof reasoningModel | typeof glmReasoningModel) {
+			setModelCalls.push(`${model.provider}/${model.id}`);
+			currentModel = model;
+			return true;
+		},
+	};
+	const ctx = {
+		hasUI: true,
+		get model() {
+			return currentModel;
+		},
+		modelRegistry: {
+			getAvailable() {
+				return models;
+			},
+			find(provider: string, id: string) {
+				return models.find((model) => model.provider === provider && model.id === id);
+			},
+		},
+		isIdle() {
+			return false;
+		},
+		ui: {
+			theme: { fg: (_color: string, text: string) => text },
+			setStatus() {},
+			setWidget() {},
+			onTerminalInput(handler: Function) {
+				terminalInputHandlers.push(handler);
+				return () => {};
+			},
+			addAutocompleteProvider() {},
+			getEditorText() {
+				return "";
+			},
+			notify() {},
+			async select() {
+				return undefined;
+			},
+		},
+	};
+	reasoningQueueExtension(pi as never);
+
+	await handlers.get("session_start")![0]({}, ctx as never);
+	assert.deepEqual(terminalInputHandlers[0]("\t"), { consume: true });
+	assert.deepEqual(terminalInputHandlers[0]("\x1b[C"), { consume: true });
+
+	assert.equal(currentModel.id, "gpt-5.4-codex");
+	assert.equal(thinkingLevel, "xhigh");
+	assert.deepEqual(setModelCalls, []);
+
+	const inputResult = await handlers.get("input")![0]({ text: "queued task", source: "interactive" }, ctx as never);
+	assert.deepEqual(inputResult, { action: "continue" });
+
+	const rewritten = handlers.get("before_provider_request")![0](
+		{ payload: { model: "gpt-5.4-codex", input: [], reasoning: { effort: "low", summary: "auto" } } },
+		ctx as never,
+	) as { reasoning: { effort: string }; enable_thinking?: boolean };
+	assert.equal(rewritten.reasoning.effort, "xhigh");
+	assert.equal("enable_thinking" in rewritten, false);
+
+	await handlers.get("message_start")![0]({ message: { role: "user", content: "queued task" } }, ctx as never);
+	assert.equal(currentModel.id, "glm-5.1");
+	assert.equal(thinkingLevel, "high");
+	assert.deepEqual(setModelCalls, ["zai-coding-plan/glm-5.1"]);
+});
+
+test("provider payload rewriting follows the request payload model when context model differs", async () => {
+	const handlers = new Map<string, Function[]>();
+	let currentModel: typeof reasoningModel | typeof glmReasoningModel = reasoningModel;
+	let thinkingLevel = "xhigh";
+	const models = [reasoningModel, glmReasoningModel];
+	const pi = {
+		events: createEventBusStub(),
+		on(name: string, handler: Function) {
+			handlers.set(name, [...(handlers.get(name) ?? []), handler]);
+		},
+		getThinkingLevel() {
+			return thinkingLevel;
+		},
+		setThinkingLevel(level: string) {
+			thinkingLevel = level;
+		},
+	};
+	const ctx = {
+		hasUI: false,
+		get model() {
+			return currentModel;
+		},
+		modelRegistry: {
+			getAvailable() {
+				return models;
+			},
+			find(provider: string, id: string) {
+				return models.find((model) => model.provider === provider && model.id === id);
+			},
+		},
+		isIdle() {
+			return true;
+		},
+		ui: { notify() {} },
+	};
+	reasoningQueueExtension(pi as never);
+
+	await handlers.get("session_start")![0]({}, ctx as never);
+	currentModel = glmReasoningModel;
+
+	const rewritten = handlers.get("before_provider_request")![0](
+		{ payload: { model: "gpt-5.4-codex", input: [], reasoning: { effort: "low", summary: "auto" } } },
+		ctx as never,
+	) as { reasoning: { effort: string }; include?: string[]; enable_thinking?: boolean };
+
+	assert.equal(rewritten.reasoning.effort, "xhigh");
+	assert.deepEqual(rewritten.include, ["reasoning.encrypted_content"]);
+	assert.equal("enable_thinking" in rewritten, false);
+});
+
+test("tabbable model selector uses scoped enabledModels settings", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "reasoning-queue-scope-"));
+	try {
+		mkdirSync(join(cwd, ".pi"));
+		writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({ enabledModels: ["zai-coding-plan/glm-5.1"] }));
+
+		const handlers = new Map<string, Function[]>();
+		const terminalInputHandlers: Function[] = [];
+		let currentModel: typeof reasoningModel | typeof olderReasoningModel | typeof glmReasoningModel = reasoningModel;
+		let thinkingLevel = "medium";
+		const setModelCalls: string[] = [];
+		const models = [reasoningModel, olderReasoningModel, glmReasoningModel];
+		const pi = {
+			events: createEventBusStub(),
+			on(name: string, handler: Function) {
+				handlers.set(name, [...(handlers.get(name) ?? []), handler]);
+			},
+			getThinkingLevel() {
+				return thinkingLevel;
+			},
+			setThinkingLevel(level: string) {
+				thinkingLevel = level;
+			},
+			async setModel(model: typeof reasoningModel | typeof olderReasoningModel | typeof glmReasoningModel) {
+				setModelCalls.push(`${model.provider}/${model.id}`);
+				currentModel = model;
+				return true;
+			},
+		};
+		const ctx = {
+			cwd,
+			hasUI: true,
+			get model() {
+				return currentModel;
+			},
+			modelRegistry: {
+				getAvailable() {
+					return models;
+				},
+				find(provider: string, id: string) {
+					return models.find((model) => model.provider === provider && model.id === id);
+				},
+			},
+			isIdle() {
+				return true;
+			},
+			ui: {
+				theme: { fg: (_color: string, text: string) => text },
+				setStatus() {},
+				setWidget() {},
+				onTerminalInput(handler: Function) {
+					terminalInputHandlers.push(handler);
+					return () => {};
+				},
+				addAutocompleteProvider() {},
+				getEditorText() {
+					return "";
+				},
+				notify() {},
+				async select() {
+					return undefined;
+				},
+			},
+		};
+		reasoningQueueExtension(pi as never);
+
+		await handlers.get("session_start")![0]({}, ctx as never);
+		assert.deepEqual(terminalInputHandlers[0]("\t"), { consume: true });
+		assert.deepEqual(terminalInputHandlers[0]("\x1b[C"), { consume: true });
+		await Promise.resolve();
+		await Promise.resolve();
+
+		assert.equal(currentModel.id, "glm-5.1");
+		assert.deepEqual(setModelCalls, ["zai-coding-plan/glm-5.1"]);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
 });
 
 test("rewrites OpenAI Responses reasoning without mutating original payload", () => {
