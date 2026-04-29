@@ -176,6 +176,10 @@ test("tab field controls change model and clamp queued reasoning", async () => {
 	assert.equal(terminalInputHandlers.length, 1);
 
 	assert.deepEqual(terminalInputHandlers[0]("\t"), { consume: true });
+	assert.match(widgetLines[0], /\[model:/);
+	assert.deepEqual(terminalInputHandlers[0]("\x1b[9;2u"), { consume: true });
+	assert.match(widgetLines[0], /\[prompt\]/);
+	assert.deepEqual(terminalInputHandlers[0]("\t"), { consume: true });
 	assert.deepEqual(terminalInputHandlers[0]("\x1b[C"), { consume: true });
 	await Promise.resolve();
 	await Promise.resolve();

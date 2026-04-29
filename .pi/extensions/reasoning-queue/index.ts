@@ -213,11 +213,11 @@ function formatModelRef(model: Pick<ReasoningModel, "provider" | "id"> | ModelRe
 }
 
 function isTabKey(data: string): boolean {
-	return data === "\t";
+	return data === "\t" || /^\x1b\[9(?:;1(?::[12])?)?u$/.test(data);
 }
 
 function isShiftTabKey(data: string): boolean {
-	return data === "\x1b[Z";
+	return data === "\x1b[Z" || data === "\x1b[27;2;9~" || /^\x1b\[9;2(?::[12])?u$/.test(data);
 }
 
 function isForwardKey(data: string): boolean {
