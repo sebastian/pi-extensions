@@ -1,6 +1,24 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseReasoningDirective, rewriteProviderPayload } from "../index.ts";
+import reasoningQueueExtension, { parseReasoningDirective, rewriteProviderPayload } from "../index.ts";
+
+test("registers without invoking runtime action methods during extension loading", () => {
+	const registeredEvents: string[] = [];
+	const pi = {
+		on(name: string) {
+			registeredEvents.push(name);
+		},
+		getThinkingLevel() {
+			throw new Error("getThinkingLevel should not be called during registration");
+		},
+		setThinkingLevel() {
+			throw new Error("setThinkingLevel should not be called during registration");
+		},
+	};
+
+	assert.doesNotThrow(() => reasoningQueueExtension(pi as never));
+	assert.deepEqual(registeredEvents, ["session_start", "model_select", "input", "message_start", "before_provider_request", "session_shutdown"]);
+});
 
 const reasoningModel = {
 	api: "openai-responses",

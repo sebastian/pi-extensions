@@ -440,7 +440,7 @@ function formatValidLevels(): string {
 }
 
 export default function reasoningQueueExtension(pi: ExtensionAPI): void {
-	let defaultLevel: ThinkingLevel = pi.getThinkingLevel();
+	let defaultLevel: ThinkingLevel = "medium";
 	let activeLevel: ThinkingLevel = defaultLevel;
 	let pendingLevels: PendingReasoningLevel[] = [];
 
