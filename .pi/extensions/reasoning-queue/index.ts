@@ -4,7 +4,7 @@ import type { Model } from "@mariozechner/pi-ai";
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
 
-type ReasoningModel = Pick<Model<any>, "api" | "id" | "name" | "provider" | "reasoning" | "maxTokens" | "compat" | "baseUrl">;
+export type ReasoningModel = Pick<Model<any>, "api" | "id" | "name" | "provider" | "reasoning" | "maxTokens" | "compat" | "baseUrl">;
 
 type JsonRecord = Record<string, unknown>;
 
@@ -124,10 +124,70 @@ function modelSupportsXhigh(model: ReasoningModel | undefined): boolean {
 	);
 }
 
-function clampReasoningLevel(level: ThinkingLevel, model: ReasoningModel | undefined): ThinkingLevel {
-	if (level === "off") return "off";
-	if (level === "xhigh" && !modelSupportsXhigh(model)) return "high";
-	return level;
+function normalizeSupportedLevels(levels: ThinkingLevel[]): ThinkingLevel[] {
+	const supported = new Set<ThinkingLevel>(["off", ...levels]);
+	return THINKING_LEVELS.filter((level) => supported.has(level));
+}
+
+function parseSupportedLevels(value: unknown): ThinkingLevel[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	const levels = value.flatMap((item) => {
+		if (typeof item !== "string") return [];
+		const level = normalizeThinkingLevel(item);
+		return level ? [level] : [];
+	});
+	return levels.length > 0 ? normalizeSupportedLevels(levels) : undefined;
+}
+
+function getExplicitSupportedLevels(model: ReasoningModel | undefined): ThinkingLevel[] | undefined {
+	const compat = isRecord(model?.compat) ? model.compat : undefined;
+	return (
+		parseSupportedLevels(compat?.supportedThinkingLevels) ??
+		parseSupportedLevels(compat?.supportedReasoningLevels) ??
+		parseSupportedLevels(compat?.thinkingLevels) ??
+		parseSupportedLevels(compat?.reasoningLevels)
+	);
+}
+
+function isBooleanThinkingFormat(model: ReasoningModel | undefined): boolean {
+	const thinkingFormat = isRecord(model?.compat) && typeof model.compat.thinkingFormat === "string" ? model.compat.thinkingFormat : undefined;
+	return thinkingFormat === "zai" || thinkingFormat === "qwen" || thinkingFormat === "qwen-chat-template";
+}
+
+function getCodexModelFamily(model: ReasoningModel | undefined): string {
+	const id = (model?.id ?? "").toLowerCase();
+	return id.includes("/") ? id.split("/").pop()! : id;
+}
+
+export function getSupportedReasoningLevels(model: ReasoningModel | undefined): ThinkingLevel[] {
+	if (model?.reasoning === false) return ["off"];
+
+	const explicit = getExplicitSupportedLevels(model);
+	if (explicit) return explicit;
+
+	if (isBooleanThinkingFormat(model) || (model?.api ?? "").includes("mistral")) return ["off", "high"];
+	if (getCodexModelFamily(model) === "gpt-5.1-codex-mini") return ["off", "medium", "high"];
+	if (modelSupportsXhigh(model)) return [...THINKING_LEVELS];
+	return THINKING_LEVELS.filter((level) => level !== "xhigh");
+}
+
+export function clampReasoningLevel(level: ThinkingLevel, model: ReasoningModel | undefined): ThinkingLevel {
+	const supported = getSupportedReasoningLevels(model);
+	if (supported.includes(level)) return level;
+
+	const supportedSet = new Set(supported);
+	const requestedIndex = THINKING_LEVELS.indexOf(level);
+	if (requestedIndex === -1) return supported[0] ?? "off";
+
+	for (let i = requestedIndex; i < THINKING_LEVELS.length; i++) {
+		const candidate = THINKING_LEVELS[i];
+		if (supportedSet.has(candidate)) return candidate;
+	}
+	for (let i = requestedIndex - 1; i >= 0; i--) {
+		const candidate = THINKING_LEVELS[i];
+		if (supportedSet.has(candidate)) return candidate;
+	}
+	return supported[0] ?? "off";
 }
 
 function getReasoningEffort(level: ThinkingLevel, model: ReasoningModel | undefined): string | undefined {
@@ -455,9 +515,20 @@ export default function reasoningQueueExtension(pi: ExtensionAPI): void {
 		ctx.ui.setWidget("reasoning-queue", [ctx.ui.theme.fg("dim", `Queued reasoning: ${queue}`)], { placement: "belowEditor" });
 	}
 
+	function setEffectiveThinkingLevel(level: ThinkingLevel, ctx: ExtensionContext): ThinkingLevel {
+		const model = ctx.model as ReasoningModel | undefined;
+		pi.setThinkingLevel(clampReasoningLevel(level, model));
+		let effectiveLevel = pi.getThinkingLevel();
+		const modelEffectiveLevel = clampReasoningLevel(effectiveLevel, model);
+		if (modelEffectiveLevel !== effectiveLevel) {
+			pi.setThinkingLevel(modelEffectiveLevel);
+			effectiveLevel = pi.getThinkingLevel();
+		}
+		return clampReasoningLevel(effectiveLevel, model);
+	}
+
 	function setDefaultLevel(level: ThinkingLevel, ctx: ExtensionContext): ThinkingLevel {
-		pi.setThinkingLevel(level);
-		const effectiveLevel = pi.getThinkingLevel();
+		const effectiveLevel = setEffectiveThinkingLevel(level, ctx);
 		defaultLevel = effectiveLevel;
 		if (ctx.isIdle()) activeLevel = effectiveLevel;
 		updateStatus(ctx);
@@ -465,8 +536,7 @@ export default function reasoningQueueExtension(pi: ExtensionAPI): void {
 	}
 
 	function applyActiveLevel(level: ThinkingLevel, ctx: ExtensionContext): void {
-		pi.setThinkingLevel(level);
-		activeLevel = pi.getThinkingLevel();
+		activeLevel = setEffectiveThinkingLevel(level, ctx);
 		updateStatus(ctx);
 	}
 
@@ -481,7 +551,7 @@ export default function reasoningQueueExtension(pi: ExtensionAPI): void {
 	}
 
 	pi.on("session_start", (_event, ctx) => {
-		defaultLevel = pi.getThinkingLevel();
+		defaultLevel = setEffectiveThinkingLevel(pi.getThinkingLevel(), ctx);
 		activeLevel = defaultLevel;
 		pendingLevels = [];
 		updateStatus(ctx);
@@ -509,7 +579,7 @@ export default function reasoningQueueExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("model_select", (_event, ctx) => {
-		defaultLevel = pi.getThinkingLevel();
+		defaultLevel = setEffectiveThinkingLevel(pi.getThinkingLevel(), ctx);
 		activeLevel = defaultLevel;
 		pendingLevels = pendingLevels.map((pending) => ({ ...pending, level: clampReasoningLevel(pending.level, ctx.model as ReasoningModel | undefined) }));
 		updateStatus(ctx);
@@ -527,7 +597,7 @@ export default function reasoningQueueExtension(pi: ExtensionAPI): void {
 
 		if (!parsed) {
 			if (ctx.isIdle() && pendingLevels.length === 0) {
-				defaultLevel = pi.getThinkingLevel();
+				defaultLevel = setEffectiveThinkingLevel(pi.getThinkingLevel(), ctx);
 				activeLevel = defaultLevel;
 			}
 			pendingLevels.push({ text: event.text, level: defaultLevel, explicit: false });
@@ -556,8 +626,9 @@ export default function reasoningQueueExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("before_provider_request", (event, ctx) => {
-		const level = ctx.model?.reasoning ? activeLevel : "off";
-		return rewriteProviderPayload(event.payload, level, ctx.model as ReasoningModel | undefined);
+		const model = ctx.model as ReasoningModel | undefined;
+		const level = ctx.model?.reasoning ? clampReasoningLevel(activeLevel, model) : "off";
+		return rewriteProviderPayload(event.payload, level, model);
 	});
 
 	pi.on("session_shutdown", (_event, ctx) => {

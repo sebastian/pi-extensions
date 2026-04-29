@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import reasoningQueueExtension, { parseReasoningDirective, rewriteProviderPayload } from "../index.ts";
+import reasoningQueueExtension, { clampReasoningLevel, getSupportedReasoningLevels, parseReasoningDirective, rewriteProviderPayload } from "../index.ts";
 
 test("registers without invoking runtime action methods during extension loading", () => {
 	const registeredEvents: string[] = [];
@@ -31,6 +31,15 @@ const reasoningModel = {
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 	contextWindow: 128000,
 	input: ["text"],
+} as const;
+
+const glmReasoningModel = {
+	...reasoningModel,
+	api: "openai-completions",
+	id: "glm-5.1",
+	name: "GLM-5.1",
+	provider: "zai-coding-plan",
+	compat: { thinkingFormat: "zai" },
 } as const;
 
 test("parses slash, colon, and bracket reasoning directives", () => {
@@ -67,6 +76,37 @@ test("handles standalone and invalid slash directives", () => {
 		syntax: "slash",
 	});
 	assert.equal(parseReasoningDirective(":not-a-level keep literal"), undefined);
+});
+
+test("clamps reasoning levels to the closest level supported by the model", () => {
+	assert.deepEqual(getSupportedReasoningLevels(glmReasoningModel), ["off", "high"]);
+	assert.equal(clampReasoningLevel("xhigh", glmReasoningModel), "high");
+	assert.equal(clampReasoningLevel("medium", glmReasoningModel), "high");
+	assert.equal(clampReasoningLevel("off", glmReasoningModel), "off");
+});
+
+test("model selection applies the closest supported queued reasoning level", async () => {
+	const handlers = new Map<string, Function[]>();
+	let thinkingLevel = "medium";
+	const setCalls: string[] = [];
+	const pi = {
+		on(name: string, handler: Function) {
+			handlers.set(name, [...(handlers.get(name) ?? []), handler]);
+		},
+		getThinkingLevel() {
+			return thinkingLevel;
+		},
+		setThinkingLevel(level: string) {
+			setCalls.push(level);
+			thinkingLevel = level;
+		},
+	};
+	reasoningQueueExtension(pi as never);
+
+	await handlers.get("model_select")![0]({}, { hasUI: false, model: glmReasoningModel } as never);
+
+	assert.equal(thinkingLevel, "high");
+	assert.deepEqual(setCalls, ["high"]);
 });
 
 test("rewrites OpenAI Responses reasoning without mutating original payload", () => {

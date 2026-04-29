@@ -26,5 +26,6 @@ Messages without a directive inherit the current default. If you queue `:low tas
 ## Notes
 
 - Directives are stripped before the message is sent to the model.
+- If the selected model cannot use a requested level, the extension applies the closest supported level instead. For example, boolean on/off thinking models such as GLM/Z.AI clamp any non-`off` request, including `xhigh`, to `high`.
 - The extension tracks queued messages in order and rewrites provider requests so steering messages inside an active agent run can still use their queued reasoning level.
 - The footer status shows the current inherited default as `reasoning:<level>`.
