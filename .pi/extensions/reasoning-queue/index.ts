@@ -12,11 +12,19 @@ export type ReasoningDirective =
 	| { kind: "directive"; level: ThinkingLevel; rest: string; syntax: "slash" | "colon" | "bracket" }
 	| { kind: "invalid"; token?: string; syntax: "slash" | "bracket" };
 
+interface ModelRef {
+	provider: string;
+	id: string;
+}
+
 interface PendingReasoningLevel {
 	text: string;
 	level: ThinkingLevel;
 	explicit: boolean;
+	model?: ModelRef;
 }
+
+type FieldFocus = "prompt" | "model" | "reasoning";
 
 const LEVEL_ALIASES: Record<string, ThinkingLevel> = {
 	"0": "off",
@@ -188,6 +196,52 @@ export function clampReasoningLevel(level: ThinkingLevel, model: ReasoningModel 
 		if (supportedSet.has(candidate)) return candidate;
 	}
 	return supported[0] ?? "off";
+}
+
+function getModelRef(model: Pick<ReasoningModel, "provider" | "id"> | undefined): ModelRef | undefined {
+	if (!model) return undefined;
+	return { provider: model.provider, id: model.id };
+}
+
+function modelRefsEqual(a: ModelRef | undefined, b: ModelRef | undefined): boolean {
+	return !!a && !!b && a.provider === b.provider && a.id === b.id;
+}
+
+function formatModelRef(model: Pick<ReasoningModel, "provider" | "id"> | ModelRef | undefined): string {
+	if (!model) return "no model";
+	return `${model.provider}/${model.id}`;
+}
+
+function isTabKey(data: string): boolean {
+	return data === "\t";
+}
+
+function isShiftTabKey(data: string): boolean {
+	return data === "\x1b[Z";
+}
+
+function isForwardKey(data: string): boolean {
+	return data === "\x1b[C" || data === "\x1b[B" || data === " ";
+}
+
+function isBackwardKey(data: string): boolean {
+	return data === "\x1b[D" || data === "\x1b[A";
+}
+
+function isEnterKey(data: string): boolean {
+	return data === "\r" || data === "\n";
+}
+
+function isEscapeKey(data: string): boolean {
+	return data === "\x1b";
+}
+
+function isCtrlCOrD(data: string): boolean {
+	return data === "\x03" || data === "\x04";
+}
+
+function isPrintableInput(data: string): boolean {
+	return data.length === 1 && data >= " " && data !== "\x7f";
 }
 
 function getReasoningEffort(level: ThinkingLevel, model: ReasoningModel | undefined): string | undefined {
@@ -503,16 +557,85 @@ export default function reasoningQueueExtension(pi: ExtensionAPI): void {
 	let defaultLevel: ThinkingLevel = "medium";
 	let activeLevel: ThinkingLevel = defaultLevel;
 	let pendingLevels: PendingReasoningLevel[] = [];
+	let selectedModelRef: ModelRef | undefined;
+	let fieldFocus: FieldFocus = "prompt";
+	let unsubscribeTerminalInput: (() => void) | undefined;
+	let pickerOpen = false;
+	let modelChangeSequence = 0;
+
+	function getAvailableModels(ctx: ExtensionContext): Model<any>[] {
+		const models = ctx.modelRegistry.getAvailable();
+		const current = ctx.model;
+		if (!current || models.some((model) => model.provider === current.provider && model.id === current.id)) return models;
+		return [current, ...models];
+	}
+
+	function resolveModelRef(ctx: ExtensionContext, ref: ModelRef | undefined): Model<any> | undefined {
+		if (!ref) return ctx.model;
+		const resolved = ctx.modelRegistry.find(ref.provider, ref.id);
+		if (resolved) return resolved;
+		const current = ctx.model;
+		return current?.provider === ref.provider && current.id === ref.id ? current : undefined;
+	}
+
+	function getSelectedModel(ctx: ExtensionContext): Model<any> | undefined {
+		return resolveModelRef(ctx, selectedModelRef) ?? ctx.model;
+	}
+
+	function getPendingModelRef(ctx: ExtensionContext): ModelRef | undefined {
+		return selectedModelRef ?? getModelRef(ctx.model as ReasoningModel | undefined);
+	}
+
+	function getSelectedSupportedLevels(ctx: ExtensionContext): ThinkingLevel[] {
+		return getSupportedReasoningLevels(getSelectedModel(ctx) as ReasoningModel | undefined);
+	}
+
+	function currentModelMatchesSelected(ctx: ExtensionContext): boolean {
+		const currentRef = getModelRef(ctx.model as ReasoningModel | undefined);
+		return !selectedModelRef || modelRefsEqual(selectedModelRef, currentRef);
+	}
+
+	function clampDefaultLevelToSelectedModel(ctx: ExtensionContext): ThinkingLevel {
+		const effective = clampReasoningLevel(defaultLevel, getSelectedModel(ctx) as ReasoningModel | undefined);
+		defaultLevel = effective;
+		if (ctx.isIdle()) activeLevel = effective;
+		return effective;
+	}
+
+	function fieldLabel(ctx: ExtensionContext, field: FieldFocus, label: string): string {
+		const text = fieldFocus === field ? `[${label}]` : ` ${label} `;
+		return fieldFocus === field ? ctx.ui.theme.fg("accent", text) : ctx.ui.theme.fg("dim", text);
+	}
+
+	function formatQueuedEntry(ctx: ExtensionContext, pending: PendingReasoningLevel): string {
+		const model = pending.model ? formatModelRef(pending.model) : formatModelRef(ctx.model as ReasoningModel | undefined);
+		return `${pending.explicit ? "*" : ""}${model}:${pending.level}`;
+	}
 
 	function updateStatus(ctx: ExtensionContext): void {
 		if (!ctx.hasUI) return;
-		ctx.ui.setStatus("reasoning-queue", ctx.ui.theme.fg("dim", `reasoning:${defaultLevel}`));
-		if (pendingLevels.length === 0) {
-			ctx.ui.setWidget("reasoning-queue", undefined);
-			return;
+		const selectedModel = getSelectedModel(ctx) as ReasoningModel | undefined;
+		const effectiveLevel = clampReasoningLevel(defaultLevel, selectedModel);
+		if (effectiveLevel !== defaultLevel) {
+			defaultLevel = effectiveLevel;
+			if (ctx.isIdle()) activeLevel = effectiveLevel;
 		}
-		const queue = pendingLevels.map((pending) => `${pending.explicit ? "*" : ""}${pending.level}`).join(" → ");
-		ctx.ui.setWidget("reasoning-queue", [ctx.ui.theme.fg("dim", `Queued reasoning: ${queue}`)], { placement: "belowEditor" });
+
+		ctx.ui.setStatus("reasoning-queue", ctx.ui.theme.fg("dim", `reasoning:${defaultLevel}`));
+		const controls = [
+			fieldLabel(ctx, "prompt", "prompt"),
+			fieldLabel(ctx, "model", `model: ${formatModelRef(selectedModel)}`),
+			fieldLabel(ctx, "reasoning", `reasoning: ${defaultLevel}`),
+		].join(" ");
+		const levels = getSupportedReasoningLevels(selectedModel).join("/");
+		const lines = [
+			controls,
+			ctx.ui.theme.fg("dim", `Tab/Shift+Tab fields • ←/→ change • Enter pick/focus prompt • valid reasoning: ${levels}`),
+		];
+		if (pendingLevels.length > 0) {
+			lines.push(ctx.ui.theme.fg("dim", `Queued: ${pendingLevels.map((pending) => formatQueuedEntry(ctx, pending)).join(" → ")}`));
+		}
+		ctx.ui.setWidget("reasoning-queue", lines, { placement: "belowEditor" });
 	}
 
 	function setEffectiveThinkingLevel(level: ThinkingLevel, ctx: ExtensionContext): ThinkingLevel {
@@ -535,9 +658,33 @@ export default function reasoningQueueExtension(pi: ExtensionAPI): void {
 		return effectiveLevel;
 	}
 
+	function setSelectedDefaultLevel(level: ThinkingLevel, ctx: ExtensionContext): ThinkingLevel {
+		const selectedModel = getSelectedModel(ctx) as ReasoningModel | undefined;
+		const effectiveLevel = clampReasoningLevel(level, selectedModel);
+		defaultLevel = effectiveLevel;
+		if (ctx.isIdle()) activeLevel = effectiveLevel;
+		if (currentModelMatchesSelected(ctx)) {
+			return setDefaultLevel(effectiveLevel, ctx);
+		}
+		updateStatus(ctx);
+		return effectiveLevel;
+	}
+
 	function applyActiveLevel(level: ThinkingLevel, ctx: ExtensionContext): void {
 		activeLevel = setEffectiveThinkingLevel(level, ctx);
 		updateStatus(ctx);
+	}
+
+	async function applyModelRef(ref: ModelRef | undefined, ctx: ExtensionContext): Promise<void> {
+		const model = resolveModelRef(ctx, ref);
+		if (!model) return;
+		if (ctx.model?.provider === model.provider && ctx.model.id === model.id) return;
+		try {
+			const result = await pi.setModel(model);
+			if (result === false) ctx.ui.notify(`Could not switch to ${formatModelRef(model)}`, "error");
+		} catch (error) {
+			ctx.ui.notify(`Could not switch to ${formatModelRef(model)}: ${error instanceof Error ? error.message : String(error)}`, "error");
+		}
 	}
 
 	function takePendingLevel(messageText: string | undefined): PendingReasoningLevel | undefined {
@@ -550,43 +697,181 @@ export default function reasoningQueueExtension(pi: ExtensionAPI): void {
 		return pendingLevels.shift();
 	}
 
+	function moveFieldFocus(direction: 1 | -1, ctx: ExtensionContext): void {
+		const fields: FieldFocus[] = ["prompt", "model", "reasoning"];
+		const index = fields.indexOf(fieldFocus);
+		fieldFocus = fields[(index + direction + fields.length) % fields.length];
+		updateStatus(ctx);
+	}
+
+	function cycleSelectedModel(direction: 1 | -1, ctx: ExtensionContext): void {
+		const models = getAvailableModels(ctx);
+		if (models.length === 0) return;
+		const current = getSelectedModel(ctx) ?? ctx.model;
+		let index = current ? models.findIndex((model) => model.provider === current.provider && model.id === current.id) : -1;
+		if (index === -1) index = 0;
+		const next = models[(index + direction + models.length) % models.length];
+		selectedModelRef = getModelRef(next as ReasoningModel);
+		clampDefaultLevelToSelectedModel(ctx);
+		updateStatus(ctx);
+
+		const sequence = ++modelChangeSequence;
+		void (async () => {
+			await applyModelRef(selectedModelRef, ctx);
+			if (sequence !== modelChangeSequence) return;
+			defaultLevel = setEffectiveThinkingLevel(defaultLevel, ctx);
+			if (ctx.isIdle()) activeLevel = defaultLevel;
+			updateStatus(ctx);
+		})();
+	}
+
+	function cycleSelectedReasoning(direction: 1 | -1, ctx: ExtensionContext): void {
+		const levels = getSelectedSupportedLevels(ctx);
+		if (levels.length === 0) return;
+		const current = clampReasoningLevel(defaultLevel, getSelectedModel(ctx) as ReasoningModel | undefined);
+		const index = Math.max(0, levels.indexOf(current));
+		const next = levels[(index + direction + levels.length) % levels.length];
+		setSelectedDefaultLevel(next, ctx);
+	}
+
+	function openModelPicker(ctx: ExtensionContext): void {
+		if (pickerOpen) return;
+		const models = getAvailableModels(ctx);
+		if (models.length === 0) return;
+		pickerOpen = true;
+		void (async () => {
+			try {
+				const options = models.map((model) => formatModelRef(model as ReasoningModel));
+				const selected = await ctx.ui.select("Select model", options);
+				const model = selected ? models.find((candidate) => formatModelRef(candidate as ReasoningModel) === selected) : undefined;
+				if (!model) return;
+				selectedModelRef = getModelRef(model as ReasoningModel);
+				clampDefaultLevelToSelectedModel(ctx);
+				await applyModelRef(selectedModelRef, ctx);
+				defaultLevel = setEffectiveThinkingLevel(defaultLevel, ctx);
+				if (ctx.isIdle()) activeLevel = defaultLevel;
+			} finally {
+				pickerOpen = false;
+				updateStatus(ctx);
+			}
+		})();
+	}
+
+	function openReasoningPicker(ctx: ExtensionContext): void {
+		if (pickerOpen) return;
+		const levels = getSelectedSupportedLevels(ctx);
+		if (levels.length === 0) return;
+		pickerOpen = true;
+		void (async () => {
+			try {
+				const selected = await ctx.ui.select("Select reasoning level", levels);
+				const level = normalizeThinkingLevel(selected);
+				if (level) setSelectedDefaultLevel(level, ctx);
+			} finally {
+				pickerOpen = false;
+				updateStatus(ctx);
+			}
+		})();
+	}
+
+	function handleFieldInput(data: string, ctx: ExtensionContext): { consume?: boolean; data?: string } | undefined {
+		if (pickerOpen) return undefined;
+		if (isTabKey(data) || isShiftTabKey(data)) {
+			if (fieldFocus === "prompt" && ctx.ui.getEditorText().trim().length > 0) return undefined;
+			moveFieldFocus(isShiftTabKey(data) ? -1 : 1, ctx);
+			return { consume: true };
+		}
+
+		if (fieldFocus === "prompt") return undefined;
+		if (isCtrlCOrD(data)) {
+			fieldFocus = "prompt";
+			updateStatus(ctx);
+			return undefined;
+		}
+		if (isEscapeKey(data)) {
+			fieldFocus = "prompt";
+			updateStatus(ctx);
+			return { consume: true };
+		}
+		if (isPrintableInput(data) && data !== " ") {
+			fieldFocus = "prompt";
+			updateStatus(ctx);
+			return { data };
+		}
+
+		if (fieldFocus === "model") {
+			if (isEnterKey(data)) {
+				openModelPicker(ctx);
+				return { consume: true };
+			}
+			if (isForwardKey(data) || isBackwardKey(data)) {
+				cycleSelectedModel(isBackwardKey(data) ? -1 : 1, ctx);
+				return { consume: true };
+			}
+		}
+
+		if (fieldFocus === "reasoning") {
+			if (isEnterKey(data)) {
+				openReasoningPicker(ctx);
+				return { consume: true };
+			}
+			if (isForwardKey(data) || isBackwardKey(data)) {
+				cycleSelectedReasoning(isBackwardKey(data) ? -1 : 1, ctx);
+				return { consume: true };
+			}
+		}
+
+		return { consume: true };
+	}
+
 	pi.on("session_start", (_event, ctx) => {
+		selectedModelRef = getModelRef(ctx.model as ReasoningModel | undefined);
 		defaultLevel = setEffectiveThinkingLevel(pi.getThinkingLevel(), ctx);
 		activeLevel = defaultLevel;
 		pendingLevels = [];
+		fieldFocus = "prompt";
 		updateStatus(ctx);
 
-		ctx.ui.addAutocompleteProvider((current) => ({
-			async getSuggestions(lines, line, col, options) {
-				const beforeCursor = (lines[line] ?? "").slice(0, col);
-				const match = beforeCursor.match(/(?:^|\s)\/(?:r|reason|reasoning|think|thinking)\s+(\S*)$/iu);
-				if (!match) return current.getSuggestions(lines, line, col, options);
-				const prefix = match[1] ?? "";
-				const items = THINKING_LEVELS.filter((level) => level.startsWith(prefix.toLowerCase())).map((level) => ({
-					value: level,
-					label: level,
-					description: "message reasoning level",
-				}));
-				return items.length > 0 ? { prefix, items } : null;
-			},
-			applyCompletion(lines, line, col, item, prefix) {
-				return current.applyCompletion(lines, line, col, item, prefix);
-			},
-			shouldTriggerFileCompletion(lines, line, col) {
-				return current.shouldTriggerFileCompletion?.(lines, line, col) ?? true;
-			},
-		}));
+		if (ctx.hasUI) {
+			unsubscribeTerminalInput?.();
+			unsubscribeTerminalInput = ctx.ui.onTerminalInput((data) => handleFieldInput(data, ctx));
+			ctx.ui.addAutocompleteProvider((current) => ({
+				async getSuggestions(lines, line, col, options) {
+					const beforeCursor = (lines[line] ?? "").slice(0, col);
+					const match = beforeCursor.match(/(?:^|\s)\/(?:r|reason|reasoning|think|thinking)\s+(\S*)$/iu);
+					if (!match) return current.getSuggestions(lines, line, col, options);
+					const prefix = match[1] ?? "";
+					const items = THINKING_LEVELS.filter((level) => level.startsWith(prefix.toLowerCase())).map((level) => ({
+						value: level,
+						label: level,
+						description: "message reasoning level",
+					}));
+					return items.length > 0 ? { prefix, items } : null;
+				},
+				applyCompletion(lines, line, col, item, prefix) {
+					return current.applyCompletion(lines, line, col, item, prefix);
+				},
+				shouldTriggerFileCompletion(lines, line, col) {
+					return current.shouldTriggerFileCompletion?.(lines, line, col) ?? true;
+				},
+			}));
+		}
 	});
 
 	pi.on("model_select", (_event, ctx) => {
+		selectedModelRef = getModelRef(ctx.model as ReasoningModel | undefined);
 		defaultLevel = setEffectiveThinkingLevel(pi.getThinkingLevel(), ctx);
 		activeLevel = defaultLevel;
-		pendingLevels = pendingLevels.map((pending) => ({ ...pending, level: clampReasoningLevel(pending.level, ctx.model as ReasoningModel | undefined) }));
+		pendingLevels = pendingLevels.map((pending) => {
+			const pendingModel = resolveModelRef(ctx, pending.model) ?? (ctx.model as ReasoningModel | undefined);
+			return { ...pending, level: clampReasoningLevel(pending.level, pendingModel as ReasoningModel | undefined) };
+		});
 		updateStatus(ctx);
 	});
 
 	pi.on("input", async (event, ctx) => {
 		if (event.source === "extension") return { action: "continue" as const };
+		fieldFocus = "prompt";
 		if (ctx.isIdle() && pendingLevels.length > 0) pendingLevels = [];
 
 		const parsed = parseReasoningDirective(event.text);
@@ -596,11 +881,12 @@ export default function reasoningQueueExtension(pi: ExtensionAPI): void {
 		}
 
 		if (!parsed) {
-			if (ctx.isIdle() && pendingLevels.length === 0) {
+			if (ctx.isIdle() && pendingLevels.length === 0 && currentModelMatchesSelected(ctx)) {
 				defaultLevel = setEffectiveThinkingLevel(pi.getThinkingLevel(), ctx);
 				activeLevel = defaultLevel;
+				selectedModelRef = getModelRef(ctx.model as ReasoningModel | undefined);
 			}
-			pendingLevels.push({ text: event.text, level: defaultLevel, explicit: false });
+			pendingLevels.push({ text: event.text, level: defaultLevel, explicit: false, model: getPendingModelRef(ctx) });
 			updateStatus(ctx);
 			return { action: "continue" as const };
 		}
@@ -613,15 +899,16 @@ export default function reasoningQueueExtension(pi: ExtensionAPI): void {
 			return { action: "handled" as const };
 		}
 
-		pendingLevels.push({ text: parsed.rest, level: effectiveLevel, explicit: true });
+		pendingLevels.push({ text: parsed.rest, level: effectiveLevel, explicit: true, model: getPendingModelRef(ctx) });
 		updateStatus(ctx);
 		return { action: "transform" as const, text: parsed.rest, images: event.images };
 	});
 
-	pi.on("message_start", (event, ctx) => {
+	pi.on("message_start", async (event, ctx) => {
 		const messageText = getUserMessageText(event.message);
 		if (messageText === undefined) return;
 		const pending = takePendingLevel(messageText);
+		await applyModelRef(pending?.model, ctx);
 		applyActiveLevel(pending?.level ?? defaultLevel, ctx);
 	});
 
@@ -632,6 +919,8 @@ export default function reasoningQueueExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", (_event, ctx) => {
+		unsubscribeTerminalInput?.();
+		unsubscribeTerminalInput = undefined;
 		if (!ctx.hasUI) return;
 		ctx.ui.setStatus("reasoning-queue", undefined);
 		ctx.ui.setWidget("reasoning-queue", undefined);

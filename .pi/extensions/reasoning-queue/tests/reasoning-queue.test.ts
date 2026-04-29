@@ -109,6 +109,96 @@ test("model selection applies the closest supported queued reasoning level", asy
 	assert.deepEqual(setCalls, ["high"]);
 });
 
+test("tab field controls change model and clamp queued reasoning", async () => {
+	const handlers = new Map<string, Function[]>();
+	const terminalInputHandlers: Function[] = [];
+	let currentModel: typeof reasoningModel | typeof glmReasoningModel = reasoningModel;
+	let thinkingLevel = "medium";
+	let editorText = "";
+	const setModelCalls: string[] = [];
+	let widgetLines: string[] = [];
+	const models = [reasoningModel, glmReasoningModel];
+	const pi = {
+		on(name: string, handler: Function) {
+			handlers.set(name, [...(handlers.get(name) ?? []), handler]);
+		},
+		getThinkingLevel() {
+			return thinkingLevel;
+		},
+		setThinkingLevel(level: string) {
+			thinkingLevel = level;
+		},
+		async setModel(model: typeof reasoningModel | typeof glmReasoningModel) {
+			setModelCalls.push(`${model.provider}/${model.id}`);
+			currentModel = model;
+			return true;
+		},
+	};
+	const ctx = {
+		hasUI: true,
+		get model() {
+			return currentModel;
+		},
+		modelRegistry: {
+			getAvailable() {
+				return models;
+			},
+			find(provider: string, id: string) {
+				return models.find((model) => model.provider === provider && model.id === id);
+			},
+		},
+		isIdle() {
+			return true;
+		},
+		ui: {
+			theme: { fg: (_color: string, text: string) => text },
+			setStatus() {},
+			setWidget(_key: string, lines: string[] | undefined) {
+				widgetLines = lines ?? [];
+			},
+			onTerminalInput(handler: Function) {
+				terminalInputHandlers.push(handler);
+				return () => {};
+			},
+			addAutocompleteProvider() {},
+			getEditorText() {
+				return editorText;
+			},
+			notify() {},
+			async select() {
+				return undefined;
+			},
+		},
+	};
+	reasoningQueueExtension(pi as never);
+
+	await handlers.get("session_start")![0]({}, ctx as never);
+	assert.equal(terminalInputHandlers.length, 1);
+
+	assert.deepEqual(terminalInputHandlers[0]("\t"), { consume: true });
+	assert.deepEqual(terminalInputHandlers[0]("\x1b[C"), { consume: true });
+	await Promise.resolve();
+	await Promise.resolve();
+
+	assert.equal(currentModel.id, "glm-5.1");
+	assert.equal(thinkingLevel, "high");
+	assert.deepEqual(setModelCalls, ["zai-coding-plan/glm-5.1"]);
+	assert.match(widgetLines.join("\n"), /valid reasoning: off\/high/);
+
+	const inputResult = await handlers.get("input")![0]({ text: "do thing", source: "interactive" }, ctx as never);
+	assert.deepEqual(inputResult, { action: "continue" });
+
+	currentModel = reasoningModel;
+	thinkingLevel = "medium";
+	await handlers.get("message_start")![0]({ message: { role: "user", content: "do thing" } }, ctx as never);
+	assert.equal(currentModel.id, "glm-5.1");
+	assert.equal(thinkingLevel, "high");
+	assert.deepEqual(setModelCalls, ["zai-coding-plan/glm-5.1", "zai-coding-plan/glm-5.1"]);
+
+	editorText = "already typing";
+	assert.equal(terminalInputHandlers[0]("\t"), undefined);
+});
+
 test("rewrites OpenAI Responses reasoning without mutating original payload", () => {
 	const payload = { model: "gpt-5.4-codex", input: [], reasoning: { effort: "low", summary: "auto" } };
 	const rewritten = rewriteProviderPayload(payload, "xhigh", reasoningModel) as { reasoning: { effort: string }; include: string[] };
