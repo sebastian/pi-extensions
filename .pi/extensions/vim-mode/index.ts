@@ -7,6 +7,10 @@ export default function vimModeExtension(pi: ExtensionAPI): void {
 	let activationId = 0;
 	let pendingTimers: Array<ReturnType<typeof setTimeout>> = [];
 
+	const emitMode = (mode: "normal" | "insert"): void => {
+		pi.events.emit("vim-mode:mode", { mode });
+	};
+
 	const clearPendingTimers = (): void => {
 		for (const timer of pendingTimers) clearTimeout(timer);
 		pendingTimers = [];
@@ -19,7 +23,7 @@ export default function vimModeExtension(pi: ExtensionAPI): void {
 
 		const applyEditor = (): void => {
 			if (sessionActivationId !== activationId) return;
-			ctx.ui.setEditorComponent((tui, theme, keybindings) => new VimEditor(tui, theme, keybindings));
+			ctx.ui.setEditorComponent((tui, theme, keybindings) => new VimEditor(tui, theme, keybindings, { onModeChange: emitMode }));
 		};
 
 		applyEditor();

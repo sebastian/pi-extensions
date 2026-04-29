@@ -98,14 +98,17 @@ export class VimEditor extends CustomEditor {
 	private readonly labelTheme: EditorTheme;
 	private readonly appKeybindings: KeybindingsManager;
 	private readonly controller: VimController;
+	private readonly onModeChange?: (mode: "normal" | "insert") => void;
 	private lastInsertEscapeAt = 0;
 	private readonly insertEscapeRecoveryWindowMs = 180;
 
-	constructor(tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) {
+	constructor(tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager, options?: { onModeChange?: (mode: "normal" | "insert") => void }) {
 		super(tui, theme, keybindings);
 		this.labelTheme = theme;
 		this.appKeybindings = keybindings;
 		this.controller = new VimController(new EditorBufferAdapter(this), { initialMode: "insert" });
+		this.onModeChange = options?.onModeChange;
+		this.onModeChange?.(this.controller.getMode());
 	}
 
 	getInternals(): EditorInternals {
@@ -113,6 +116,16 @@ export class VimEditor extends CustomEditor {
 	}
 
 	override handleInput(data: string): void {
+		const previousMode = this.controller.getMode();
+		try {
+			this.handleInputWithModeTracking(data);
+		} finally {
+			const nextMode = this.controller.getMode();
+			if (nextMode !== previousMode) this.onModeChange?.(nextMode);
+		}
+	}
+
+	private handleInputWithModeTracking(data: string): void {
 		const rerender = (): void => this.tui.requestRender();
 
 		if (matchesKey(data, Key.escape)) {

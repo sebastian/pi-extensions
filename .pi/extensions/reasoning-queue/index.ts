@@ -25,6 +25,7 @@ interface PendingReasoningLevel {
 }
 
 type FieldFocus = "prompt" | "model" | "reasoning";
+type EditorMode = "normal" | "insert";
 
 const LEVEL_ALIASES: Record<string, ThinkingLevel> = {
 	"0": "off",
@@ -212,36 +213,89 @@ function formatModelRef(model: Pick<ReasoningModel, "provider" | "id"> | ModelRe
 	return `${model.provider}/${model.id}`;
 }
 
+const MODIFIER_SHIFT = 1;
+const MODIFIER_CTRL = 4;
+const MODIFIER_LOCK_MASK = 64 + 128;
+const CSI_U_PATTERN = /^\x1b\[(\d+)(?::(\d*))?(?::(\d+))?(?:;(\d+))?(?::(\d+))?u$/;
+const CSI_ARROW_PATTERN = /^\x1b\[1;(\d+)(?::(\d+))?([ABCD])$/;
+const MODIFY_OTHER_KEYS_PATTERN = /^\x1b\[27;(\d+);(\d+)~$/;
+
+function normalizeModifier(value: number): number {
+	return (value - 1) & ~MODIFIER_LOCK_MASK;
+}
+
+function isReleaseEvent(eventType: string | undefined): boolean {
+	return eventType === "3";
+}
+
+function isKittyReleaseKey(data: string): boolean {
+	return /:3(?:u|~|[ABCDHF])$/.test(data);
+}
+
+function matchesCsiUKey(data: string, codepoint: number, modifier = 0): boolean {
+	const match = data.match(CSI_U_PATTERN);
+	if (!match || isReleaseEvent(match[5])) return false;
+	return Number(match[1]) === codepoint && normalizeModifier(Number(match[4] ?? 1)) === modifier;
+}
+
+function matchesModifyOtherKeys(data: string, codepoint: number, modifier: number): boolean {
+	const match = data.match(MODIFY_OTHER_KEYS_PATTERN);
+	return !!match && Number(match[2]) === codepoint && normalizeModifier(Number(match[1])) === modifier;
+}
+
+function matchesArrowKey(data: string, final: "A" | "B" | "C" | "D", modifier = 0): boolean {
+	const match = data.match(CSI_ARROW_PATTERN);
+	if (!match || isReleaseEvent(match[2])) return false;
+	return match[3] === final && normalizeModifier(Number(match[1])) === modifier;
+}
+
+function decodeKittyPrintable(data: string): string | undefined {
+	const match = data.match(CSI_U_PATTERN);
+	if (!match || isReleaseEvent(match[5])) return undefined;
+	const modifier = normalizeModifier(Number(match[4] ?? 1));
+	if (modifier !== 0 && modifier !== MODIFIER_SHIFT) return undefined;
+	const codepoint = modifier === MODIFIER_SHIFT && match[2] ? Number(match[2]) : Number(match[1]);
+	if (!Number.isFinite(codepoint) || codepoint < 32 || codepoint === 127) return undefined;
+	return String.fromCodePoint(codepoint);
+}
+
 function isTabKey(data: string): boolean {
-	return data === "\t" || /^\x1b\[9(?:;1(?::[12])?)?u$/.test(data);
+	return !isKittyReleaseKey(data) && (data === "\t" || matchesCsiUKey(data, 9));
 }
 
 function isShiftTabKey(data: string): boolean {
-	return data === "\x1b[Z" || data === "\x1b[27;2;9~" || /^\x1b\[9;2(?::[12])?u$/.test(data);
+	return !isKittyReleaseKey(data) && (data === "\x1b[Z" || matchesModifyOtherKeys(data, 9, MODIFIER_SHIFT) || matchesCsiUKey(data, 9, MODIFIER_SHIFT));
 }
 
 function isForwardKey(data: string): boolean {
-	return data === "\x1b[C" || data === "\x1b[B" || data === " ";
+	return !isKittyReleaseKey(data) && (data === "\x1b[C" || data === "\x1b[B" || data === " " || matchesArrowKey(data, "C") || matchesArrowKey(data, "B") || matchesCsiUKey(data, 32));
 }
 
 function isBackwardKey(data: string): boolean {
-	return data === "\x1b[D" || data === "\x1b[A";
+	return !isKittyReleaseKey(data) && (data === "\x1b[D" || data === "\x1b[A" || matchesArrowKey(data, "D") || matchesArrowKey(data, "A"));
 }
 
 function isEnterKey(data: string): boolean {
-	return data === "\r" || data === "\n";
+	return !isKittyReleaseKey(data) && (data === "\r" || data === "\n" || matchesCsiUKey(data, 13) || matchesCsiUKey(data, 57414));
 }
 
 function isEscapeKey(data: string): boolean {
-	return data === "\x1b";
+	return !isKittyReleaseKey(data) && (data === "\x1b" || matchesCsiUKey(data, 27));
 }
 
 function isCtrlCOrD(data: string): boolean {
-	return data === "\x03" || data === "\x04";
+	return (
+		!isKittyReleaseKey(data) &&
+		(data === "\x03" ||
+			data === "\x04" ||
+			matchesCsiUKey(data, "c".codePointAt(0)!, MODIFIER_CTRL) ||
+			matchesCsiUKey(data, "d".codePointAt(0)!, MODIFIER_CTRL))
+	);
 }
 
 function isPrintableInput(data: string): boolean {
-	return data.length === 1 && data >= " " && data !== "\x7f";
+	if (data.length === 1) return data >= " " && data !== "\x7f";
+	return decodeKittyPrintable(data) !== undefined;
 }
 
 function getReasoningEffort(level: ThinkingLevel, model: ReasoningModel | undefined): string | undefined {
@@ -559,9 +613,16 @@ export default function reasoningQueueExtension(pi: ExtensionAPI): void {
 	let pendingLevels: PendingReasoningLevel[] = [];
 	let selectedModelRef: ModelRef | undefined;
 	let fieldFocus: FieldFocus = "prompt";
+	let editorMode: EditorMode | undefined;
 	let unsubscribeTerminalInput: (() => void) | undefined;
+	let unsubscribeEditorMode: (() => void) | undefined;
 	let pickerOpen = false;
 	let modelChangeSequence = 0;
+
+	unsubscribeEditorMode = pi.events.on("vim-mode:mode", (data) => {
+		if (!isRecord(data)) return;
+		if (data.mode === "normal" || data.mode === "insert") editorMode = data.mode;
+	});
 
 	function getAvailableModels(ctx: ExtensionContext): Model<any>[] {
 		const models = ctx.modelRegistry.getAvailable();
@@ -774,10 +835,15 @@ export default function reasoningQueueExtension(pi: ExtensionAPI): void {
 		})();
 	}
 
+	function shouldLetPromptTabPassThrough(ctx: ExtensionContext): boolean {
+		if (ctx.ui.getEditorText().trim().length === 0) return false;
+		return editorMode !== "normal";
+	}
+
 	function handleFieldInput(data: string, ctx: ExtensionContext): { consume?: boolean; data?: string } | undefined {
-		if (pickerOpen) return undefined;
+		if (pickerOpen || isKittyReleaseKey(data)) return undefined;
 		if (isTabKey(data) || isShiftTabKey(data)) {
-			if (fieldFocus === "prompt" && ctx.ui.getEditorText().trim().length > 0) return undefined;
+			if (fieldFocus === "prompt" && shouldLetPromptTabPassThrough(ctx)) return undefined;
 			moveFieldFocus(isShiftTabKey(data) ? -1 : 1, ctx);
 			return { consume: true };
 		}
@@ -921,6 +987,8 @@ export default function reasoningQueueExtension(pi: ExtensionAPI): void {
 	pi.on("session_shutdown", (_event, ctx) => {
 		unsubscribeTerminalInput?.();
 		unsubscribeTerminalInput = undefined;
+		unsubscribeEditorMode?.();
+		unsubscribeEditorMode = undefined;
 		if (!ctx.hasUI) return;
 		ctx.ui.setStatus("reasoning-queue", undefined);
 		ctx.ui.setWidget("reasoning-queue", undefined);

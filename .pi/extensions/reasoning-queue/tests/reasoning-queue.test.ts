@@ -2,9 +2,23 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import reasoningQueueExtension, { clampReasoningLevel, getSupportedReasoningLevels, parseReasoningDirective, rewriteProviderPayload } from "../index.ts";
 
+function createEventBusStub() {
+	const handlers = new Map<string, Function[]>();
+	return {
+		on(name: string, handler: Function) {
+			handlers.set(name, [...(handlers.get(name) ?? []), handler]);
+			return () => handlers.set(name, (handlers.get(name) ?? []).filter((candidate) => candidate !== handler));
+		},
+		emit(name: string, data: unknown) {
+			for (const handler of handlers.get(name) ?? []) handler(data);
+		},
+	};
+}
+
 test("registers without invoking runtime action methods during extension loading", () => {
 	const registeredEvents: string[] = [];
 	const pi = {
+		events: createEventBusStub(),
 		on(name: string) {
 			registeredEvents.push(name);
 		},
@@ -90,6 +104,7 @@ test("model selection applies the closest supported queued reasoning level", asy
 	let thinkingLevel = "medium";
 	const setCalls: string[] = [];
 	const pi = {
+		events: createEventBusStub(),
 		on(name: string, handler: Function) {
 			handlers.set(name, [...(handlers.get(name) ?? []), handler]);
 		},
@@ -110,6 +125,7 @@ test("model selection applies the closest supported queued reasoning level", asy
 });
 
 test("tab field controls change model and clamp queued reasoning", async () => {
+	const events = createEventBusStub();
 	const handlers = new Map<string, Function[]>();
 	const terminalInputHandlers: Function[] = [];
 	let currentModel: typeof reasoningModel | typeof glmReasoningModel = reasoningModel;
@@ -119,6 +135,7 @@ test("tab field controls change model and clamp queued reasoning", async () => {
 	let widgetLines: string[] = [];
 	const models = [reasoningModel, glmReasoningModel];
 	const pi = {
+		events,
 		on(name: string, handler: Function) {
 			handlers.set(name, [...(handlers.get(name) ?? []), handler]);
 		},
@@ -177,9 +194,9 @@ test("tab field controls change model and clamp queued reasoning", async () => {
 
 	assert.deepEqual(terminalInputHandlers[0]("\t"), { consume: true });
 	assert.match(widgetLines[0], /\[model:/);
-	assert.deepEqual(terminalInputHandlers[0]("\x1b[9;2u"), { consume: true });
+	assert.deepEqual(terminalInputHandlers[0]("\x1b[9:9;2u"), { consume: true });
 	assert.match(widgetLines[0], /\[prompt\]/);
-	assert.deepEqual(terminalInputHandlers[0]("\t"), { consume: true });
+	assert.deepEqual(terminalInputHandlers[0]("\x1b[9:9;1u"), { consume: true });
 	assert.deepEqual(terminalInputHandlers[0]("\x1b[C"), { consume: true });
 	await Promise.resolve();
 	await Promise.resolve();
@@ -201,6 +218,13 @@ test("tab field controls change model and clamp queued reasoning", async () => {
 
 	editorText = "already typing";
 	assert.equal(terminalInputHandlers[0]("\t"), undefined);
+	events.emit("vim-mode:mode", { mode: "normal" });
+	assert.deepEqual(terminalInputHandlers[0]("\t"), { consume: true });
+	assert.match(widgetLines[0], /\[model:/);
+	events.emit("vim-mode:mode", { mode: "insert" });
+	assert.deepEqual(terminalInputHandlers[0]("\x1b[9:9;2u"), { consume: true });
+	assert.match(widgetLines[0], /\[prompt\]/);
+	assert.equal(terminalInputHandlers[0]("\x1b[9:9;1u"), undefined);
 });
 
 test("rewrites OpenAI Responses reasoning without mutating original payload", () => {

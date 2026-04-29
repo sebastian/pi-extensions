@@ -25,7 +25,7 @@ Messages without a directive inherit the current default. If you queue `:low tas
 
 You can also use the inline fields shown below the editor instead of typing a directive:
 
-- Press `Tab` from an empty prompt to focus `model`, then `reasoning`, then back to `prompt`.
+- Press `Tab` from an empty prompt (or from vim-mode normal mode) to focus `model`, then `reasoning`, then back to `prompt`.
 - Press `Shift+Tab` to move backward through those fields.
 - In the `model` or `reasoning` field, press `←`/`→` or `↑`/`↓` to cycle values, or `Enter` to pick from a selector.
 - The reasoning field only shows levels valid for the selected model, so switching to GLM/Z.AI models clamps choices to the closest supported level.
