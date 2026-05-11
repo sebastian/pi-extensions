@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import reasoningQueueExtension, { clampReasoningLevel, getSupportedReasoningLevels, parseReasoningDirective, rewriteProviderPayload } from "../index.ts";
+import reasoningQueueExtension, { type ReasoningModel, clampReasoningLevel, getSupportedReasoningLevels, parseReasoningDirective, rewriteProviderPayload } from "../index.ts";
 
 function createEventBusStub() {
 	const handlers = new Map<string, Function[]>();
@@ -493,6 +493,24 @@ test("rewrites OpenAI-compatible provider shapes based on existing fields", () =
 		compat: { thinkingFormat: "deepseek", reasoningEffortMap: { high: "high", xhigh: "max" } },
 	};
 	const payload = rewriteProviderPayload({ model: deepseek.id, messages: [], thinking: { type: "disabled" } }, "xhigh", deepseek) as {
+		thinking: { type: string };
+		reasoning_effort: string;
+	};
+
+	assert.equal(payload.thinking.type, "enabled");
+	assert.equal(payload.reasoning_effort, "max");
+});
+
+test("prefers model-level thinkingLevelMap over compat.reasoningEffortMap", () => {
+	const model = {
+		...reasoningModel,
+		api: "openai-completions",
+		provider: "deepseek",
+		id: "deepseek-v4-pro",
+		thinkingLevelMap: { minimal: null, low: null, medium: null, high: "default", xhigh: "max" },
+		compat: { thinkingFormat: "deepseek", reasoningEffortMap: { high: "high", xhigh: "max" } },
+	} as ReasoningModel;
+	const payload = rewriteProviderPayload({ model: model.id, messages: [], thinking: { type: "disabled" } }, "xhigh", model) as {
 		thinking: { type: string };
 		reasoning_effort: string;
 	};

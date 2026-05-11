@@ -1,5 +1,5 @@
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import type { Model } from "@mariozechner/pi-ai";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { Model } from "@earendil-works/pi-ai";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -7,7 +7,9 @@ import { join } from "node:path";
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
 
-export type ReasoningModel = Pick<Model<any>, "api" | "id" | "name" | "provider" | "reasoning" | "maxTokens" | "compat" | "baseUrl">;
+export type ReasoningModel = Pick<Model<any>, "api" | "id" | "name" | "provider" | "reasoning" | "maxTokens" | "compat" | "baseUrl"> & {
+	thinkingLevelMap?: Partial<Record<ThinkingLevel, string | null>>;
+};
 
 type JsonRecord = Record<string, unknown>;
 
@@ -507,6 +509,12 @@ function isPrintableInput(data: string): boolean {
 function getReasoningEffort(level: ThinkingLevel, model: ReasoningModel | undefined): string | undefined {
 	if (level === "off") return undefined;
 	const clamped = clampReasoningLevel(level, model);
+	// Prefer the new model-level thinkingLevelMap over legacy compat.reasoningEffortMap
+	const tlm = model?.thinkingLevelMap;
+	if (tlm && clamped in tlm) {
+		const mapped = tlm[clamped];
+		return typeof mapped === "string" ? mapped : clamped;
+	}
 	const map = isRecord(model?.compat?.reasoningEffortMap) ? model.compat.reasoningEffortMap : undefined;
 	const mapped = map?.[clamped];
 	return typeof mapped === "string" ? mapped : clamped;

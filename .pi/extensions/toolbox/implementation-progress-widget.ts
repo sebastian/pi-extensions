@@ -1,5 +1,5 @@
-import type { Theme, ThemeColor } from "@mariozechner/pi-coding-agent";
-import type { Component, TUI } from "@mariozechner/pi-tui";
+import type { Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
+import type { Component, TUI } from "@earendil-works/pi-tui";
 import { padToWidth, truncateToWidth, visibleWidth } from "./tui-compat.ts";
 import {
 	WORKFLOW_EDGE_META,

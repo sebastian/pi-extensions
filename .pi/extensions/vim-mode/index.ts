@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { VimEditor } from "./vim-editor.ts";
 
 const REAPPLY_EDITOR_DELAYS_MS = [0, 25, 100, 250] as const;

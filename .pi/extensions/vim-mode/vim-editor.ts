@@ -1,5 +1,5 @@
-import { CustomEditor, type AppKeybinding, type KeybindingsManager } from "@mariozechner/pi-coding-agent";
-import { decodeKittyPrintable, Key, matchesKey, parseKey, truncateToWidth, type EditorTheme, type TUI, visibleWidth } from "@mariozechner/pi-tui";
+import { CustomEditor, type AppKeybinding, type KeybindingsManager } from "@earendil-works/pi-coding-agent";
+import { decodeKittyPrintable, Key, matchesKey, parseKey, truncateToWidth, type EditorTheme, type TUI, visibleWidth } from "@earendil-works/pi-tui";
 import { normalizeParsedNormalModeKey } from "./normal-mode-keys.ts";
 import type { BufferState, Cursor, VimBuffer } from "./vim-controller.ts";
 import { VimController } from "./vim-controller.ts";
