@@ -163,6 +163,19 @@ function getExplicitSupportedLevels(model: ReasoningModel | undefined): Thinking
 	);
 }
 
+function getThinkingLevelMapSupportedLevels(model: ReasoningModel | undefined): ThinkingLevel[] | undefined {
+	const map = model?.thinkingLevelMap;
+	if (!isRecord(map)) return undefined;
+	return THINKING_LEVELS.filter((level) => {
+		const mapped = map[level];
+		if (mapped === null) return false;
+		// Match pi's model metadata semantics: xhigh is opt-in, while lower
+		// levels use the provider's default value when omitted.
+		if (level === "xhigh") return mapped !== undefined;
+		return true;
+	});
+}
+
 function isBooleanThinkingFormat(model: ReasoningModel | undefined): boolean {
 	const thinkingFormat = isRecord(model?.compat) && typeof model.compat.thinkingFormat === "string" ? model.compat.thinkingFormat : undefined;
 	return thinkingFormat === "zai" || thinkingFormat === "qwen" || thinkingFormat === "qwen-chat-template";
@@ -175,6 +188,9 @@ function getCodexModelFamily(model: ReasoningModel | undefined): string {
 
 export function getSupportedReasoningLevels(model: ReasoningModel | undefined): ThinkingLevel[] {
 	if (model?.reasoning === false) return ["off"];
+
+	const thinkingLevelMapLevels = getThinkingLevelMapSupportedLevels(model);
+	if (thinkingLevelMapLevels) return thinkingLevelMapLevels;
 
 	const explicit = getExplicitSupportedLevels(model);
 	if (explicit) return explicit;
@@ -520,6 +536,12 @@ function getReasoningEffort(level: ThinkingLevel, model: ReasoningModel | undefi
 	return typeof mapped === "string" ? mapped : clamped;
 }
 
+function getOffReasoningEffort(model: ReasoningModel | undefined, fallback = "none"): string | undefined {
+	const mapped = model?.thinkingLevelMap?.off;
+	if (mapped === null) return undefined;
+	return typeof mapped === "string" ? mapped : fallback;
+}
+
 function withReasoningInclude(payload: JsonRecord): void {
 	const include = Array.isArray(payload.include) ? [...payload.include] : [];
 	if (!include.includes("reasoning.encrypted_content")) include.push("reasoning.encrypted_content");
@@ -534,8 +556,9 @@ function applyResponsesPayload(payload: JsonRecord, level: ThinkingLevel, model:
 
 	const isCodex = model?.api === "openai-codex-responses";
 	if (level === "off") {
-		if (isCodex) delete payload.reasoning;
-		else payload.reasoning = { effort: "none" };
+		const offEffort = getOffReasoningEffort(model);
+		if (isCodex || offEffort === undefined) delete payload.reasoning;
+		else payload.reasoning = { effort: offEffort };
 		return payload;
 	}
 
@@ -585,14 +608,31 @@ function applyOpenAICompletionsPayload(payload: JsonRecord, level: ThinkingLevel
 		else delete payload.reasoning_effort;
 	}
 
-	if (isRecord(payload.reasoning) || thinkingFormat === "openrouter") {
+	const supportsReasoningEffort = model?.compat?.supportsReasoningEffort !== false;
+	if (thinkingFormat === "together") {
 		payload.reasoning = {
 			...(isRecord(payload.reasoning) ? payload.reasoning : {}),
-			effort: enabled && effort ? effort : "none",
+			enabled,
 		};
+		if (enabled && effort && supportsReasoningEffort) payload.reasoning_effort = effort;
+		else delete payload.reasoning_effort;
+	} else if (isRecord(payload.reasoning) || thinkingFormat === "openrouter") {
+		const offEffort = getOffReasoningEffort(model);
+		if (enabled && effort) {
+			payload.reasoning = {
+				...(isRecord(payload.reasoning) ? payload.reasoning : {}),
+				effort,
+			};
+		} else if (offEffort !== undefined) {
+			payload.reasoning = {
+				...(isRecord(payload.reasoning) ? payload.reasoning : {}),
+				effort: offEffort,
+			};
+		} else {
+			delete payload.reasoning;
+		}
 	}
 
-	const supportsReasoningEffort = model?.compat?.supportsReasoningEffort !== false;
 	const shouldUseOpenAIReasoningEffort =
 		!thinkingFormat || thinkingFormat === "openai" || "reasoning_effort" in payload || "reasoningEffort" in payload;
 	if (supportsReasoningEffort && shouldUseOpenAIReasoningEffort) {
@@ -767,6 +807,7 @@ function applyMistralPayload(payload: JsonRecord, level: ThinkingLevel, model: R
 function applyGenericExistingFields(payload: JsonRecord, level: ThinkingLevel, model: ReasoningModel | undefined): JsonRecord {
 	const enabled = level !== "off" && model?.reasoning !== false;
 	const effort = getReasoningEffort(level, model);
+	const offEffort = getOffReasoningEffort(model);
 	if ("reasoning_effort" in payload) {
 		if (enabled && effort) payload.reasoning_effort = effort;
 		else delete payload.reasoning_effort;
@@ -776,8 +817,13 @@ function applyGenericExistingFields(payload: JsonRecord, level: ThinkingLevel, m
 		else delete payload.reasoningEffort;
 	}
 	if ("enable_thinking" in payload) payload.enable_thinking = enabled;
+	if (isRecord(payload.reasoning) && "enabled" in payload.reasoning) {
+		payload.reasoning = { ...payload.reasoning, enabled };
+	}
 	if (isRecord(payload.reasoning) && "effort" in payload.reasoning) {
-		payload.reasoning = { ...payload.reasoning, effort: enabled && effort ? effort : "none" };
+		if (enabled && effort) payload.reasoning = { ...payload.reasoning, effort };
+		else if (offEffort !== undefined) payload.reasoning = { ...payload.reasoning, effort: offEffort };
+		else delete payload.reasoning;
 	}
 	if (isRecord(payload.thinking) && "type" in payload.thinking) {
 		payload.thinking = { ...payload.thinking, type: enabled ? "enabled" : "disabled" };
@@ -1155,6 +1201,15 @@ export default function reasoningQueueExtension(pi: ExtensionAPI): void {
 			const pendingModel = resolveModelRef(ctx, pending.model) ?? (ctx.model as ReasoningModel | undefined);
 			return { ...pending, level: clampReasoningLevel(pending.level, pendingModel as ReasoningModel | undefined) };
 		});
+		updateStatus(ctx);
+	});
+
+	pi.on("thinking_level_select", (event, ctx) => {
+		const selected = normalizeThinkingLevel(event.level);
+		if (!selected) return;
+		const effective = clampReasoningLevel(selected, ctx.model as ReasoningModel | undefined);
+		defaultLevel = effective;
+		if (contextIsIdle(ctx)) activeLevel = effective;
 		updateStatus(ctx);
 	});
 

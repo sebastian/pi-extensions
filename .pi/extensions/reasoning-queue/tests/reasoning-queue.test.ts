@@ -34,7 +34,15 @@ test("registers without invoking runtime action methods during extension loading
 	};
 
 	assert.doesNotThrow(() => reasoningQueueExtension(pi as never));
-	assert.deepEqual(registeredEvents, ["session_start", "model_select", "input", "message_start", "before_provider_request", "session_shutdown"]);
+	assert.deepEqual(registeredEvents, [
+		"session_start",
+		"model_select",
+		"thinking_level_select",
+		"input",
+		"message_start",
+		"before_provider_request",
+		"session_shutdown",
+	]);
 });
 
 const reasoningModel = {
@@ -106,6 +114,13 @@ test("clamps reasoning levels to the closest level supported by the model", () =
 	assert.equal(clampReasoningLevel("xhigh", glmReasoningModel), "high");
 	assert.equal(clampReasoningLevel("medium", glmReasoningModel), "high");
 	assert.equal(clampReasoningLevel("off", glmReasoningModel), "off");
+
+	const mappedModel = {
+		...reasoningModel,
+		thinkingLevelMap: { off: null, minimal: "low", low: null, medium: null, xhigh: "max" },
+	} as ReasoningModel;
+	assert.deepEqual(getSupportedReasoningLevels(mappedModel), ["minimal", "high", "xhigh"]);
+	assert.equal(clampReasoningLevel("off", mappedModel), "minimal");
 });
 
 test("model selection applies the closest supported queued reasoning level", async () => {
@@ -131,6 +146,53 @@ test("model selection applies the closest supported queued reasoning level", asy
 
 	assert.equal(thinkingLevel, "high");
 	assert.deepEqual(setCalls, ["high"]);
+});
+
+test("thinking level selection event refreshes the inherited default", async () => {
+	const handlers = new Map<string, Function[]>();
+	let status = "";
+	const pi = {
+		events: createEventBusStub(),
+		on(name: string, handler: Function) {
+			handlers.set(name, [...(handlers.get(name) ?? []), handler]);
+		},
+		getThinkingLevel() {
+			return "medium";
+		},
+		setThinkingLevel() {},
+	};
+	const ctx = {
+		hasUI: true,
+		model: reasoningModel,
+		modelRegistry: {
+			getAvailable() {
+				return [reasoningModel];
+			},
+			find() {
+				return reasoningModel;
+			},
+		},
+		isIdle() {
+			return true;
+		},
+		ui: {
+			theme: { fg: (_color: string, text: string) => text },
+			setStatus(_key: string, text: string | undefined) {
+				status = text ?? "";
+			},
+			setWidget() {},
+			onTerminalInput() {
+				return () => {};
+			},
+			addAutocompleteProvider() {},
+		},
+	};
+	reasoningQueueExtension(pi as never);
+
+	await handlers.get("session_start")![0]({}, ctx as never);
+	await handlers.get("thinking_level_select")![0]({ level: "xhigh", previousLevel: "medium" }, ctx as never);
+
+	assert.equal(status, "reasoning:xhigh");
 });
 
 test("tab field controls change model and clamp queued reasoning", async () => {
@@ -499,6 +561,30 @@ test("rewrites OpenAI-compatible provider shapes based on existing fields", () =
 
 	assert.equal(payload.thinking.type, "enabled");
 	assert.equal(payload.reasoning_effort, "max");
+});
+
+test("rewrites Together reasoning payloads from thinkingFormat metadata", () => {
+	const together = {
+		...reasoningModel,
+		api: "openai-completions",
+		provider: "together",
+		id: "deepseek-ai/DeepSeek-V3.2-Exp",
+		thinkingLevelMap: { minimal: null, low: null, medium: null, high: "high", xhigh: "max" },
+		compat: { thinkingFormat: "together", supportsReasoningEffort: true },
+	} as ReasoningModel;
+	const enabled = rewriteProviderPayload({ model: together.id, messages: [] }, "xhigh", together) as {
+		reasoning: { enabled: boolean };
+		reasoning_effort: string;
+	};
+	assert.deepEqual(enabled.reasoning, { enabled: true });
+	assert.equal(enabled.reasoning_effort, "max");
+
+	const disabled = rewriteProviderPayload(enabled, "off", together) as {
+		reasoning: { enabled: boolean };
+		reasoning_effort?: string;
+	};
+	assert.deepEqual(disabled.reasoning, { enabled: false });
+	assert.equal(disabled.reasoning_effort, undefined);
 });
 
 test("prefers model-level thinkingLevelMap over compat.reasoningEffortMap", () => {

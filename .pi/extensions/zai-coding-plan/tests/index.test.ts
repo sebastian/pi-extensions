@@ -18,6 +18,7 @@ function createPiStub(options?: {
 		stderr: string;
 		code: number;
 	}>;
+	getThinkingLevel?: () => string;
 }) {
 	const providerRegistrations: Array<{ id: string; config: Record<string, unknown> }> = [];
 	const handlers = new Map<string, Function[]>();
@@ -32,6 +33,7 @@ function createPiStub(options?: {
 				eventHandlers.push(handler);
 				handlers.set(event, eventHandlers);
 			},
+			getThinkingLevel: options?.getThinkingLevel,
 			exec: options?.exec,
 		},
 		providerRegistrations,
@@ -55,11 +57,13 @@ test("registerZaiCodingPlan registers the coding-plan provider with cloned model
 
 	const [{ id, config }] = providerRegistrations;
 	assert.equal(id, ZAI_CODING_PLAN_PROVIDER_ID);
+	assert.equal(config.name, "Z.AI Coding Plan");
 	assert.equal(config.baseUrl, ZAI_CODING_PLAN_BASE_URL);
 	assert.equal(config.apiKey, ZAI_CODING_PLAN_API_KEY_ENV);
 	assert.equal(config.api, "openai-completions");
 	assert.deepEqual(config.models, ZAI_CODING_PLAN_MODELS);
 	assert.notEqual(config.models, ZAI_CODING_PLAN_MODELS);
+	assert.notEqual((config.models as typeof ZAI_CODING_PLAN_MODELS)[0].thinkingLevelMap, ZAI_CODING_PLAN_MODELS[0].thinkingLevelMap);
 	assert.notEqual((config.models as typeof ZAI_CODING_PLAN_MODELS)[0].compat, ZAI_CODING_PLAN_MODELS[0].compat);
 });
 
@@ -67,6 +71,12 @@ test("glm-5.1 uses a conservative effective context window and Z.AI tool-call st
 	const model = ZAI_CODING_PLAN_MODELS.find((entry) => entry.id === "glm-5.1");
 	assert.ok(model);
 	assert.equal(model.contextWindow, 116_384);
+	assert.deepEqual(model.thinkingLevelMap, {
+		minimal: null,
+		low: null,
+		medium: null,
+		xhigh: null,
+	});
 	assert.deepEqual(model.compat, {
 		supportsDeveloperRole: false,
 		thinkingFormat: "zai",
@@ -323,7 +333,7 @@ test("non-z.ai session start does not clear another extension footer", async () 
 });
 
 test("custom footer merges z.ai status into the main stats line", async () => {
-	const { pi, getHandlers } = createPiStub();
+	const { pi, getHandlers } = createPiStub({ getThinkingLevel: () => "high" });
 	zaiCodingPlan(pi as never);
 
 	const sessionStartHandlers = getHandlers<(event: unknown, ctx: any) => Promise<void>>("session_start");
@@ -496,7 +506,7 @@ test("custom footer suppresses detached git chrome in jj repositories", async ()
 });
 
 test("custom footer falls back to cached lines when the session ctx goes stale", async () => {
-	const { pi, getHandlers } = createPiStub();
+	const { pi, getHandlers } = createPiStub({ getThinkingLevel: () => "high" });
 	zaiCodingPlan(pi as never);
 
 	const sessionStartHandlers = getHandlers<(event: unknown, ctx: any) => Promise<void>>("session_start");

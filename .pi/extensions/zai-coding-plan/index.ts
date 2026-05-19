@@ -40,6 +40,13 @@ const ZAI_TOOL_STREAM_COMPAT = {
 	zaiToolStream: true,
 } as const;
 
+const ZAI_BOOLEAN_THINKING_LEVEL_MAP = {
+	minimal: null,
+	low: null,
+	medium: null,
+	xhigh: null,
+} as const;
+
 const GLM_51_REIN_IN_PROMPT = [
 	"- Be concise, direct, and matter-of-fact.",
 	"- Do not be flattering, sycophantic, or overly eager to please.",
@@ -57,6 +64,7 @@ export const ZAI_CODING_PLAN_MODELS = [
 		id: "glm-5.1",
 		name: "GLM-5.1",
 		reasoning: true,
+		thinkingLevelMap: ZAI_BOOLEAN_THINKING_LEVEL_MAP,
 		input: ["text"],
 		cost: ZERO_COST,
 		contextWindow: GLM_51_EFFECTIVE_CONTEXT_WINDOW,
@@ -67,6 +75,7 @@ export const ZAI_CODING_PLAN_MODELS = [
 		id: "glm-5-turbo",
 		name: "GLM-5-Turbo",
 		reasoning: true,
+		thinkingLevelMap: ZAI_BOOLEAN_THINKING_LEVEL_MAP,
 		input: ["text"],
 		cost: ZERO_COST,
 		contextWindow: 200000,
@@ -77,6 +86,7 @@ export const ZAI_CODING_PLAN_MODELS = [
 		id: "glm-5",
 		name: "GLM-5",
 		reasoning: true,
+		thinkingLevelMap: ZAI_BOOLEAN_THINKING_LEVEL_MAP,
 		input: ["text"],
 		cost: ZERO_COST,
 		contextWindow: 204800,
@@ -87,6 +97,7 @@ export const ZAI_CODING_PLAN_MODELS = [
 		id: "glm-4.7",
 		name: "GLM-4.7",
 		reasoning: true,
+		thinkingLevelMap: ZAI_BOOLEAN_THINKING_LEVEL_MAP,
 		input: ["text"],
 		cost: ZERO_COST,
 		contextWindow: 204800,
@@ -97,6 +108,7 @@ export const ZAI_CODING_PLAN_MODELS = [
 		id: "glm-4.5-air",
 		name: "GLM-4.5-Air",
 		reasoning: true,
+		thinkingLevelMap: ZAI_BOOLEAN_THINKING_LEVEL_MAP,
 		input: ["text"],
 		cost: ZERO_COST,
 		contextWindow: 131072,
@@ -122,6 +134,7 @@ interface UsageTrackerState {
 function cloneModels() {
 	return ZAI_CODING_PLAN_MODELS.map((model) => ({
 		...model,
+		thinkingLevelMap: { ...model.thinkingLevelMap },
 		input: [...model.input],
 		cost: { ...model.cost },
 		compat: { ...model.compat },
@@ -132,6 +145,7 @@ export function registerZaiCodingPlan(
 	pi: Pick<ExtensionAPI, "registerProvider">,
 ): void {
 	pi.registerProvider(ZAI_CODING_PLAN_PROVIDER_ID, {
+		name: "Z.AI Coding Plan",
 		baseUrl: ZAI_CODING_PLAN_BASE_URL,
 		apiKey: ZAI_CODING_PLAN_API_KEY_ENV,
 		api: "openai-completions",
@@ -229,13 +243,8 @@ function formatTokens(count: number): string {
 	return `${Math.round(count / 1_000_000)}M`;
 }
 
-function getCurrentThinkingLevel(ctx: ExtensionContext): string {
-	for (const entry of [...ctx.sessionManager.getBranch()].reverse()) {
-		if (entry.type === "thinking_level_change" && typeof entry.thinkingLevel === "string") {
-			return entry.thinkingLevel;
-		}
-	}
-	return "off";
+function normalizeThinkingLevel(value: unknown): string {
+	return typeof value === "string" && value.trim() ? value : "off";
 }
 
 function buildInlineFooter(
@@ -244,6 +253,7 @@ function buildInlineFooter(
 	theme: ExtensionContext["ui"]["theme"],
 	width: number,
 	repoChromeLabel: string | null,
+	thinkingLevel: string,
 ): string[] {
 	let totalInput = 0;
 	let totalOutput = 0;
@@ -303,7 +313,6 @@ function buildInlineFooter(
 	const modelName = ctx.model?.id || "no-model";
 	let right = modelName;
 	if (ctx.model?.reasoning) {
-		const thinkingLevel = getCurrentThinkingLevel(ctx);
 		right = thinkingLevel === "off" ? `${modelName} • thinking off` : `${modelName} • ${thinkingLevel}`;
 	}
 	if (footerData.getAvailableProviderCount() > 1 && ctx.model) {
@@ -584,6 +593,7 @@ export default function zaiCodingPlan(pi: ExtensionAPI): void {
 	registerZaiCodingPlan(pi);
 
 	let ownsFooter = false;
+	let currentThinkingLevel = "off";
 	let jjFooterMetadataState:
 		| {
 				repoRoot: string;
@@ -604,6 +614,14 @@ export default function zaiCodingPlan(pi: ExtensionAPI): void {
 				code: result.code,
 			};
 		};
+	}
+
+	function readPiThinkingLevel(): string {
+		try {
+			return normalizeThinkingLevel(pi.getThinkingLevel?.());
+		} catch {
+			return "off";
+		}
 	}
 
 	function invalidateJjFooterMetadata(cwd?: string): void {
@@ -679,7 +697,7 @@ export default function zaiCodingPlan(pi: ExtensionAPI): void {
 							const repoChromeLabel = getRepoChromeLabel(ctx.sessionManager.getCwd(), footerData.getGitBranch(), () =>
 								tui.requestRender(),
 							);
-							lastLines = buildInlineFooter(ctx, footerData, theme, width, repoChromeLabel);
+							lastLines = buildInlineFooter(ctx, footerData, theme, width, repoChromeLabel, currentThinkingLevel);
 							return lastLines;
 						} catch {
 							return buildFooterFallbackLines(theme, width, lastLines);
@@ -711,10 +729,17 @@ export default function zaiCodingPlan(pi: ExtensionAPI): void {
 	const usageTracker = createUsageTracker(syncInlineFooter);
 
 	pi.on("session_start", async (_event, ctx) => {
+		currentThinkingLevel = readPiThinkingLevel();
 		usageTracker.start(ctx);
 	});
 
+	pi.on("thinking_level_select", async (event, ctx) => {
+		currentThinkingLevel = normalizeThinkingLevel(event.level);
+		syncInlineFooter(ctx);
+	});
+
 	pi.on("model_select", async (_event, ctx) => {
+		currentThinkingLevel = readPiThinkingLevel();
 		usageTracker.syncStatus(ctx);
 		syncInlineFooter(ctx);
 		void usageTracker.refresh(ctx, { force: true });
@@ -726,6 +751,7 @@ export default function zaiCodingPlan(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
+		currentThinkingLevel = "off";
 		usageTracker.stop(ctx);
 	});
 }

@@ -20,12 +20,13 @@ OpenCode also exposes a separate **Z.AI Coding Plan** provider alongside the reg
 This pi package follows that same idea and registers a dedicated provider:
 
 - provider id: `zai-coding-plan`
+- login/model display name: `Z.AI Coding Plan`
 - auth env var: `ZAI_API_KEY`
 - API type: `openai-completions`
 
 The package also applies the Z.AI-specific OpenAI compatibility flags pi needs for:
 
-- top-level thinking control (`thinkingFormat: "zai"`)
+- top-level boolean thinking control (`thinkingFormat: "zai"` plus model-level `thinkingLevelMap` that exposes `off`/`high` only)
 - no `developer` role
 - tool-call streaming on the newer coding-plan models
 
@@ -85,6 +86,7 @@ pi --provider zai-coding-plan --model glm-5.1
 
 - On newer pi versions, core may already ship built-in `zai/*` models aimed at the same coding endpoint. This package is still useful as an explicit, backportable `zai-coding-plan/*` namespace.
 - `zai-coding-plan/glm-5.1` gets an extra per-turn system-prompt append that nudges the model to be more concise, direct, and less sycophantic.
+- The package declares boolean thinking metadata for its models, so pi's thinking-level selector skips unsupported intermediate and `xhigh` levels instead of showing controls that all collapse to the same Z.AI `enable_thinking` flag.
 - `zai-coding-plan/glm-5.1` also uses a conservative effective context window so pi compacts around ~100k prompt tokens by default instead of riding the model's larger advertised limit.
 - The quota status indicator uses `GET /api/monitor/usage/quota/limit` on `api.z.ai`, which is also what Z.AI's official usage-query plugin relies on.
 - Z.AI's coding-plan docs recommend the OpenAI-compatible coding endpoint for non-Claude coding tools; this package intentionally follows that route instead of the Anthropic-compatible Claude Code path.

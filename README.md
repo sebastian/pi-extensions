@@ -1,6 +1,6 @@
 # pi-extensions
 
-My personal collection of [pi](https://github.com/badlogic/pi-mono) extensions.
+My personal collection of [pi](https://github.com/earendil-works/pi-mono) extensions.
 
 I maintain this repo for my own workflows and experiments.
 
@@ -9,6 +9,7 @@ I maintain this repo for my own workflows and experiments.
 - Feel free to use, copy, adapt, and learn from anything here.
 - I am **not** looking for external contributions, feature requests, or maintenance help on this repo.
 - If something here is useful to you, great — please treat it as a freely available personal toolbox.
+- The packages track pi's current runtime floor and declare Node.js `>=22.19.0`.
 
 ## Current contents
 

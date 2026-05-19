@@ -22,5 +22,8 @@
   "scripts": {
     "check": "node --test ./tests/*.test.ts",
     "test": "node --test ./tests/*.test.ts"
+  },
+  "engines": {
+    "node": ">=22.19.0"
   }
 }
