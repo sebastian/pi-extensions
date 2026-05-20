@@ -2,10 +2,11 @@
 
 This directory is the catch-all home for my pi extension experiments, shared workflow code, prompts, and tests.
 
-Right now, the extension manifest exposed to pi registers one main command: `/review`.
+Right now, the extension manifest exposed to pi registers one main command, `/review`, plus small cross-cutting quality-of-life handlers.
 
 ## What it does
 
+- formats provider rate-limit errors, including nested Gemini quota JSON, into concise messages and waits for short server-requested retry delays before pi's automatic retry sends another request
 - adds `/review` to review the current uncommitted change
 - adds freeform `/review ...` scope and focus parsing, so you can say things like `/review for security`, `/review the two last changes`, or `/review all changes since prod with an extra focus on security`
 - still supports `/review <change>` to review a specific jj or git change / revision

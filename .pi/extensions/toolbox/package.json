@@ -19,6 +19,7 @@
     "models.ts",
     "questionnaire-model.ts",
     "questionnaire.ts",
+    "rate-limit.ts",
     "repo.ts",
     "review-progress.ts",
     "review-workflow.ts",
