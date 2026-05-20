@@ -546,6 +546,20 @@ test("rewrites Google thinking config", () => {
 	assert.equal(payload.config.thinkingConfig.thinkingBudget, 8192);
 });
 
+test("preserves Google abort signals while rewriting thinking config", () => {
+	const model = { ...reasoningModel, api: "google", id: "gemini-3.5-flash", provider: "google" };
+	const controller = new AbortController();
+	const original = { model: model.id, contents: [], config: { abortSignal: controller.signal } };
+	const payload = rewriteProviderPayload(original, "high", model) as {
+		config: { abortSignal: AbortSignal; thinkingConfig: { includeThoughts: boolean; thinkingLevel: string } };
+	};
+
+	assert.equal(payload.config.abortSignal, controller.signal);
+	assert.equal(typeof payload.config.abortSignal.addEventListener, "function");
+	assert.equal(payload.config.thinkingConfig.thinkingLevel, "HIGH");
+	assert.equal("thinkingConfig" in original.config, false);
+});
+
 test("rewrites OpenAI-compatible provider shapes based on existing fields", () => {
 	const deepseek = {
 		...reasoningModel,
