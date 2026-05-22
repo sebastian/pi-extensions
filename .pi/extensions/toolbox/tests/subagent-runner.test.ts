@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { buildSubagentArgs, discoverProjectExtensionPaths } from "../subagent-runner.ts";
+import { buildSubagentArgs, discoverProjectExtensionPaths, runSubagent } from "../subagent-runner.ts";
 
 test("buildSubagentArgs disables extension discovery by default", () => {
 	const args = buildSubagentArgs({
@@ -36,6 +36,53 @@ test("buildSubagentArgs can keep normal extensions enabled and add explicit exte
 	assert.deepEqual(extensionArgs, [resolve("/repo/.pi/extensions/zai-coding-plan"), resolve("/repo/.pi/extensions/toolbox")]);
 	assert.ok(args.includes("--model"));
 	assert.ok(args.includes("zai-coding-plan/glm-5.1"));
+});
+
+test("runSubagent treats retrying agent_end events as non-final", async () => {
+	const root = await mkdtemp(join(tmpdir(), "toolbox-subagent-runner-retry-"));
+	const previousArgv1 = process.argv[1];
+	try {
+		const fakePi = join(root, "fake-pi.mjs");
+		await writeFile(
+			fakePi,
+			[
+				"const transient = { role: 'assistant', content: [{ type: 'text', text: 'transient failure' }], stopReason: 'error', errorMessage: '429 retry', usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { total: 0.01 } } };",
+				"const final = { role: 'assistant', content: [{ type: 'text', text: 'final answer' }], stopReason: 'stop', usage: { input: 2, output: 3, cacheRead: 0, cacheWrite: 0, totalTokens: 5, cost: { total: 0.02 } } };",
+				"for (const event of [",
+				"  { type: 'message_end', message: transient },",
+				"  { type: 'agent_end', messages: [transient], willRetry: true },",
+				"  { type: 'message_end', message: final },",
+				"  { type: 'agent_end', messages: [final], willRetry: false },",
+				"]) console.log(JSON.stringify(event));",
+				"",
+			].join("\n"),
+			"utf8",
+		);
+
+		process.argv[1] = fakePi;
+		const events: Array<{ type: string; message?: string }> = [];
+		const result = await runSubagent({
+			cwd: root,
+			systemPrompt: "",
+			prompt: "ignored",
+			onEvent: (event) => events.push(event),
+		});
+
+		assert.equal(result.exitCode, 0);
+		assert.equal(result.stopReason, "stop");
+		assert.equal(result.errorMessage, undefined);
+		assert.equal(result.assistantText, "final answer");
+		assert.deepEqual(result.messages.map((message) => message.role), ["assistant"]);
+		assert.deepEqual(
+			events.filter((event) => event.type === "status").map((event) => event.message),
+			["final answer"],
+		);
+		assert.equal(result.usage.turns, 2);
+		assert.equal(result.usage.totalTokens, 7);
+	} finally {
+		process.argv[1] = previousArgv1;
+		await rm(root, { recursive: true, force: true });
+	}
 });
 
 test("discoverProjectExtensionPaths finds package directories and standalone extension files", async () => {

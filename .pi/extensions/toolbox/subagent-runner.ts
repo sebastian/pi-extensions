@@ -271,12 +271,17 @@ export async function runSubagent(invocation: SubagentInvocation): Promise<Subag
 							if (usageDelta.turns) invocation.onUsage?.(usageDelta);
 							if (assistantText) invocation.onEvent?.({ type: "assistant", message: assistantText });
 							if (typeof message.stopReason === "string") stopReason = message.stopReason;
-							if (typeof message.errorMessage === "string") errorMessage = message.errorMessage;
+							errorMessage = typeof message.errorMessage === "string" ? message.errorMessage : undefined;
 						}
 					}
 					break;
 				}
 				case "agent_end": {
+					if (event.willRetry === true) {
+						stopReason = undefined;
+						errorMessage = undefined;
+						break;
+					}
 					if (isMessageArray(event.messages)) {
 						agentMessages = event.messages;
 						const assistantText = getAssistantText(agentMessages);
