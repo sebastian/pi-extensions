@@ -649,7 +649,15 @@ function applyOpenAICompletionsPayload(payload: JsonRecord, level: ThinkingLevel
 	return payload;
 }
 
+function getForceAdaptiveThinking(model: ReasoningModel | undefined): boolean | undefined {
+	const compat = isRecord(model?.compat) ? model.compat : undefined;
+	return typeof compat?.forceAdaptiveThinking === "boolean" ? compat.forceAdaptiveThinking : undefined;
+}
+
 function supportsAdaptiveAnthropic(model: ReasoningModel | undefined): boolean {
+	const forced = getForceAdaptiveThinking(model);
+	if (forced !== undefined) return forced;
+
 	const value = `${model?.id ?? ""} ${model?.name ?? ""}`.toLowerCase();
 	return (
 		value.includes("opus-4-6") ||
@@ -664,6 +672,9 @@ function supportsAdaptiveAnthropic(model: ReasoningModel | undefined): boolean {
 }
 
 function mapAnthropicEffort(level: Exclude<ThinkingLevel, "off">, model: ReasoningModel | undefined): string {
+	const mapped = model?.thinkingLevelMap?.[level];
+	if (typeof mapped === "string") return mapped;
+
 	const modelId = (model?.id ?? "").toLowerCase();
 	switch (level) {
 		case "minimal":

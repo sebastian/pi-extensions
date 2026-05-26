@@ -536,6 +536,52 @@ test("rewrites Anthropic payloads to enabled and disabled thinking", () => {
 	assert.equal(disabled.output_config, undefined);
 });
 
+test("honors Anthropic adaptive-thinking compat metadata", () => {
+	const model = {
+		...reasoningModel,
+		api: "anthropic-messages",
+		id: "proxy-claude-opus",
+		name: "Proxy Claude Opus",
+		provider: "anthropic-proxy",
+		maxTokens: 64000,
+		thinkingLevelMap: { xhigh: "max" },
+		compat: { forceAdaptiveThinking: true },
+	} as ReasoningModel;
+	const enabled = rewriteProviderPayload({ model: model.id, max_tokens: 4096, thinking: { type: "disabled" } }, "xhigh", model) as {
+		thinking: { type: string; display: string };
+		output_config: { effort: string };
+		max_tokens: number;
+	};
+
+	assert.deepEqual(enabled.thinking, { type: "adaptive", display: "summarized" });
+	assert.deepEqual(enabled.output_config, { effort: "max" });
+	assert.equal(enabled.max_tokens, 4096);
+
+	const disabled = rewriteProviderPayload(enabled, "off", model) as { thinking: { type: string }; output_config?: unknown };
+	assert.deepEqual(disabled.thinking, { type: "disabled" });
+	assert.equal(disabled.output_config, undefined);
+});
+
+test("allows Anthropic adaptive-thinking compat metadata to opt out", () => {
+	const model = {
+		...reasoningModel,
+		api: "anthropic-messages",
+		id: "claude-opus-4-7",
+		name: "Claude Opus 4.7",
+		provider: "anthropic",
+		maxTokens: 64000,
+		compat: { forceAdaptiveThinking: false },
+	} as ReasoningModel;
+	const payload = rewriteProviderPayload({ model: model.id, max_tokens: 4096, thinking: { type: "disabled" } }, "xhigh", model) as {
+		thinking: { type: string; budget_tokens: number };
+		output_config?: unknown;
+	};
+
+	assert.equal(payload.thinking.type, "enabled");
+	assert.equal(payload.thinking.budget_tokens, 16384);
+	assert.equal(payload.output_config, undefined);
+});
+
 test("rewrites Google thinking config", () => {
 	const model = { ...reasoningModel, api: "google", id: "gemini-2.5-pro", provider: "google" };
 	const payload = rewriteProviderPayload({ model: model.id, contents: [], config: {} }, "medium", model) as {

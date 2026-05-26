@@ -30,6 +30,7 @@ You can also use the inline fields shown below the editor instead of typing a di
 - In the `model` or `reasoning` field, press `←`/`→` or `↑`/`↓` to cycle values, or `Enter` to pick from a selector.
 - The model field follows pi's scoped model configuration (`/scoped-models` / `enabledModels`) when present.
 - The reasoning field follows pi's model-level `thinkingLevelMap` metadata and only shows levels valid for the selected model, so switching to GLM/Z.AI models clamps choices to the closest supported level.
+- Anthropic-compatible adaptive thinking follows pi's `compat.forceAdaptiveThinking` metadata for built-in models, custom providers, and aliases.
 
 ## Notes
 
