@@ -63,6 +63,12 @@ interface SelectionRange {
 }
 
 const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+const wordSegmenter = new Intl.Segmenter(undefined, { granularity: "word" });
+const ASCII_PUNCTUATION_PATTERN = /[(){}[\]<>.,;:'"!?+\-=*/\\|&%^$#@~`]/u;
+
+interface WordMotionSegment extends Intl.SegmentData {
+	vimClass: string;
+}
 
 function segmentGraphemes(text: string): Intl.SegmentData[] {
 	return [...graphemeSegmenter.segment(text)];
@@ -207,10 +213,52 @@ function compareCursors(lines: readonly string[], left: Cursor, right: Cursor): 
 	return leftOffset === rightOffset ? 0 : leftOffset < rightOffset ? -1 : 1;
 }
 
-function charClass(segment: string, bigWord: boolean): "space" | "word" | "punct" {
-	if (/^\s+$/u.test(segment)) return "space";
+function isWhitespaceSegment(segment: string): boolean {
+	return /^\s+$/u.test(segment);
+}
+
+function classifyWordMotionGrapheme(segment: string, wordLike: boolean, bigWord: boolean): "space" | "word" | "punct" {
+	if (isWhitespaceSegment(segment)) return "space";
 	if (bigWord) return "word";
-	return /^[\p{L}\p{N}_]+$/u.test(segment) ? "word" : "punct";
+	return wordLike && !ASCII_PUNCTUATION_PATTERN.test(segment) ? "word" : "punct";
+}
+
+function segmentWordMotion(text: string, bigWord: boolean): WordMotionSegment[] {
+	let classGroup = 0;
+	let previousKind: "word" | "punct" | undefined;
+	let previousEnd = -1;
+	let previousWordSegmentStart = -1;
+	const result: WordMotionSegment[] = [];
+
+	for (const wordSegment of wordSegmenter.segment(text)) {
+		const wordLike = !bigWord && wordSegment.isWordLike === true;
+		for (const grapheme of segmentGraphemes(wordSegment.segment)) {
+			const absoluteIndex = wordSegment.index + grapheme.index;
+			const kind = classifyWordMotionGrapheme(grapheme.segment, wordLike, bigWord);
+			let vimClass = "space";
+			if (kind === "space") {
+				previousKind = undefined;
+				previousWordSegmentStart = -1;
+			} else {
+				const startsNewGroup =
+					previousKind !== kind ||
+					previousEnd !== absoluteIndex ||
+					(kind === "word" && previousWordSegmentStart !== wordSegment.index);
+				if (startsNewGroup) classGroup++;
+				vimClass = `${kind}:${classGroup}`;
+				previousKind = kind;
+				previousWordSegmentStart = wordSegment.index;
+			}
+			previousEnd = absoluteIndex + grapheme.segment.length;
+			result.push({ ...grapheme, index: absoluteIndex, vimClass });
+		}
+	}
+
+	return result;
+}
+
+function wordMotionClass(segment: WordMotionSegment): string {
+	return segment.vimClass;
 }
 
 function graphemeIndexAtOrAfter(segments: Intl.SegmentData[], offset: number): number {
@@ -253,17 +301,17 @@ function moveRightWithinLine(state: BufferState, count: number): Cursor {
 
 function moveWordForward(state: BufferState, count: number, bigWord = false): Cursor {
 	const text = linesToText(state.lines);
-	const segments = segmentGraphemes(text);
+	const segments = segmentWordMotion(text, bigWord);
 	if (segments.length === 0) return { line: 0, col: 0 };
 	let index = graphemeIndexAtOrAfter(segments, stateOffset(state.lines, state.cursor));
 	for (let step = 0; step < count; step++) {
 		if (index >= segments.length) return cursorAtLastNormalPosition(state.lines);
-		let category = charClass(segments[index]!.segment, bigWord);
+		let category = wordMotionClass(segments[index]!);
 		if (category === "space") {
-			while (index < segments.length && charClass(segments[index]!.segment, bigWord) === "space") index++;
+			while (index < segments.length && wordMotionClass(segments[index]!) === "space") index++;
 		} else {
-			while (index < segments.length && charClass(segments[index]!.segment, bigWord) === category) index++;
-			while (index < segments.length && charClass(segments[index]!.segment, bigWord) === "space") index++;
+			while (index < segments.length && wordMotionClass(segments[index]!) === category) index++;
+			while (index < segments.length && wordMotionClass(segments[index]!) === "space") index++;
 		}
 	}
 	if (index >= segments.length) return cursorAtLastNormalPosition(state.lines);
@@ -272,33 +320,33 @@ function moveWordForward(state: BufferState, count: number, bigWord = false): Cu
 
 function moveWordBackward(state: BufferState, count: number, bigWord = false): Cursor {
 	const text = linesToText(state.lines);
-	const segments = segmentGraphemes(text);
+	const segments = segmentWordMotion(text, bigWord);
 	if (segments.length === 0) return { line: 0, col: 0 };
 	let index = graphemeIndexAtOrAfter(segments, stateOffset(state.lines, state.cursor));
 	for (let step = 0; step < count; step++) {
 		index -= 1;
-		while (index >= 0 && charClass(segments[index]!.segment, bigWord) === "space") index--;
+		while (index >= 0 && wordMotionClass(segments[index]!) === "space") index--;
 		if (index < 0) return normalizeNormalCursor(state.lines, { line: 0, col: 0 });
-		const category = charClass(segments[index]!.segment, bigWord);
-		while (index > 0 && charClass(segments[index - 1]!.segment, bigWord) === category) index--;
+		const category = wordMotionClass(segments[index]!);
+		while (index > 0 && wordMotionClass(segments[index - 1]!) === category) index--;
 	}
 	return normalizeNormalCursor(state.lines, cursorFromOffset(state.lines, segments[Math.max(0, index)]!.index));
 }
 
 function moveWordEnd(state: BufferState, count: number, bigWord = false): Cursor {
 	const text = linesToText(state.lines);
-	const segments = segmentGraphemes(text);
+	const segments = segmentWordMotion(text, bigWord);
 	if (segments.length === 0) return { line: 0, col: 0 };
 	let index = graphemeIndexAtOrAfter(segments, stateOffset(state.lines, state.cursor));
 	for (let step = 0; step < count; step++) {
 		if (index >= segments.length) return cursorAtLastNormalPosition(state.lines);
-		let category = charClass(segments[index]!.segment, bigWord);
+		let category = wordMotionClass(segments[index]!);
 		if (category === "space") {
-			while (index < segments.length && charClass(segments[index]!.segment, bigWord) === "space") index++;
+			while (index < segments.length && wordMotionClass(segments[index]!) === "space") index++;
 			if (index >= segments.length) return cursorAtLastNormalPosition(state.lines);
-			category = charClass(segments[index]!.segment, bigWord);
+			category = wordMotionClass(segments[index]!);
 		}
-		while (index + 1 < segments.length && charClass(segments[index + 1]!.segment, bigWord) === category) index++;
+		while (index + 1 < segments.length && wordMotionClass(segments[index + 1]!) === category) index++;
 		if (step < count - 1) index++;
 	}
 	if (index >= segments.length) return cursorAtLastNormalPosition(state.lines);
@@ -307,19 +355,19 @@ function moveWordEnd(state: BufferState, count: number, bigWord = false): Cursor
 
 function moveWordEndBackward(state: BufferState, count: number, bigWord = false): Cursor {
 	const text = linesToText(state.lines);
-	const segments = segmentGraphemes(text);
+	const segments = segmentWordMotion(text, bigWord);
 	if (segments.length === 0) return { line: 0, col: 0 };
 	let index = graphemeIndexAtOrAfter(segments, stateOffset(state.lines, state.cursor));
 	for (let step = 0; step < count; step++) {
 		if (index >= segments.length) index = segments.length - 1;
-		else if (charClass(segments[index]!.segment, bigWord) !== "space") {
-			const category = charClass(segments[index]!.segment, bigWord);
-			while (index > 0 && charClass(segments[index - 1]!.segment, bigWord) === category) index--;
+		else if (wordMotionClass(segments[index]!) !== "space") {
+			const category = wordMotionClass(segments[index]!);
+			while (index > 0 && wordMotionClass(segments[index - 1]!) === category) index--;
 			index--;
 		} else {
 			index--;
 		}
-		while (index >= 0 && charClass(segments[index]!.segment, bigWord) === "space") index--;
+		while (index >= 0 && wordMotionClass(segments[index]!) === "space") index--;
 		if (index < 0) return normalizeNormalCursor(state.lines, { line: 0, col: 0 });
 	}
 	return normalizeNormalCursor(state.lines, cursorFromOffset(state.lines, segments[index]!.index));
@@ -480,40 +528,40 @@ function findDelimitedSelection(state: BufferState, open: string, close: string,
 
 function findWordSelection(state: BufferState, around: boolean, count: number, bigWord = false): SelectionRange | null {
 	const text = linesToText(state.lines);
-	const segments = segmentGraphemes(text);
+	const segments = segmentWordMotion(text, bigWord);
 	if (segments.length === 0) return null;
 	const cursorOffset = stateOffset(state.lines, state.cursor);
 	let index = graphemeIndexAtOrAfter(segments, cursorOffset);
 	if (index >= segments.length) index = segments.length - 1;
-	while (index < segments.length && charClass(segments[index]!.segment, bigWord) === "space") index++;
+	while (index < segments.length && wordMotionClass(segments[index]!) === "space") index++;
 	if (index >= segments.length) {
 		index = Math.max(0, graphemeIndexAtOrAfter(segments, Math.max(0, cursorOffset - 1)));
-		while (index > 0 && charClass(segments[index]!.segment, bigWord) === "space") index--;
-		if (charClass(segments[index]!.segment, bigWord) === "space") return null;
+		while (index > 0 && wordMotionClass(segments[index]!) === "space") index--;
+		if (wordMotionClass(segments[index]!) === "space") return null;
 	}
-	const category = charClass(segments[index]!.segment, bigWord);
+	const category = wordMotionClass(segments[index]!);
 	let startIndex = index;
-	while (startIndex > 0 && charClass(segments[startIndex - 1]!.segment, bigWord) === category) startIndex--;
+	while (startIndex > 0 && wordMotionClass(segments[startIndex - 1]!) === category) startIndex--;
 	let endIndex = index;
-	while (endIndex + 1 < segments.length && charClass(segments[endIndex + 1]!.segment, bigWord) === category) endIndex++;
+	while (endIndex + 1 < segments.length && wordMotionClass(segments[endIndex + 1]!) === category) endIndex++;
 	for (let step = 1; step < count; step++) {
 		let nextIndex = endIndex + 1;
-		while (nextIndex < segments.length && charClass(segments[nextIndex]!.segment, bigWord) === "space") nextIndex++;
+		while (nextIndex < segments.length && wordMotionClass(segments[nextIndex]!) === "space") nextIndex++;
 		if (nextIndex >= segments.length) break;
-		const nextCategory = charClass(segments[nextIndex]!.segment, bigWord);
+		const nextCategory = wordMotionClass(segments[nextIndex]!);
 		endIndex = nextIndex;
-		while (endIndex + 1 < segments.length && charClass(segments[endIndex + 1]!.segment, bigWord) === nextCategory) endIndex++;
+		while (endIndex + 1 < segments.length && wordMotionClass(segments[endIndex + 1]!) === nextCategory) endIndex++;
 	}
 	let start = segments[startIndex]!.index;
 	let end = endIndex + 1 < segments.length ? segments[endIndex + 1]!.index : text.length;
 	if (around) {
 		let trailingIndex = endIndex + 1;
-		while (trailingIndex < segments.length && charClass(segments[trailingIndex]!.segment, bigWord) === "space") trailingIndex++;
+		while (trailingIndex < segments.length && wordMotionClass(segments[trailingIndex]!) === "space") trailingIndex++;
 		if (trailingIndex > endIndex + 1) {
 			end = trailingIndex < segments.length ? segments[trailingIndex]!.index : text.length;
 		} else {
 			let leadingIndex = startIndex;
-			while (leadingIndex > 0 && charClass(segments[leadingIndex - 1]!.segment, bigWord) === "space") leadingIndex--;
+			while (leadingIndex > 0 && wordMotionClass(segments[leadingIndex - 1]!) === "space") leadingIndex--;
 			start = segments[leadingIndex]!.index;
 		}
 	}

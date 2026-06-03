@@ -61,6 +61,20 @@ test("word motions cover w/e/b/ge and line motions cover 0/$/gg/G", () => {
 	assert.equal(renderMarked(buffer), "|alpha beta\ngamma delta");
 });
 
+test("word motions use Unicode word boundaries while preserving punctuation", () => {
+	const chinese = createController("|我喜欢编程");
+	feed(chinese.controller, "w");
+	assert.equal(renderMarked(chinese.buffer), "我|喜欢编程");
+	feed(chinese.controller, "w");
+	assert.equal(renderMarked(chinese.buffer), "我喜欢|编程");
+
+	const punctuation = createController("|café.test");
+	feed(punctuation.controller, "w");
+	assert.equal(renderMarked(punctuation.buffer), "café|.test");
+	feed(punctuation.controller, "w");
+	assert.equal(renderMarked(punctuation.buffer), "café.|test");
+});
+
 test("cw changes only the current word and leaves following spacing intact", () => {
 	const { buffer, controller } = createController("|hello world");
 

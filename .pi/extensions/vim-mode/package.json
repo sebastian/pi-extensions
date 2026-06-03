@@ -1,6 +1,6 @@
 {
   "name": "vim-mode-pi-package",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A much more capable vim-style modal editor for pi.",
   "type": "module",
   "keywords": [

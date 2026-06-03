@@ -7,6 +7,7 @@ A more capable vim-style modal editor for pi.
 - normal + insert modes
 - counts like `3w`, `2dw`, `4j`
 - motions: `h`, `j`, `k`, `l`, `w`, `W`, `b`, `B`, `e`, `E`, `ge`, `gE`, `0`, `^`, `$`, `gg`, `G`, `%`
+- Unicode-aware word motion/text-object boundaries that follow pi's current editor behavior while preserving ASCII punctuation boundaries
 - find motions: `f`, `F`, `t`, `T`, repeat with `;` and `,`
 - insert/edit commands: `i`, `a`, `I`, `A`, `o`, `O`, `x`, `X`, `s`, `S`, `r`, `J`, `u`
 - operators: `d`, `c`, `y` with the motions above

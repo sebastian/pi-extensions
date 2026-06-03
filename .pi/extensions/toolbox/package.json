@@ -1,6 +1,6 @@
 {
   "name": "toolbox-pi-package",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Catch-all pi toolbox package that currently exposes the /review workflow and keeps shared workflow utilities together.",
   "type": "module",
   "keywords": [

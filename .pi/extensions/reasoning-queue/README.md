@@ -1,6 +1,6 @@
 # Reasoning Queue Extension
 
-Adds per-message reasoning-level directives for pi prompts, including steering and follow-up messages queued while the agent is working.
+Adds per-message reasoning-level directives for pi prompts, including streaming-aware steering and follow-up messages queued while the agent is working.
 
 ## Usage
 
@@ -36,6 +36,7 @@ You can also use the inline fields shown below the editor instead of typing a di
 
 - Directives are stripped before the message is sent to the model.
 - If the selected model cannot use a requested level, the extension applies the closest supported level instead. For example, boolean on/off thinking models such as GLM/Z.AI clamp any non-`off` request, including `xhigh`, to `high`.
+- The extension uses pi's `InputEvent.streamingBehavior` metadata to distinguish idle prompts from mid-stream steering and follow-up messages, so queued directives do not change the active in-flight provider request.
 - The extension tracks queued messages in order and rewrites provider requests so steering messages inside an active agent run can still use their queued reasoning level.
 - Model changes made while the agent is working are deferred until the queued message starts, so the in-flight request keeps its original model and reasoning payload shape.
 - The footer status shows the current inherited default as `reasoning:<level>` and stays in sync with pi's built-in thinking-level controls.

@@ -14,6 +14,7 @@ import {
 export const ZAI_CODING_PLAN_PROVIDER_ID = "zai-coding-plan";
 export const ZAI_CODING_PLAN_BASE_URL = "https://api.z.ai/api/coding/paas/v4";
 export const ZAI_CODING_PLAN_API_KEY_ENV = "ZAI_API_KEY";
+export const ZAI_CODING_PLAN_API_KEY_CONFIG = `$${ZAI_CODING_PLAN_API_KEY_ENV}`;
 
 const ZAI_USAGE_STATUS_KEY = "zai-usage-indicator";
 const ZAI_USAGE_MONITOR_PATH = "/api/monitor/usage/quota/limit";
@@ -147,7 +148,7 @@ export function registerZaiCodingPlan(
 	pi.registerProvider(ZAI_CODING_PLAN_PROVIDER_ID, {
 		name: "Z.AI Coding Plan",
 		baseUrl: ZAI_CODING_PLAN_BASE_URL,
-		apiKey: ZAI_CODING_PLAN_API_KEY_ENV,
+		apiKey: ZAI_CODING_PLAN_API_KEY_CONFIG,
 		api: "openai-completions",
 		models: cloneModels(),
 	});

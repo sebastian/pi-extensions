@@ -1192,6 +1192,7 @@ async function runModelReview(options: {
 	try {
 		const result = await runSubagent({
 			cwd: options.target.reviewCwd,
+			name: `review ${options.model}`,
 			systemPrompt: REVIEW_SYSTEM_PROMPT,
 			prompt: buildModelReviewPrompt(options.target),
 			files: options.target.attachments,

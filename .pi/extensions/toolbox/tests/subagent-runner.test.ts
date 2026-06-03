@@ -18,6 +18,19 @@ test("buildSubagentArgs disables extension discovery by default", () => {
 	assert.ok(!args.includes("-e"));
 });
 
+test("buildSubagentArgs can name JSON-mode startup sessions", () => {
+	const args = buildSubagentArgs({
+		cwd: "/repo",
+		name: "review openai/gpt-5.4",
+		systemPrompt: "System",
+		prompt: "Review this change",
+	});
+
+	const nameIndex = args.indexOf("--name");
+	assert.notEqual(nameIndex, -1);
+	assert.equal(args[nameIndex + 1], "review openai/gpt-5.4");
+});
+
 test("buildSubagentArgs can keep normal extensions enabled and add explicit extension sources", () => {
 	const args = buildSubagentArgs({
 		cwd: "/repo",

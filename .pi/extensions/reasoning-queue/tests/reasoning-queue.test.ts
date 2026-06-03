@@ -383,6 +383,65 @@ test("queued model changes while busy are deferred until the queued message star
 	assert.deepEqual(setModelCalls, ["zai-coding-plan/glm-5.1"]);
 });
 
+test("streamingBehavior keeps queued reasoning from changing the active in-flight request", async () => {
+	const handlers = new Map<string, Function[]>();
+	let currentModel: typeof reasoningModel = reasoningModel;
+	let thinkingLevel = "medium";
+	const pi = {
+		events: createEventBusStub(),
+		on(name: string, handler: Function) {
+			handlers.set(name, [...(handlers.get(name) ?? []), handler]);
+		},
+		getThinkingLevel() {
+			return thinkingLevel;
+		},
+		setThinkingLevel(level: string) {
+			thinkingLevel = level;
+		},
+	};
+	const ctx = {
+		hasUI: false,
+		get model() {
+			return currentModel;
+		},
+		modelRegistry: {
+			getAvailable() {
+				return [reasoningModel];
+			},
+			find() {
+				return reasoningModel;
+			},
+		},
+		isIdle() {
+			return true;
+		},
+		ui: { notify() {} },
+	};
+	reasoningQueueExtension(pi as never);
+
+	await handlers.get("session_start")![0]({}, ctx as never);
+	const inputResult = await handlers.get("input")![0](
+		{ text: "/r xhigh queued task", source: "interactive", streamingBehavior: "followUp" },
+		ctx as never,
+	);
+	assert.deepEqual(inputResult, { action: "transform", text: "queued task", images: undefined });
+
+	const inFlight = handlers.get("before_provider_request")![0](
+		{ payload: { model: "gpt-5.4-codex", input: [], reasoning: { effort: "low", summary: "auto" } } },
+		ctx as never,
+	) as { reasoning: { effort: string } };
+	assert.equal(inFlight.reasoning.effort, "medium");
+	assert.equal(thinkingLevel, "medium");
+
+	await handlers.get("message_start")![0]({ message: { role: "user", content: "queued task" } }, ctx as never);
+	const queuedTurn = handlers.get("before_provider_request")![0](
+		{ payload: { model: "gpt-5.4-codex", input: [], reasoning: { effort: "low", summary: "auto" } } },
+		ctx as never,
+	) as { reasoning: { effort: string } };
+	assert.equal(queuedTurn.reasoning.effort, "xhigh");
+	assert.equal(thinkingLevel, "xhigh");
+});
+
 test("provider payload rewriting follows the request payload model when context model differs", async () => {
 	const handlers = new Map<string, Function[]>();
 	let currentModel: typeof reasoningModel | typeof glmReasoningModel = reasoningModel;

@@ -27,6 +27,7 @@ interface PendingReasoningLevel {
 	level: ThinkingLevel;
 	explicit: boolean;
 	model?: ModelRef;
+	streamingBehavior?: "steer" | "followUp";
 }
 
 type FieldFocus = "prompt" | "model" | "reasoning";
@@ -889,6 +890,10 @@ function contextIsIdle(ctx: ExtensionContext): boolean {
 	return typeof isIdle === "function" ? Boolean(isIdle.call(ctx)) : true;
 }
 
+function inputIsQueued(event: { streamingBehavior?: unknown }): event is { streamingBehavior: "steer" | "followUp" } {
+	return event.streamingBehavior === "steer" || event.streamingBehavior === "followUp";
+}
+
 export default function reasoningQueueExtension(pi: ExtensionAPI): void {
 	let defaultLevel: ThinkingLevel = "medium";
 	let activeLevel: ThinkingLevel = defaultLevel;
@@ -953,7 +958,8 @@ export default function reasoningQueueExtension(pi: ExtensionAPI): void {
 
 	function formatQueuedEntry(ctx: ExtensionContext, pending: PendingReasoningLevel): string {
 		const model = pending.model ? formatModelRef(pending.model) : formatModelRef(ctx.model as ReasoningModel | undefined);
-		return `${pending.explicit ? "*" : ""}${model}:${pending.level}`;
+		const delivery = pending.streamingBehavior ? `${pending.streamingBehavior}:` : "";
+		return `${pending.explicit ? "*" : ""}${delivery}${model}:${pending.level}`;
 	}
 
 	function updateStatus(ctx: ExtensionContext): void {
@@ -998,6 +1004,13 @@ export default function reasoningQueueExtension(pi: ExtensionAPI): void {
 		const effectiveLevel = setEffectiveThinkingLevel(level, ctx);
 		defaultLevel = effectiveLevel;
 		if (contextIsIdle(ctx)) activeLevel = effectiveLevel;
+		updateStatus(ctx);
+		return effectiveLevel;
+	}
+
+	function setQueuedDefaultLevel(level: ThinkingLevel, ctx: ExtensionContext): ThinkingLevel {
+		const effectiveLevel = clampReasoningLevel(level, getSelectedModel(ctx) as ReasoningModel | undefined);
+		defaultLevel = effectiveLevel;
 		updateStatus(ctx);
 		return effectiveLevel;
 	}
@@ -1233,7 +1246,9 @@ export default function reasoningQueueExtension(pi: ExtensionAPI): void {
 	pi.on("input", async (event, ctx) => {
 		if (event.source === "extension") return { action: "continue" as const };
 		fieldFocus = "prompt";
-		if (contextIsIdle(ctx) && pendingLevels.length > 0) pendingLevels = [];
+		const queuedInput = inputIsQueued(event);
+		const idleInput = !queuedInput && contextIsIdle(ctx);
+		if (idleInput && pendingLevels.length > 0) pendingLevels = [];
 
 		const parsed = parseReasoningDirective(event.text);
 		if (parsed?.kind === "invalid") {
@@ -1242,25 +1257,37 @@ export default function reasoningQueueExtension(pi: ExtensionAPI): void {
 		}
 
 		if (!parsed) {
-			if (contextIsIdle(ctx) && pendingLevels.length === 0 && currentModelMatchesSelected(ctx)) {
+			if (idleInput && pendingLevels.length === 0 && currentModelMatchesSelected(ctx)) {
 				defaultLevel = setEffectiveThinkingLevel(pi.getThinkingLevel(), ctx);
 				activeLevel = defaultLevel;
 				selectedModelRef = getModelRef(ctx.model as ReasoningModel | undefined);
 			}
-			pendingLevels.push({ text: event.text, level: defaultLevel, explicit: false, model: getPendingModelRef(ctx) });
+			pendingLevels.push({
+				text: event.text,
+				level: defaultLevel,
+				explicit: false,
+				model: getPendingModelRef(ctx),
+				streamingBehavior: event.streamingBehavior,
+			});
 			updateStatus(ctx);
 			return { action: "continue" as const };
 		}
 
-		const effectiveLevel = setDefaultLevel(parsed.level, ctx);
+		const effectiveLevel = queuedInput ? setQueuedDefaultLevel(parsed.level, ctx) : setDefaultLevel(parsed.level, ctx);
 		if (!parsed.rest.trim()) {
-			activeLevel = effectiveLevel;
-			ctx.ui.notify(`Reasoning level set to ${effectiveLevel}`, "info");
+			if (!queuedInput) activeLevel = effectiveLevel;
+			ctx.ui.notify(`Reasoning level ${queuedInput ? "queued" : "set"} to ${effectiveLevel}`, "info");
 			updateStatus(ctx);
 			return { action: "handled" as const };
 		}
 
-		pendingLevels.push({ text: parsed.rest, level: effectiveLevel, explicit: true, model: getPendingModelRef(ctx) });
+		pendingLevels.push({
+			text: parsed.rest,
+			level: effectiveLevel,
+			explicit: true,
+			model: getPendingModelRef(ctx),
+			streamingBehavior: event.streamingBehavior,
+		});
 		updateStatus(ctx);
 		return { action: "transform" as const, text: parsed.rest, images: event.images };
 	});

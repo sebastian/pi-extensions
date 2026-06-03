@@ -12,6 +12,7 @@ export interface SubagentInvocation {
 	tools?: string[];
 	model?: string;
 	thinkingLevel?: string;
+	name?: string;
 	loadExtensions?: boolean;
 	extensions?: string[];
 	signal?: AbortSignal;
@@ -122,6 +123,9 @@ export function buildSubagentArgs(invocation: SubagentInvocation): string[] {
 		"-p",
 		"--no-session",
 	] as string[];
+
+	const sessionName = invocation.name?.trim();
+	if (sessionName) args.push("--name", sessionName);
 
 	if (!invocation.loadExtensions) args.push("--no-extensions");
 	for (const extension of uniqueStrings(invocation.extensions ?? [])) {

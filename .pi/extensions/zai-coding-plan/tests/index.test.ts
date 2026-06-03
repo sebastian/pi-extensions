@@ -6,6 +6,7 @@ import { join } from "node:path";
 import zaiCodingPlan, {
 	hasUsageError,
 	registerZaiCodingPlan,
+	ZAI_CODING_PLAN_API_KEY_CONFIG,
 	ZAI_CODING_PLAN_API_KEY_ENV,
 	ZAI_CODING_PLAN_BASE_URL,
 	ZAI_CODING_PLAN_MODELS,
@@ -59,7 +60,8 @@ test("registerZaiCodingPlan registers the coding-plan provider with cloned model
 	assert.equal(id, ZAI_CODING_PLAN_PROVIDER_ID);
 	assert.equal(config.name, "Z.AI Coding Plan");
 	assert.equal(config.baseUrl, ZAI_CODING_PLAN_BASE_URL);
-	assert.equal(config.apiKey, ZAI_CODING_PLAN_API_KEY_ENV);
+	assert.equal(config.apiKey, ZAI_CODING_PLAN_API_KEY_CONFIG);
+	assert.equal(config.apiKey, `$${ZAI_CODING_PLAN_API_KEY_ENV}`);
 	assert.equal(config.api, "openai-completions");
 	assert.deepEqual(config.models, ZAI_CODING_PLAN_MODELS);
 	assert.notEqual(config.models, ZAI_CODING_PLAN_MODELS);

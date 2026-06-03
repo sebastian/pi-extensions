@@ -21,7 +21,7 @@ This pi package follows that same idea and registers a dedicated provider:
 
 - provider id: `zai-coding-plan`
 - login/model display name: `Z.AI Coding Plan`
-- auth env var: `ZAI_API_KEY`
+- auth env var: `ZAI_API_KEY` (registered as the explicit pi config reference `$ZAI_API_KEY`)
 - API type: `openai-completions`
 
 The package also applies the Z.AI-specific OpenAI compatibility flags pi needs for:
@@ -64,7 +64,7 @@ pi -e /absolute/path/to/.pi/extensions/zai-coding-plan
 
 ## Configure auth
 
-Set your Z.AI API key in the environment before starting pi:
+Set your Z.AI API key in the environment before starting pi. Current pi versions require provider configs to use explicit `$ENV_VAR` references, and this extension registers `$ZAI_API_KEY` for you:
 
 ```bash
 export ZAI_API_KEY=your_zai_api_key
