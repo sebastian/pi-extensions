@@ -30,7 +30,7 @@ The package also applies the Z.AI-specific OpenAI compatibility flags pi needs f
 - no `developer` role
 - tool-call streaming on the newer coding-plan models
 
-It also adds a compact live quota indicator inline in pi's footer/status line while a relevant Z.AI model is active in the interactive TUI. The indicator auto-refreshes over time and after completed turns, and it uses the same monitor endpoint family that Z.AI's official `glm-plan-usage` Claude plugin uses.
+It also adds a compact live quota indicator to pi's status line while a relevant Z.AI model is active in the interactive TUI. The indicator auto-refreshes over time and after completed turns, and it uses the same monitor endpoint family that Z.AI's official `glm-plan-usage` Claude plugin uses.
 
 ## Included models
 
@@ -74,7 +74,7 @@ export ZAI_API_KEY=your_zai_api_key
 
 Start pi, open `/model`, and pick one of the `zai-coding-plan/*` models.
 
-When a Z.AI-backed model is active, the extension shows a small live usage status inline in the footer with your current 5-hour and 7-day quota headroom whenever the monitor endpoint exposes those windows.
+When a Z.AI-backed model is active, the extension shows a small live usage status with your current 5-hour and 7-day quota headroom whenever the monitor endpoint exposes those windows.
 
 CLI example:
 
@@ -89,7 +89,7 @@ pi --provider zai-coding-plan --model glm-5.1
 - The package declares boolean thinking metadata for its models, so pi's thinking-level selector skips unsupported intermediate and `xhigh` levels instead of showing controls that all collapse to the same Z.AI `enable_thinking` flag.
 - `zai-coding-plan/glm-5.1` also uses a conservative effective context window so pi compacts around ~100k prompt tokens by default instead of riding the model's larger advertised limit.
 - The quota status indicator uses `GET /api/monitor/usage/quota/limit` on `api.z.ai`, which is also what Z.AI's official usage-query plugin relies on.
-- The custom inline footer is installed only in pi's interactive TUI mode; RPC/JSON/print runs still get the provider registration without footer replacement.
+- The quota indicator is installed only in pi's interactive UI; RPC/JSON/print runs still get the provider registration without status polling.
 - Z.AI's coding-plan docs recommend the OpenAI-compatible coding endpoint for non-Claude coding tools; this package intentionally follows that route instead of the Anthropic-compatible Claude Code path.
 
 ## Sources

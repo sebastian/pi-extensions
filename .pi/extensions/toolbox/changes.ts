@@ -1,6 +1,5 @@
 import { detectRepoKind, findRepoRoot } from "./repo.ts";
 import { isAbsolute, normalize } from "node:path";
-import type { DecompositionPhase } from "./structured-output.ts";
 
 export interface ExecResultLike {
 	stdout: string;
@@ -89,41 +88,6 @@ export function pathsOverlap(left: string[], right: string[]): boolean {
 	}
 
 	return false;
-}
-
-function canRunInParallel(existingBatch: DecompositionPhase[], candidate: DecompositionPhase): boolean {
-	if (!candidate.parallelSafe) return false;
-	if (existingBatch.some((phase) => !phase.parallelSafe)) return false;
-	if (existingBatch.some((phase) => candidate.dependsOn.includes(phase.id) || phase.dependsOn.includes(candidate.id))) {
-		return false;
-	}
-	if (existingBatch.some((phase) => pathsOverlap(phase.touchedPaths, candidate.touchedPaths))) {
-		return false;
-	}
-	return true;
-}
-
-export function computeExecutionBatches(phases: DecompositionPhase[]): DecompositionPhase[][] {
-	const batches: DecompositionPhase[][] = [];
-	let currentBatch: DecompositionPhase[] = [];
-
-	for (const phase of phases) {
-		if (currentBatch.length === 0) {
-			currentBatch = [phase];
-			continue;
-		}
-
-		if (canRunInParallel(currentBatch, phase)) {
-			currentBatch.push(phase);
-			continue;
-		}
-
-		batches.push(currentBatch);
-		currentBatch = [phase];
-	}
-
-	if (currentBatch.length > 0) batches.push(currentBatch);
-	return batches;
 }
 
 export async function detectChangedFiles(cwd: string, exec: ExecLike): Promise<string[]> {

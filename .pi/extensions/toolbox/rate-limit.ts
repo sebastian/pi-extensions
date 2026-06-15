@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { setTimeout as sleep } from "node:timers/promises";
 
 const GOOGLE_RATE_LIMIT_DOCS_URL = "https://ai.google.dev/gemini-api/docs/rate-limits";
 const GOOGLE_RATE_LIMIT_USAGE_URL = "https://ai.dev/rate-limit";
@@ -191,27 +192,6 @@ function requestModelKey(payload: unknown, ctx: ExtensionContext): string | unde
 	return modelKey(providerForPayloadModel(modelId, ctx), modelId);
 }
 
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-	if (ms <= 0) return Promise.resolve();
-	if (signal?.aborted) return Promise.reject(new Error("Rate-limit wait aborted"));
-	return new Promise((resolve, reject) => {
-		const timeout = setTimeout(done, ms);
-		function done() {
-			cleanup();
-			resolve();
-		}
-		function abort() {
-			cleanup();
-			reject(new Error("Rate-limit wait aborted"));
-		}
-		function cleanup() {
-			clearTimeout(timeout);
-			signal?.removeEventListener("abort", abort);
-		}
-		signal?.addEventListener("abort", abort, { once: true });
-	});
-}
-
 async function waitForRateLimit(state: RateLimitState, ctx: ExtensionContext): Promise<void> {
 	const waitMs = state.retryAt - Date.now();
 	if (waitMs <= 0) return;
@@ -221,7 +201,7 @@ async function waitForRateLimit(state: RateLimitState, ctx: ExtensionContext): P
 		ctx.ui.setStatus("rate-limit", ctx.ui.theme.fg("warning", `rate limit: waiting ${formatDuration(seconds)}`));
 	}
 	try {
-		await sleep(waitMs, ctx.signal);
+		await sleep(waitMs, undefined, { signal: ctx.signal });
 	} finally {
 		if (ctx.hasUI) ctx.ui.setStatus("rate-limit", undefined);
 	}

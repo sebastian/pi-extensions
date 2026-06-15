@@ -1,10 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-export interface WorkflowModelPlan {
-	primary: string | undefined;
-	checkers: string[];
-}
-
 export interface ReviewModelPlan {
 	implementation: string | undefined;
 	reviewers: string[];
@@ -66,6 +61,14 @@ function reviewModelFamily(ref: string): string {
 	return normalized;
 }
 
+function rankModelRefsByOrder(availableRefs: string[], preferredOrder: readonly string[]): string[] {
+	return uniqueRefs(availableRefs).sort((left, right) => {
+		const preferredDiff = preferredModelIndex(left, preferredOrder) - preferredModelIndex(right, preferredOrder);
+		if (preferredDiff !== 0) return preferredDiff;
+		return normalizeRef(left).localeCompare(normalizeRef(right));
+	});
+}
+
 function pickReviewers(ranked: string[], implementation: string | undefined): string[] {
 	const implementationRef = normalizeRef(implementation ?? "");
 	const usedFamilies = new Set<string>();
@@ -83,59 +86,13 @@ function pickReviewers(ranked: string[], implementation: string | undefined): st
 	return reviewers;
 }
 
-function rankModelRefsByOrder(availableRefs: string[], preferredOrder: readonly string[]): string[] {
-	return uniqueRefs(availableRefs).sort((left, right) => {
-		const preferredDiff = preferredModelIndex(left, preferredOrder) - preferredModelIndex(right, preferredOrder);
-		if (preferredDiff !== 0) return preferredDiff;
-		return normalizeRef(left).localeCompare(normalizeRef(right));
-	});
-}
-
-export function rankModelRefs(availableRefs: string[]): string[] {
-	return rankModelRefsByOrder(availableRefs, PREFERRED_MODEL_ORDER);
-}
-
-export function resolveWorkflowModelsFromRefs(availableRefs: string[], currentModelRef?: string): WorkflowModelPlan {
-	const available = uniqueRefs(availableRefs);
-	const ranked = rankModelRefs(available);
-	const primary =
-		pickFirstAvailable(available, [GPT_54_MODEL_REF]) ??
-		(currentModelRef && pickFirstAvailable(available, [currentModelRef])) ??
-		ranked[0];
-
-	const checkers: string[] = [];
-	if (primary) checkers.push(primary);
-
-	const companion = pickFirstAvailable(
-		available.filter((ref) => normalizeRef(ref) !== normalizeRef(primary ?? "")),
-		[
-			GPT_53_CODEX_MODEL_REF,
-			...GLM_51_MODEL_REFS,
-		],
-	);
-	if (companion && !checkers.includes(companion)) checkers.push(companion);
-
-	if (checkers.length === 0 && primary) checkers.push(primary);
-	return { primary, checkers };
-}
-
 export function resolveReviewModelsFromRefs(availableRefs: string[], currentModelRef?: string): ReviewModelPlan {
-	const ranked = rankModelRefs(availableRefs);
+	const ranked = rankModelRefsByOrder(availableRefs, PREFERRED_MODEL_ORDER);
 	const rankedReviewers = rankModelRefsByOrder(availableRefs, PREFERRED_REVIEWER_MODEL_ORDER);
-	const implementation =
-		(currentModelRef && pickFirstAvailable(ranked, [currentModelRef])) ??
-		ranked[0];
+	const implementation = (currentModelRef && pickFirstAvailable(ranked, [currentModelRef])) ?? ranked[0];
 	const reviewers = pickReviewers(rankedReviewers, implementation);
-	const topLevel = implementation
-		? [implementation, ...reviewers]
-		: reviewers.slice(0, 3);
+	const topLevel = implementation ? [implementation, ...reviewers] : reviewers.slice(0, 3);
 	return { implementation, reviewers, topLevel };
-}
-
-export function resolveWorkflowModels(ctx: ExtensionContext): WorkflowModelPlan {
-	const availableRefs = ctx.modelRegistry.getAvailable().map((model) => toModelRef(model));
-	const currentModelRef = ctx.model ? toModelRef(ctx.model) : undefined;
-	return resolveWorkflowModelsFromRefs(availableRefs, currentModelRef);
 }
 
 export function resolveReviewModels(ctx: ExtensionContext): ReviewModelPlan {

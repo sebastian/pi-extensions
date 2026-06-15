@@ -1,36 +1,22 @@
 {
   "name": "toolbox-pi-package",
   "version": "0.4.2",
-  "description": "Catch-all pi toolbox package that currently exposes the /review workflow and keeps shared workflow utilities together.",
+  "description": "Small pi toolbox package with provider rate-limit handling and the /review command.",
   "type": "module",
   "keywords": [
     "pi-package"
   ],
   "files": [
-    "agents",
-    "agents-checks.ts",
     "changes.ts",
     "guidance.ts",
-    "implement-workflow.ts",
-    "implementation-progress.ts",
-    "implementation-progress-widget.ts",
-    "implementation-prompt.ts",
     "index.ts",
     "models.ts",
-    "questionnaire-model.ts",
-    "questionnaire.ts",
     "rate-limit.ts",
     "repo.ts",
     "review-progress.ts",
     "review-workflow.ts",
     "structured-output.ts",
     "subagent-runner.ts",
-    "tui-compat.ts",
-    "usage-display.ts",
-    "utils.ts",
-    "widget-support.ts",
-    "workspaces.ts",
-    "web-research.ts",
     "README.md"
   ],
   "pi": {
@@ -39,11 +25,8 @@
     ]
   },
   "peerDependencies": {
-    "@earendil-works/pi-agent-core": "*",
     "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*",
-    "typebox": "*"
+    "@earendil-works/pi-coding-agent": "*"
   },
   "scripts": {
     "build": "echo 'No build step required'",
