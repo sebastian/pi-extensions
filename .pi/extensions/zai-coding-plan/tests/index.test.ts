@@ -70,6 +70,14 @@ test("registerZaiCodingPlan registers the coding-plan provider with cloned model
 	assert.notEqual((config.models as typeof ZAI_CODING_PLAN_MODELS)[0].compat, ZAI_CODING_PLAN_MODELS[0].compat);
 });
 
+test("glm-5.2 mirrors glm-5.1: conservative context window, boolean thinking, tool streaming", () => {
+	const model = ZAI_CODING_PLAN_MODELS.find((entry) => entry.id === "glm-5.2");
+	assert.ok(model);
+	assert.equal(model.contextWindow, 116_384);
+	assert.deepEqual(model.thinkingLevelMap, { minimal: null, low: null, medium: null, xhigh: null });
+	assert.deepEqual(model.compat, { supportsDeveloperRole: false, thinkingFormat: "zai", zaiToolStream: true });
+});
+
 test("glm-5.1 uses a conservative context window and Z.AI tool streaming compat", () => {
 	const model = ZAI_CODING_PLAN_MODELS.find((entry) => entry.id === "glm-5.1");
 	assert.ok(model);
@@ -103,6 +111,16 @@ test("non-GLM-5.1 turns are left unchanged", async () => {
 	const [handler] = getHandlers<(event: { systemPrompt: string }, ctx: { model?: { provider?: string; id?: string } }) => Promise<{ systemPrompt: string } | undefined>>("before_agent_start");
 	assert.equal(await handler({ systemPrompt: "Base instructions" }, { model: { provider: ZAI_CODING_PLAN_PROVIDER_ID, id: "glm-5-turbo" } }), undefined);
 	assert.equal(await handler({ systemPrompt: "Base instructions" }, { model: { provider: "other-provider", id: "glm-5.1" } }), undefined);
+});
+
+test("GLM-5.2 gets the same concise/in-less-sycophantic nudge as 5.1", async () => {
+	const { pi, getHandlers } = createPiStub();
+	zaiCodingPlan(pi as never);
+
+	const [handler] = getHandlers<(event: { systemPrompt: string }, ctx: { model?: { provider?: string; id?: string } }) => Promise<{ systemPrompt: string } | undefined>>("before_agent_start");
+	const result = await handler({ systemPrompt: "Base instructions" }, { model: { provider: ZAI_CODING_PLAN_PROVIDER_ID, id: "glm-5.2" } });
+	assert.ok(result);
+	assert.ok(result.systemPrompt.includes("Do not be flattering, sycophantic, or overly eager to please."));
 });
 
 test("hasUsageError accepts successful live quota payloads that use code 200", () => {

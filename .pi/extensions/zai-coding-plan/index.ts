@@ -44,7 +44,7 @@ const ZAI_BOOLEAN_THINKING_LEVEL_MAP = {
 	xhigh: null,
 } as const;
 
-const GLM_51_REIN_IN_PROMPT = [
+const GLM_5_REIN_IN_PROMPT = [
 	"- Be concise, direct, and matter-of-fact.",
 	"- Do not be flattering, sycophantic, or overly eager to please.",
 	"- Avoid unnecessary praise, reassurance, or agreement.",
@@ -52,9 +52,23 @@ const GLM_51_REIN_IN_PROMPT = [
 	"- State uncertainty briefly when needed, then continue with the best grounded answer.",
 ].join("\n");
 
-const GLM_51_EFFECTIVE_CONTEXT_WINDOW = 116_384;
+// ponytail: one conservative window shared across the GLM-5.x coding models. Compacts
+// around ~100k prompt tokens instead of riding each model's advertised limit. Tune per
+// model if a specific GLM-5.x release proves it can hold a larger window reliably.
+const GLM_5_EFFECTIVE_CONTEXT_WINDOW = 116_384;
 
 export const ZAI_CODING_PLAN_MODELS = [
+	{
+		id: "glm-5.2",
+		name: "GLM-5.2",
+		reasoning: true,
+		thinkingLevelMap: ZAI_BOOLEAN_THINKING_LEVEL_MAP,
+		input: ["text"],
+		cost: ZERO_COST,
+		contextWindow: GLM_5_EFFECTIVE_CONTEXT_WINDOW,
+		maxTokens: 131072,
+		compat: ZAI_TOOL_STREAM_COMPAT,
+	},
 	{
 		id: "glm-5.1",
 		name: "GLM-5.1",
@@ -62,7 +76,7 @@ export const ZAI_CODING_PLAN_MODELS = [
 		thinkingLevelMap: ZAI_BOOLEAN_THINKING_LEVEL_MAP,
 		input: ["text"],
 		cost: ZERO_COST,
-		contextWindow: GLM_51_EFFECTIVE_CONTEXT_WINDOW,
+		contextWindow: GLM_5_EFFECTIVE_CONTEXT_WINDOW,
 		maxTokens: 131072,
 		compat: ZAI_TOOL_STREAM_COMPAT,
 	},
@@ -362,8 +376,8 @@ export default function zaiCodingPlan(pi: ExtensionAPI): void {
 	registerZaiCodingPlan(pi);
 
 	pi.on("before_agent_start", async (event, ctx) => {
-		if (ctx.model?.provider !== ZAI_CODING_PLAN_PROVIDER_ID || ctx.model.id !== "glm-5.1") return undefined;
-		return { systemPrompt: event.systemPrompt ? `${event.systemPrompt}\n\n${GLM_51_REIN_IN_PROMPT}` : GLM_51_REIN_IN_PROMPT };
+		if (ctx.model?.provider !== ZAI_CODING_PLAN_PROVIDER_ID || (ctx.model.id !== "glm-5.1" && ctx.model.id !== "glm-5.2")) return undefined;
+		return { systemPrompt: event.systemPrompt ? `${event.systemPrompt}\n\n${GLM_5_REIN_IN_PROMPT}` : GLM_5_REIN_IN_PROMPT };
 	});
 
 	const usageTracker = createUsageTracker();
