@@ -3,7 +3,11 @@ import assert from "node:assert/strict";
 import { buildImplementationPrompt, isRedundantImplementationKickoffQuestionnaire } from "../implementation-prompt.ts";
 import { supportsStructuredImplementationWidget } from "../widget-support.ts";
 
-test("structured implementation widget falls back to string widgets in RPC mode", () => {
+test("structured implementation widget uses ctx.mode and falls back to argv for older contexts", () => {
+	assert.equal(supportsStructuredImplementationWidget({ hasUI: true, mode: "tui" }, ["node", "pi", "--mode", "rpc"]), true);
+	assert.equal(supportsStructuredImplementationWidget({ hasUI: true, mode: "rpc" }, ["node", "pi"]), false);
+	assert.equal(supportsStructuredImplementationWidget({ hasUI: true, mode: "json" }, ["node", "pi"]), false);
+	assert.equal(supportsStructuredImplementationWidget({ hasUI: true, mode: "print" }, ["node", "pi"]), false);
 	assert.equal(
 		supportsStructuredImplementationWidget({ hasUI: true }, ["node", "pi", "--mode", "rpc"]),
 		false,

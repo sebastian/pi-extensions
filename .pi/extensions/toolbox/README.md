@@ -16,6 +16,7 @@ Right now, the extension manifest exposed to pi registers one main command, `/re
 - deduplicates overlapping findings while preserving which model reported what
 - shows a live per-model review widget while the reviewers run, including current state, safe reasoning/activity summaries, latest visible output, and usage
 - names spawned reviewer pi runs with pi's `--name` startup option so JSON-mode review sessions are easier to identify in diagnostics
+- passes pi's trusted-project decision into reviewer subagents and only forwards project-local extension packages into snapshot reviewer runs when pi reports the project as trusted
 - shows a review summary in the conversation
 - lets you choose which findings should be addressed now
 - sends only the selected findings back into the main session for implementation

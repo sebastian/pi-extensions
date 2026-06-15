@@ -195,6 +195,81 @@ test("thinking level selection event refreshes the inherited default", async () 
 	assert.equal(status, "reasoning:xhigh");
 });
 
+test("reasoning directive autocomplete declares natural trigger characters", async () => {
+	const handlers = new Map<string, Function[]>();
+	const autocompleteProviders: Function[] = [];
+	const pi = {
+		events: createEventBusStub(),
+		on(name: string, handler: Function) {
+			handlers.set(name, [...(handlers.get(name) ?? []), handler]);
+		},
+		getThinkingLevel() {
+			return "medium";
+		},
+		setThinkingLevel() {},
+	};
+	const ctx = {
+		mode: "tui",
+		hasUI: true,
+		model: reasoningModel,
+		modelRegistry: {
+			getAvailable() {
+				return [reasoningModel];
+			},
+			find() {
+				return reasoningModel;
+			},
+		},
+		isIdle() {
+			return true;
+		},
+		ui: {
+			theme: { fg: (_color: string, text: string) => text },
+			setStatus() {},
+			setWidget() {},
+			onTerminalInput() {
+				return () => {};
+			},
+			addAutocompleteProvider(factory: Function) {
+				autocompleteProviders.push(factory);
+			},
+			getEditorText() {
+				return "";
+			},
+		},
+	};
+	reasoningQueueExtension(pi as never);
+
+	await handlers.get("session_start")![0]({}, ctx as never);
+	assert.equal(autocompleteProviders.length, 1);
+
+	const current = {
+		getSuggestions() {
+			return { prefix: "delegated", items: [] };
+		},
+		applyCompletion() {},
+		shouldTriggerFileCompletion() {
+			return true;
+		},
+	};
+	const provider = autocompleteProviders[0]!(current);
+	assert.deepEqual(provider.triggerCharacters, ["/", ":", "["]);
+
+	const colon = await provider.getSuggestions([":h"], 0, 2, { signal: new AbortController().signal });
+	assert.equal(colon.prefix, ":h");
+	assert.deepEqual(
+		colon.items.map((item: { value: string }) => item.value),
+		[":high"],
+	);
+
+	const bracket = await provider.getSuggestions(["[r:x"], 0, 4, { signal: new AbortController().signal });
+	assert.equal(bracket.prefix, "x");
+	assert.deepEqual(
+		bracket.items.map((item: { value: string }) => item.value),
+		["xhigh"],
+	);
+});
+
 test("tab field controls change model and clamp queued reasoning", async () => {
 	const events = createEventBusStub();
 	const handlers = new Map<string, Function[]>();
@@ -571,6 +646,94 @@ test("tabbable model selector uses scoped enabledModels settings", async () => {
 	}
 });
 
+test("tabbable model selector ignores project enabledModels when project trust is declined", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "reasoning-queue-untrusted-scope-"));
+	const agentDir = mkdtempSync(join(tmpdir(), "reasoning-queue-agent-dir-"));
+	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+	process.env.PI_CODING_AGENT_DIR = agentDir;
+	try {
+		mkdirSync(join(cwd, ".pi"));
+		writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({ enabledModels: ["zai-coding-plan/glm-5.1"] }));
+
+		const handlers = new Map<string, Function[]>();
+		const terminalInputHandlers: Function[] = [];
+		let currentModel: typeof reasoningModel | typeof olderReasoningModel | typeof glmReasoningModel = reasoningModel;
+		let thinkingLevel = "medium";
+		const setModelCalls: string[] = [];
+		const models = [reasoningModel, olderReasoningModel, glmReasoningModel];
+		const pi = {
+			events: createEventBusStub(),
+			on(name: string, handler: Function) {
+				handlers.set(name, [...(handlers.get(name) ?? []), handler]);
+			},
+			getThinkingLevel() {
+				return thinkingLevel;
+			},
+			setThinkingLevel(level: string) {
+				thinkingLevel = level;
+			},
+			async setModel(model: typeof reasoningModel | typeof olderReasoningModel | typeof glmReasoningModel) {
+				setModelCalls.push(`${model.provider}/${model.id}`);
+				currentModel = model;
+				return true;
+			},
+		};
+		const ctx = {
+			cwd,
+			hasUI: true,
+			isProjectTrusted() {
+				return false;
+			},
+			get model() {
+				return currentModel;
+			},
+			modelRegistry: {
+				getAvailable() {
+					return models;
+				},
+				find(provider: string, id: string) {
+					return models.find((model) => model.provider === provider && model.id === id);
+				},
+			},
+			isIdle() {
+				return true;
+			},
+			ui: {
+				theme: { fg: (_color: string, text: string) => text },
+				setStatus() {},
+				setWidget() {},
+				onTerminalInput(handler: Function) {
+					terminalInputHandlers.push(handler);
+					return () => {};
+				},
+				addAutocompleteProvider() {},
+				getEditorText() {
+					return "";
+				},
+				notify() {},
+				async select() {
+					return undefined;
+				},
+			},
+		};
+		reasoningQueueExtension(pi as never);
+
+		await handlers.get("session_start")![0]({}, ctx as never);
+		assert.deepEqual(terminalInputHandlers[0]("\t"), { consume: true });
+		assert.deepEqual(terminalInputHandlers[0]("\x1b[C"), { consume: true });
+		await Promise.resolve();
+		await Promise.resolve();
+
+		assert.equal(currentModel.id, "gpt-5.3-codex");
+		assert.deepEqual(setModelCalls, ["openai-codex/gpt-5.3-codex"]);
+	} finally {
+		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+		rmSync(agentDir, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("rewrites OpenAI Responses reasoning without mutating original payload", () => {
 	const payload = { model: "gpt-5.4-codex", input: [], reasoning: { effort: "low", summary: "auto" } };
 	const rewritten = rewriteProviderPayload(payload, "xhigh", reasoningModel) as { reasoning: { effort: string }; include: string[] };
@@ -619,6 +782,29 @@ test("honors Anthropic adaptive-thinking compat metadata", () => {
 	const disabled = rewriteProviderPayload(enabled, "off", model) as { thinking: { type: string }; output_config?: unknown };
 	assert.deepEqual(disabled.thinking, { type: "disabled" });
 	assert.equal(disabled.output_config, undefined);
+});
+
+test("honors Claude Fable 5 adaptive-thinking xhigh metadata", () => {
+	const model = {
+		...reasoningModel,
+		api: "anthropic-messages",
+		id: "claude-fable-5",
+		name: "Claude Fable 5",
+		provider: "anthropic",
+		maxTokens: 64000,
+		thinkingLevelMap: { off: null, xhigh: "xhigh" },
+		compat: { forceAdaptiveThinking: true },
+	} as ReasoningModel;
+
+	assert.deepEqual(getSupportedReasoningLevels(model), ["minimal", "low", "medium", "high", "xhigh"]);
+	assert.equal(clampReasoningLevel("off", model), "minimal");
+
+	const enabled = rewriteProviderPayload({ model: model.id, max_tokens: 4096, thinking: { type: "disabled" } }, "xhigh", model) as {
+		thinking: { type: string; display: string };
+		output_config: { effort: string };
+	};
+	assert.deepEqual(enabled.thinking, { type: "adaptive", display: "summarized" });
+	assert.deepEqual(enabled.output_config, { effort: "xhigh" });
 });
 
 test("allows Anthropic adaptive-thinking compat metadata to opt out", () => {

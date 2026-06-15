@@ -130,18 +130,25 @@ function clonePlain<T>(value: T): T {
 	return result as T;
 }
 
+function modelSearchText(model: ReasoningModel | undefined): string {
+	return `${model?.id ?? ""} ${model?.name ?? ""}`.toLowerCase();
+}
+
 function modelSupportsXhigh(model: ReasoningModel | undefined): boolean {
-	const id = model?.id ?? "";
+	const value = modelSearchText(model);
 	return (
-		id.includes("gpt-5.2") ||
-		id.includes("gpt-5.3") ||
-		id.includes("gpt-5.4") ||
-		id.includes("gpt-5.5") ||
-		id.includes("deepseek-v4-pro") ||
-		id.includes("opus-4-6") ||
-		id.includes("opus-4.6") ||
-		id.includes("opus-4-7") ||
-		id.includes("opus-4.7")
+		value.includes("gpt-5.2") ||
+		value.includes("gpt-5.3") ||
+		value.includes("gpt-5.4") ||
+		value.includes("gpt-5.5") ||
+		value.includes("deepseek-v4-pro") ||
+		value.includes("opus-4-6") ||
+		value.includes("opus-4.6") ||
+		value.includes("opus-4-7") ||
+		value.includes("opus-4.7") ||
+		value.includes("opus-4-8") ||
+		value.includes("opus-4.8") ||
+		value.includes("fable-5")
 	);
 }
 
@@ -388,12 +395,22 @@ function readSettings(path: string): JsonRecord {
 	return isRecord(parsed) ? parsed : {};
 }
 
+function contextProjectTrusted(ctx: ExtensionContext): boolean {
+	const isProjectTrusted = (ctx as unknown as { isProjectTrusted?: unknown }).isProjectTrusted;
+	if (typeof isProjectTrusted !== "function") return true;
+	try {
+		return Boolean(isProjectTrusted.call(ctx));
+	} catch {
+		return false;
+	}
+}
+
 function getConfiguredModelPatterns(ctx: ExtensionContext): string[] | undefined {
 	const cwd = (ctx as unknown as { cwd?: unknown }).cwd;
 	if (typeof cwd !== "string") return undefined;
 	try {
 		const globalSettings = readSettings(join(getAgentDirFromEnv(), "settings.json"));
-		const projectSettings = readSettings(join(cwd, ".pi", "settings.json"));
+		const projectSettings = contextProjectTrusted(ctx) ? readSettings(join(cwd, ".pi", "settings.json")) : {};
 		const patterns = Array.isArray(projectSettings.enabledModels) ? projectSettings.enabledModels : globalSettings.enabledModels;
 		if (!Array.isArray(patterns)) return undefined;
 		const cleaned = patterns.flatMap((pattern) => (typeof pattern === "string" && pattern.trim() ? [pattern.trim()] : []));
@@ -659,16 +676,19 @@ function supportsAdaptiveAnthropic(model: ReasoningModel | undefined): boolean {
 	const forced = getForceAdaptiveThinking(model);
 	if (forced !== undefined) return forced;
 
-	const value = `${model?.id ?? ""} ${model?.name ?? ""}`.toLowerCase();
+	const value = modelSearchText(model);
 	return (
 		value.includes("opus-4-6") ||
 		value.includes("opus-4.6") ||
 		value.includes("opus-4-7") ||
 		value.includes("opus-4.7") ||
+		value.includes("opus-4-8") ||
+		value.includes("opus-4.8") ||
 		value.includes("sonnet-4-6") ||
 		value.includes("sonnet-4.6") ||
 		value.includes("sonnet-4-7") ||
-		value.includes("sonnet-4.7")
+		value.includes("sonnet-4.7") ||
+		value.includes("fable-5")
 	);
 }
 
@@ -676,7 +696,7 @@ function mapAnthropicEffort(level: Exclude<ThinkingLevel, "off">, model: Reasoni
 	const mapped = model?.thinkingLevelMap?.[level];
 	if (typeof mapped === "string") return mapped;
 
-	const modelId = (model?.id ?? "").toLowerCase();
+	const modelId = modelSearchText(model);
 	switch (level) {
 		case "minimal":
 		case "low":
@@ -687,7 +707,15 @@ function mapAnthropicEffort(level: Exclude<ThinkingLevel, "off">, model: Reasoni
 			return "high";
 		case "xhigh":
 			if (modelId.includes("opus-4-6") || modelId.includes("opus-4.6")) return "max";
-			if (modelId.includes("opus-4-7") || modelId.includes("opus-4.7")) return "xhigh";
+			if (
+				modelId.includes("opus-4-7") ||
+				modelId.includes("opus-4.7") ||
+				modelId.includes("opus-4-8") ||
+				modelId.includes("opus-4.8") ||
+				modelId.includes("fable-5")
+			) {
+				return "xhigh";
+			}
 			return "high";
 	}
 }
@@ -888,6 +916,11 @@ function formatValidLevels(): string {
 function contextIsIdle(ctx: ExtensionContext): boolean {
 	const isIdle = (ctx as unknown as { isIdle?: unknown }).isIdle;
 	return typeof isIdle === "function" ? Boolean(isIdle.call(ctx)) : true;
+}
+
+function contextIsTui(ctx: ExtensionContext): boolean {
+	const mode = (ctx as unknown as { mode?: unknown }).mode;
+	return mode === "tui" || (mode === undefined && ctx.hasUI);
 }
 
 function inputIsQueued(event: { streamingBehavior?: unknown }): event is { streamingBehavior: "steer" | "followUp" } {
@@ -1197,17 +1230,32 @@ export default function reasoningQueueExtension(pi: ExtensionAPI): void {
 		fieldFocus = "prompt";
 		updateStatus(ctx);
 
-		if (ctx.hasUI) {
+		if (contextIsTui(ctx)) {
 			unsubscribeTerminalInput?.();
 			unsubscribeTerminalInput = ctx.ui.onTerminalInput((data) => handleFieldInput(data, ctx));
 			ctx.ui.addAutocompleteProvider((current) => ({
+				triggerCharacters: ["/", ":", "["],
 				async getSuggestions(lines, line, col, options) {
 					const beforeCursor = (lines[line] ?? "").slice(0, col);
-					const match = beforeCursor.match(/(?:^|\s)\/(?:r|reason|reasoning|think|thinking)\s+(\S*)$/iu);
-					if (!match) return current.getSuggestions(lines, line, col, options);
-					const prefix = match[1] ?? "";
-					const items = THINKING_LEVELS.filter((level) => level.startsWith(prefix.toLowerCase())).map((level) => ({
-						value: level,
+					const slash = beforeCursor.match(/(?:^|\s)\/(?:r|reason|reasoning|think|thinking)\s+(\S*)$/iu);
+					const colon = beforeCursor.match(/(?:^|\s):([^\s:]*)$/iu);
+					const bracket = beforeCursor.match(/\[(?:r|reason|reasoning|think|thinking):\s*([^\]\s]*)$/iu);
+
+					let prefix: string | undefined;
+					let valuePrefix = "";
+					if (slash) {
+						prefix = slash[1] ?? "";
+					} else if (colon) {
+						prefix = `:${colon[1] ?? ""}`;
+						valuePrefix = ":";
+					} else if (bracket) {
+						prefix = bracket[1] ?? "";
+					}
+					if (prefix === undefined) return current.getSuggestions(lines, line, col, options);
+
+					const query = valuePrefix ? prefix.slice(valuePrefix.length).toLowerCase() : prefix.toLowerCase();
+					const items = THINKING_LEVELS.filter((level) => level.startsWith(query)).map((level) => ({
+						value: `${valuePrefix}${level}`,
 						label: level,
 						description: "message reasoning level",
 					}));

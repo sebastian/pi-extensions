@@ -89,6 +89,7 @@ pi --provider zai-coding-plan --model glm-5.1
 - The package declares boolean thinking metadata for its models, so pi's thinking-level selector skips unsupported intermediate and `xhigh` levels instead of showing controls that all collapse to the same Z.AI `enable_thinking` flag.
 - `zai-coding-plan/glm-5.1` also uses a conservative effective context window so pi compacts around ~100k prompt tokens by default instead of riding the model's larger advertised limit.
 - The quota status indicator uses `GET /api/monitor/usage/quota/limit` on `api.z.ai`, which is also what Z.AI's official usage-query plugin relies on.
+- The custom inline footer is installed only in pi's interactive TUI mode; RPC/JSON/print runs still get the provider registration without footer replacement.
 - Z.AI's coding-plan docs recommend the OpenAI-compatible coding endpoint for non-Claude coding tools; this package intentionally follows that route instead of the Anthropic-compatible Claude Code path.
 
 ## Sources

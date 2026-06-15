@@ -1,5 +1,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
+type WidgetSupportContext = Pick<ExtensionContext, "hasUI"> & Partial<Pick<ExtensionContext, "mode">>;
+
 function readCliModeArg(argv: readonly string[]): string | null {
 	let mode: string | null = null;
 	for (let index = 0; index < argv.length; index++) {
@@ -18,8 +20,10 @@ function isRpcModeProcess(argv: readonly string[] = process.argv): boolean {
 }
 
 export function supportsStructuredImplementationWidget(
-	ctx: Pick<ExtensionContext, "hasUI">,
+	ctx: WidgetSupportContext,
 	argv: readonly string[] = process.argv,
 ): boolean {
-	return ctx.hasUI && !isRpcModeProcess(argv);
+	if (!ctx.hasUI) return false;
+	if (ctx.mode) return ctx.mode === "tui";
+	return !isRpcModeProcess(argv);
 }

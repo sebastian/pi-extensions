@@ -51,6 +51,19 @@ test("buildSubagentArgs can keep normal extensions enabled and add explicit exte
 	assert.ok(args.includes("zai-coding-plan/glm-5.1"));
 });
 
+test("buildSubagentArgs can approve trusted project-local inputs for non-interactive subagents", () => {
+	const args = buildSubagentArgs({
+		cwd: "/repo",
+		systemPrompt: "System",
+		prompt: "Review this change",
+		loadExtensions: true,
+		approveProject: true,
+	});
+
+	assert.ok(args.includes("--approve"));
+	assert.ok(!args.includes("--no-extensions"));
+});
+
 test("runSubagent treats retrying agent_end events as non-final", async () => {
 	const root = await mkdtemp(join(tmpdir(), "toolbox-subagent-runner-retry-"));
 	const previousArgv1 = process.argv[1];

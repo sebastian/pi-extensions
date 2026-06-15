@@ -45,6 +45,16 @@ export function getReviewThinkingLevel(model: string, fallbackThinkingLevel?: st
 	return fallbackThinkingLevel || undefined;
 }
 
+function projectLocalInputsTrusted(ctx: ExtensionContext): boolean {
+	const isProjectTrusted = (ctx as unknown as { isProjectTrusted?: unknown }).isProjectTrusted;
+	if (typeof isProjectTrusted !== "function") return true;
+	try {
+		return Boolean(isProjectTrusted.call(ctx));
+	} catch {
+		return false;
+	}
+}
+
 const REVIEW_SYSTEM_PROMPT = `You are a high-signal code reviewer.
 
 Review the attached change carefully. Focus on:
@@ -1185,6 +1195,7 @@ async function runModelReview(options: {
 	model: string;
 	thinkingLevel?: string;
 	loadExtensions?: boolean;
+	approveProject?: boolean;
 	extensions?: string[];
 	onEvent?: (event: SubagentEvent) => void;
 	onUsage?: (usage: SubagentUsageTotals) => void;
@@ -1200,6 +1211,7 @@ async function runModelReview(options: {
 			model: options.model,
 			thinkingLevel: options.thinkingLevel,
 			loadExtensions: options.loadExtensions,
+			approveProject: options.approveProject,
 			extensions: options.extensions,
 			onEvent: options.onEvent,
 			onUsage: options.onUsage,
@@ -1287,8 +1299,11 @@ export default function registerReviewCommand(pi: ExtensionAPI): void {
 				if (ctx.hasUI) ctx.ui.notify(`Running review for ${target.label}`, "info");
 
 				const fallbackThinkingLevel = pi.getThinkingLevel() || undefined;
+				const trustedProjectLocalInputs = projectLocalInputsTrusted(ctx);
 				const reviewExtensions =
-					target.reviewCwd === target.repoRoot ? [] : await discoverProjectExtensionPaths(target.repoRoot);
+					target.reviewCwd === target.repoRoot || !trustedProjectLocalInputs
+						? []
+						: await discoverProjectExtensionPaths(target.repoRoot);
 				const runs = await Promise.all(
 					modelPlan.reviewers.map(async (model) => {
 						progressTracker?.markRunning(model);
@@ -1297,6 +1312,7 @@ export default function registerReviewCommand(pi: ExtensionAPI): void {
 							model,
 							thinkingLevel: getReviewThinkingLevel(model, fallbackThinkingLevel),
 							loadExtensions: true,
+							approveProject: trustedProjectLocalInputs,
 							extensions: reviewExtensions,
 							onEvent: (event) => progressTracker?.handleEvent(model, event),
 							onUsage: (usage) => progressTracker?.addUsage(model, usage),

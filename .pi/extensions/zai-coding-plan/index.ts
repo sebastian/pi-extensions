@@ -248,6 +248,10 @@ function normalizeThinkingLevel(value: unknown): string {
 	return typeof value === "string" && value.trim() ? value : "off";
 }
 
+function isTuiContext(ctx: Pick<ExtensionContext, "hasUI"> & Partial<Pick<ExtensionContext, "mode">>): boolean {
+	return ctx.mode === "tui" || (ctx.mode === undefined && ctx.hasUI);
+}
+
 function buildInlineFooter(
 	ctx: ExtensionContext,
 	footerData: ReadonlyFooterDataProvider,
@@ -352,7 +356,7 @@ function buildFooterFallbackLines(
 	return [truncateToWidth(theme.fg("dim", "z.ai footer unavailable"), width, ellipsis)];
 }
 
-function createUsageTracker(syncInlineFooter: (ctx: ExtensionContext) => void) {
+function createUsageTracker(syncInlineFooter: (ctx: ExtensionContext) => void, clearInlineFooter: (ctx: ExtensionContext) => void) {
 	const state: UsageTrackerState = {
 		active: false,
 		activeKey: null,
@@ -537,7 +541,7 @@ function createUsageTracker(syncInlineFooter: (ctx: ExtensionContext) => void) {
 		clearTimers();
 		resetUsageState(null);
 		clearStatus(ctx);
-		syncInlineFooter(ctx);
+		clearInlineFooter(ctx);
 	}
 
 	return {
@@ -679,8 +683,17 @@ export default function zaiCodingPlan(pi: ExtensionAPI): void {
 		return "jj";
 	}
 
+	function clearInlineFooter(ctx: ExtensionContext): void {
+		if (!ownsFooter) return;
+		if (ctx.hasUI) ctx.ui.setFooter(undefined);
+		ownsFooter = false;
+	}
+
 	function syncInlineFooter(ctx: ExtensionContext): void {
-		if (!ctx.hasUI) return;
+		if (!isTuiContext(ctx)) {
+			clearInlineFooter(ctx);
+			return;
+		}
 		if (ctx.model && isZaiUsageModel(ctx.model)) {
 			ctx.ui.setFooter((tui, theme, footerData) => {
 				let lastLines: string[] | null = null;
@@ -709,10 +722,7 @@ export default function zaiCodingPlan(pi: ExtensionAPI): void {
 			ownsFooter = true;
 			return;
 		}
-		if (ownsFooter) {
-			ctx.ui.setFooter(undefined);
-			ownsFooter = false;
-		}
+		clearInlineFooter(ctx);
 	}
 
 	pi.on("before_agent_start", async (event, ctx) => {
@@ -727,7 +737,7 @@ export default function zaiCodingPlan(pi: ExtensionAPI): void {
 		};
 	});
 
-	const usageTracker = createUsageTracker(syncInlineFooter);
+	const usageTracker = createUsageTracker(syncInlineFooter, clearInlineFooter);
 
 	pi.on("session_start", async (_event, ctx) => {
 		currentThinkingLevel = readPiThinkingLevel();

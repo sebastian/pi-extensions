@@ -14,6 +14,7 @@ export interface SubagentInvocation {
 	thinkingLevel?: string;
 	name?: string;
 	loadExtensions?: boolean;
+	approveProject?: boolean;
 	extensions?: string[];
 	signal?: AbortSignal;
 	onEvent?: (event: SubagentEvent) => void;
@@ -127,6 +128,7 @@ export function buildSubagentArgs(invocation: SubagentInvocation): string[] {
 	const sessionName = invocation.name?.trim();
 	if (sessionName) args.push("--name", sessionName);
 
+	if (invocation.approveProject) args.push("--approve");
 	if (!invocation.loadExtensions) args.push("--no-extensions");
 	for (const extension of uniqueStrings(invocation.extensions ?? [])) {
 		args.push("-e", resolve(extension));

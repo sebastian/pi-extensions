@@ -1,7 +1,11 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { VimEditor } from "./vim-editor.ts";
 
 const REAPPLY_EDITOR_DELAYS_MS = [0, 25, 100, 250] as const;
+
+function isTuiContext(ctx: Pick<ExtensionContext, "hasUI"> & Partial<Pick<ExtensionContext, "mode">>): boolean {
+	return ctx.mode === "tui" || (ctx.mode === undefined && ctx.hasUI);
+}
 
 export default function vimModeExtension(pi: ExtensionAPI): void {
 	let activationId = 0;
@@ -20,6 +24,7 @@ export default function vimModeExtension(pi: ExtensionAPI): void {
 		activationId += 1;
 		const sessionActivationId = activationId;
 		clearPendingTimers();
+		if (!isTuiContext(ctx)) return;
 
 		const applyEditor = (): void => {
 			if (sessionActivationId !== activationId) return;
