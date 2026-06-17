@@ -37,11 +37,27 @@ const ZAI_TOOL_STREAM_COMPAT = {
 	zaiToolStream: true,
 } as const;
 
+// ponytail: mirrors the built-in zai/glm-5.2 from pi 0.79.5+, which sends Z.AI's
+// reasoning_effort (high/max) instead of the legacy boolean thinking flag. Other
+// GLM coding models stay on boolean-only thinking until upstream advertises effort.
+const GLM_5_2_TOOL_STREAM_COMPAT = {
+	...ZAI_TOOL_STREAM_COMPAT,
+	supportsReasoningEffort: true,
+} as const;
+
 const ZAI_BOOLEAN_THINKING_LEVEL_MAP = {
 	minimal: null,
 	low: null,
 	medium: null,
 	xhigh: null,
+} as const;
+
+const GLM_5_2_THINKING_LEVEL_MAP = {
+	minimal: null,
+	low: "high",
+	medium: "high",
+	high: "high",
+	xhigh: "max",
 } as const;
 
 const GLM_5_REIN_IN_PROMPT = [
@@ -62,12 +78,12 @@ export const ZAI_CODING_PLAN_MODELS = [
 		id: "glm-5.2",
 		name: "GLM-5.2",
 		reasoning: true,
-		thinkingLevelMap: ZAI_BOOLEAN_THINKING_LEVEL_MAP,
+		thinkingLevelMap: GLM_5_2_THINKING_LEVEL_MAP,
 		input: ["text"],
 		cost: ZERO_COST,
 		contextWindow: GLM_5_EFFECTIVE_CONTEXT_WINDOW,
 		maxTokens: 131072,
-		compat: ZAI_TOOL_STREAM_COMPAT,
+		compat: GLM_5_2_TOOL_STREAM_COMPAT,
 	},
 	{
 		id: "glm-5.1",

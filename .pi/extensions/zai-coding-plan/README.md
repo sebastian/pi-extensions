@@ -87,7 +87,7 @@ pi --provider zai-coding-plan --model glm-5.1
 
 - On newer pi versions, core may already ship built-in `zai/*` models aimed at the same coding endpoint. This package is still useful as an explicit, backportable `zai-coding-plan/*` namespace.
 - `zai-coding-plan/glm-5.1` and `zai-coding-plan/glm-5.2` get an extra per-turn system-prompt append that nudges the model to be more concise, direct, and less sycophantic.
-- The package declares boolean thinking metadata for its models, so pi's thinking-level selector skips unsupported intermediate and `xhigh` levels instead of showing controls that all collapse to the same Z.AI `enable_thinking` flag.
+- The package declares boolean thinking metadata for most of its models, so pi's thinking-level selector skips unsupported intermediate and `xhigh` levels instead of showing controls that all collapse to the same Z.AI `enable_thinking` flag. `zai-coding-plan/glm-5.2` is the exception: it mirrors the pi 0.79.5+ built-in `zai/glm-5.2` and exposes `low`/`medium`/`high`/`xhigh`, mapping to Z.AI's `reasoning_effort` `high`/`max`.
 - `zai-coding-plan/glm-5.1` and `glm-5.2` also use a conservative effective context window so pi compacts around ~100k prompt tokens by default instead of riding the model's larger advertised limit.
 - The quota status indicator uses `GET /api/monitor/usage/quota/limit` on `api.z.ai`, which is also what Z.AI's official usage-query plugin relies on.
 - The quota indicator is installed only in pi's interactive UI; RPC/JSON/print runs still get the provider registration without status polling.

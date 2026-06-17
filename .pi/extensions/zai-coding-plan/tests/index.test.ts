@@ -70,12 +70,12 @@ test("registerZaiCodingPlan registers the coding-plan provider with cloned model
 	assert.notEqual((config.models as typeof ZAI_CODING_PLAN_MODELS)[0].compat, ZAI_CODING_PLAN_MODELS[0].compat);
 });
 
-test("glm-5.2 mirrors glm-5.1: conservative context window, boolean thinking, tool streaming", () => {
+test("glm-5.2 mirrors pi 0.79.5+ built-in zai/glm-5.2: reasoning_effort high/max, conservative context window, tool streaming", () => {
 	const model = ZAI_CODING_PLAN_MODELS.find((entry) => entry.id === "glm-5.2");
 	assert.ok(model);
 	assert.equal(model.contextWindow, 116_384);
-	assert.deepEqual(model.thinkingLevelMap, { minimal: null, low: null, medium: null, xhigh: null });
-	assert.deepEqual(model.compat, { supportsDeveloperRole: false, thinkingFormat: "zai", zaiToolStream: true });
+	assert.deepEqual(model.thinkingLevelMap, { minimal: null, low: "high", medium: "high", high: "high", xhigh: "max" });
+	assert.deepEqual(model.compat, { supportsDeveloperRole: false, thinkingFormat: "zai", supportsReasoningEffort: true, zaiToolStream: true });
 });
 
 test("glm-5.1 uses a conservative context window and Z.AI tool streaming compat", () => {
