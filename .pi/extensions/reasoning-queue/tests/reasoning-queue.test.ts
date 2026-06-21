@@ -270,6 +270,28 @@ test("rewrites Together reasoning payloads from thinkingFormat metadata", () => 
 	assert.equal(disabled.reasoning_effort, undefined);
 });
 
+test("leaves pi 0.79.9+ chat-template kwargs intact instead of clobbering them", () => {
+	// pi-ai builds chat_template_kwargs for thinkingFormat:"chat-template" from compat.chatTemplateKwargs
+	// + the active thinking level. reasoning-queue must not overwrite that with the qwen shape.
+	const model = {
+		...reasoningModel,
+		api: "openai-completions",
+		provider: "vllm",
+		id: "deepseek-v4",
+		thinkingLevelMap: { off: null, low: "low", medium: "medium", high: "high", xhigh: "max" },
+		compat: { thinkingFormat: "chat-template", chatTemplateKwargs: { thinking: { $var: "thinking.enabled" }, effort: "high" } },
+	} as ReasoningModel;
+	const original = { model: model.id, messages: [], chat_template_kwargs: { thinking: true, effort: "high" } } as Record<string, unknown>;
+	const payload = rewriteProviderPayload(original, "high", model) as { chat_template_kwargs: { thinking: boolean; effort: string } };
+	assert.deepEqual(payload.chat_template_kwargs, { thinking: true, effort: "high" });
+});
+
+test("still rewrites explicit qwen-chat-template kwargs", () => {
+	const model = { ...reasoningModel, api: "openai-completions", provider: "qwen", id: "qwen3", compat: { thinkingFormat: "qwen-chat-template" } } as ReasoningModel;
+	const payload = rewriteProviderPayload({ model: model.id, messages: [] }, "high", model) as { chat_template_kwargs: { enable_thinking: boolean; preserve_thinking: boolean } };
+	assert.deepEqual(payload.chat_template_kwargs, { enable_thinking: true, preserve_thinking: true });
+});
+
 test("prefers model-level thinkingLevelMap over compat.reasoningEffortMap", () => {
 	const model = { ...reasoningModel, api: "openai-completions", provider: "deepseek", id: "deepseek-v4-pro", thinkingLevelMap: { minimal: null, low: null, medium: null, high: "default", xhigh: "max" }, compat: { thinkingFormat: "deepseek", reasoningEffortMap: { high: "high", xhigh: "max" } } } as ReasoningModel;
 	const payload = rewriteProviderPayload({ model: model.id, messages: [], thinking: { type: "disabled" } }, "xhigh", model) as { thinking: { type: string }; reasoning_effort: string };

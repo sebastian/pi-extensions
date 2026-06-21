@@ -281,7 +281,10 @@ function applyOpenAICompletionsPayload(payload: JsonRecord, level: ThinkingLevel
 	const thinkingFormat = typeof model?.compat?.thinkingFormat === "string" ? model.compat.thinkingFormat : undefined;
 
 	if ("enable_thinking" in payload || thinkingFormat === "zai" || thinkingFormat === "qwen") payload.enable_thinking = enabled;
-	if (isRecord(payload.chat_template_kwargs) || thinkingFormat === "qwen-chat-template") {
+	// qwen-chat-template owns its own enable_thinking kwarg; pi 0.79.9+ chat-template models
+	// drive chat_template_kwargs entirely from compat.chatTemplateKwargs + the active thinking
+	// level, so leave them untouched rather than overwriting with the qwen shape.
+	if ((isRecord(payload.chat_template_kwargs) && thinkingFormat !== "chat-template") || thinkingFormat === "qwen-chat-template") {
 		payload.chat_template_kwargs = { ...(isRecord(payload.chat_template_kwargs) ? payload.chat_template_kwargs : {}), enable_thinking: enabled, preserve_thinking: true };
 	}
 	if (isRecord(payload.thinking) || thinkingFormat === "deepseek") {
