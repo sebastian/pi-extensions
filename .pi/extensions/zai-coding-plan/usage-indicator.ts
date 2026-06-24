@@ -68,6 +68,7 @@ const USED_VALUE_KEYS = [
 ];
 const LIMIT_VALUE_KEYS = ["usage", "usagelimit", "limit", "quota", "total", "totalvalue", "max", "capacity", "allowed"];
 const RESET_AT_KEYS = ["resetat", "resettime", "refreshtime", "nextreset", "nextrefreshtime", "expiretime", "expirytime"];
+const ZAI_API_KEY_ENV = "ZAI_API_KEY";
 
 export function isZaiUsageModel(
 	model: Pick<Model<any>, "provider" | "baseUrl"> | undefined,
@@ -115,6 +116,21 @@ export function extractZaiAuthToken(resolvedAuth: {
 		}
 	}
 	return null;
+}
+
+export function resolveZaiAuthToken(
+	model: Pick<Model<any>, "provider">,
+	resolvedAuth: {
+		apiKey?: string;
+		headers?: Record<string, string>;
+		env?: Record<string, string | undefined>;
+	},
+	env: Record<string, string | undefined> = process.env,
+): string | null {
+	const configuredToken = extractZaiAuthToken(resolvedAuth);
+	if (configuredToken) return configuredToken;
+	const envToken = model.provider === "zai" ? resolvedAuth.env?.[ZAI_API_KEY_ENV] || env[ZAI_API_KEY_ENV] : undefined;
+	return typeof envToken === "string" && envToken.trim() ? envToken.trim() : null;
 }
 
 export function parseZaiQuotaSnapshot(payload: unknown, fetchedAt = Date.now()): ZaiQuotaSnapshot {

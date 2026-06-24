@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
 	buildZaiUsageIndicatorLines,
-	extractZaiAuthToken,
+	resolveZaiAuthToken,
 	getZaiUsageKey,
 	getZaiUsageOrigin,
 	isZaiUsageModel,
@@ -201,7 +201,7 @@ function createUsageTracker() {
 			try {
 				const resolvedAuth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model!);
 				if (!resolvedAuth.ok) throw new Error(resolvedAuth.error || "auth not configured");
-				const authToken = extractZaiAuthToken(resolvedAuth);
+				const authToken = resolveZaiAuthToken(ctx.model!, resolvedAuth);
 				if (!authToken) throw new Error("auth token unavailable");
 
 				const response = await fetch(`${origin}${ZAI_USAGE_MONITOR_PATH}`, {

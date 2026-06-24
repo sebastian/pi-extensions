@@ -4,6 +4,7 @@ import {
 	buildZaiUsageIndicatorLines,
 	isZaiUsageModel,
 	parseZaiQuotaSnapshot,
+	resolveZaiAuthToken,
 } from "../usage-indicator.ts";
 
 const plainTheme = {
@@ -20,6 +21,13 @@ test("isZaiUsageModel matches z.ai providers and hosts only", () => {
 	assert.equal(isZaiUsageModel({ provider: "zai", baseUrl: "https://api.z.ai/api/coding/paas/v4" }), true);
 	assert.equal(isZaiUsageModel({ provider: "custom", baseUrl: "https://api.z.ai/api/anthropic" }), true);
 	assert.equal(isZaiUsageModel({ provider: "openai", baseUrl: "https://api.openai.com/v1" }), false);
+});
+
+test("resolveZaiAuthToken falls back to the built-in z.ai env key", () => {
+	assert.equal(resolveZaiAuthToken({ provider: "zai" }, {}, { ZAI_API_KEY: " env-token " }), "env-token");
+	assert.equal(resolveZaiAuthToken({ provider: "zai" }, { env: { ZAI_API_KEY: "" } }, { ZAI_API_KEY: "env-token" }), "env-token");
+	assert.equal(resolveZaiAuthToken({ provider: "openai" }, {}, { ZAI_API_KEY: "env-token", OPENAI_API_KEY: "wrong" }), null);
+	assert.equal(resolveZaiAuthToken({ provider: "zai" }, { apiKey: "configured-token" }, { ZAI_API_KEY: "env-token" }), "configured-token");
 });
 
 test("parseZaiQuotaSnapshot extracts 5-hour and 7-day limits and ignores monthly MCP entries", () => {
