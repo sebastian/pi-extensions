@@ -9,7 +9,7 @@ I maintain this repo for my own workflows and experiments.
 - Feel free to use, copy, adapt, and learn from anything here.
 - I am **not** looking for external contributions, feature requests, or maintenance help on this repo.
 - If something here is useful to you, great — please treat it as a freely available personal toolbox.
-- The packages track pi's current runtime floor, currently target pi `0.79.x`, and declare Node.js `>=22.19.0`.
+- The packages track pi's current runtime floor, currently target pi `0.80.x`, and declare Node.js `>=22.19.0`.
 
 ## Current contents
 

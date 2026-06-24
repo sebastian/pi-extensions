@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { access, readdir } from "node:fs/promises";
 import { type Dirent, existsSync } from "node:fs";
 import { basename, resolve } from "node:path";
-import type { Message, TextContent } from "@earendil-works/pi-ai";
+import type { Message, TextContent } from "@earendil-works/pi-ai/compat";
 
 export interface SubagentInvocation {
 	cwd: string;

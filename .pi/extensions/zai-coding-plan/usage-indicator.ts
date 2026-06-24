@@ -1,4 +1,4 @@
-import type { Model } from "@earendil-works/pi-ai";
+import type { Model } from "@earendil-works/pi-ai/compat";
 
 export interface ZaiQuotaWindow {
 	kind: "5h" | "7d" | "unknown";
