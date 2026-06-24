@@ -74,7 +74,7 @@ export function isZaiUsageModel(
 ): boolean {
 	if (!model) return false;
 	const provider = `${model.provider || ""}`.toLowerCase();
-	if (provider === "zai" || provider === "zai-coding-plan") return true;
+	if (provider === "zai") return true;
 	try {
 		return new URL(model.baseUrl).hostname.toLowerCase().endsWith("z.ai");
 	} catch {

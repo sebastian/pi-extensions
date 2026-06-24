@@ -1,13 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import zaiCodingPlan, {
+	applyConservativeZaiContextWindow,
+	GLM_5_EFFECTIVE_CONTEXT_WINDOW,
 	hasUsageError,
-	registerZaiCodingPlan,
-	ZAI_CODING_PLAN_API_KEY_CONFIG,
-	ZAI_CODING_PLAN_API_KEY_ENV,
 	ZAI_CODING_PLAN_BASE_URL,
-	ZAI_CODING_PLAN_MODELS,
-	ZAI_CODING_PLAN_PROVIDER_ID,
+	ZAI_PROVIDER_ID,
 } from "../index.ts";
 
 function createPiStub() {
@@ -33,7 +31,7 @@ function createPiStub() {
 function createUsageCtx(overrides: Record<string, unknown> = {}) {
 	return {
 		hasUI: true,
-		model: { provider: ZAI_CODING_PLAN_PROVIDER_ID, id: "glm-5.1", baseUrl: ZAI_CODING_PLAN_BASE_URL, reasoning: true },
+		model: { provider: ZAI_PROVIDER_ID, id: "glm-5.1", baseUrl: ZAI_CODING_PLAN_BASE_URL, reasoning: true, contextWindow: 200_000 },
 		ui: {
 			theme: { fg: (_color: string, text: string) => text, bold: (text: string) => text },
 			setStatus(_key: string, _text: string | undefined) {},
@@ -47,80 +45,65 @@ function createUsageCtx(overrides: Record<string, unknown> = {}) {
 	};
 }
 
-test("registerZaiCodingPlan registers the coding-plan provider with cloned models", () => {
-	const providerRegistrations: Array<{ id: string; config: Record<string, unknown> }> = [];
-
-	registerZaiCodingPlan({
-		registerProvider(id, config) {
-			providerRegistrations.push({ id, config: config as Record<string, unknown> });
-		},
-	} as never);
-
-	assert.equal(providerRegistrations.length, 1);
-	const [{ id, config }] = providerRegistrations;
-	assert.equal(id, ZAI_CODING_PLAN_PROVIDER_ID);
-	assert.equal(config.name, "Z.AI Coding Plan");
-	assert.equal(config.baseUrl, ZAI_CODING_PLAN_BASE_URL);
-	assert.equal(config.apiKey, `$${ZAI_CODING_PLAN_API_KEY_ENV}`);
-	assert.equal(config.apiKey, ZAI_CODING_PLAN_API_KEY_CONFIG);
-	assert.equal(config.api, "openai-completions");
-	assert.deepEqual(config.models, ZAI_CODING_PLAN_MODELS);
-	assert.notEqual(config.models, ZAI_CODING_PLAN_MODELS);
-	assert.notEqual((config.models as typeof ZAI_CODING_PLAN_MODELS)[0].thinkingLevelMap, ZAI_CODING_PLAN_MODELS[0].thinkingLevelMap);
-	assert.notEqual((config.models as typeof ZAI_CODING_PLAN_MODELS)[0].compat, ZAI_CODING_PLAN_MODELS[0].compat);
+test("uses the built-in zai provider instead of registering a custom provider", () => {
+	const { pi, providerRegistrations } = createPiStub();
+	zaiCodingPlan(pi as never);
+	assert.deepEqual(providerRegistrations, []);
 });
 
-test("glm-5.2 mirrors pi 0.79.5+ built-in zai/glm-5.2: reasoning_effort high/max, conservative context window, tool streaming", () => {
-	const model = ZAI_CODING_PLAN_MODELS.find((entry) => entry.id === "glm-5.2");
-	assert.ok(model);
-	assert.equal(model.contextWindow, 116_384);
-	assert.deepEqual(model.thinkingLevelMap, { minimal: null, low: "high", medium: "high", high: "high", xhigh: "max" });
-	assert.deepEqual(model.compat, { supportsDeveloperRole: false, thinkingFormat: "zai", supportsReasoningEffort: true, zaiToolStream: true });
+test("clamps only built-in zai/glm-5.1 and zai/glm-5.2 context windows", () => {
+	const glm52 = { provider: ZAI_PROVIDER_ID, id: "glm-5.2", contextWindow: 1_000_000 };
+	assert.equal(applyConservativeZaiContextWindow(glm52), true);
+	assert.equal(glm52.contextWindow, GLM_5_EFFECTIVE_CONTEXT_WINDOW);
+
+	const glm51 = { provider: ZAI_PROVIDER_ID, id: "glm-5.1", contextWindow: 200_000 };
+	assert.equal(applyConservativeZaiContextWindow(glm51), true);
+	assert.equal(glm51.contextWindow, GLM_5_EFFECTIVE_CONTEXT_WINDOW);
+
+	const alreadySmaller = { provider: ZAI_PROVIDER_ID, id: "glm-5.2", contextWindow: 80_000 };
+	assert.equal(applyConservativeZaiContextWindow(alreadySmaller), false);
+	assert.equal(alreadySmaller.contextWindow, 80_000);
+
+	const otherZai = { provider: ZAI_PROVIDER_ID, id: "glm-5-turbo", contextWindow: 200_000 };
+	assert.equal(applyConservativeZaiContextWindow(otherZai), false);
+	assert.equal(otherZai.contextWindow, 200_000);
+
+	const legacyCustomProvider = { provider: "zai-coding-plan", id: "glm-5.2", contextWindow: 1_000_000 };
+	assert.equal(applyConservativeZaiContextWindow(legacyCustomProvider), false);
+	assert.equal(legacyCustomProvider.contextWindow, 1_000_000);
 });
 
-test("glm-5.1 uses a conservative context window and Z.AI tool streaming compat", () => {
-	const model = ZAI_CODING_PLAN_MODELS.find((entry) => entry.id === "glm-5.1");
-	assert.ok(model);
-	assert.equal(model.contextWindow, 116_384);
-	assert.deepEqual(model.thinkingLevelMap, { minimal: null, low: null, medium: null, xhigh: null });
-	assert.deepEqual(model.compat, { supportsDeveloperRole: false, thinkingFormat: "zai", zaiToolStream: true });
-});
-
-test("glm-4.5-air keeps the older non-tool-streaming compat shape", () => {
-	const model = ZAI_CODING_PLAN_MODELS.find((entry) => entry.id === "glm-4.5-air");
-	assert.ok(model);
-	assert.deepEqual(model.compat, { supportsDeveloperRole: false, thinkingFormat: "zai" });
-});
-
-test("GLM-5.1 gets extra instructions to stay concise and less eager to please", async () => {
+test("built-in zai/glm-5.1 gets concise and less-sycophantic prompt nudging plus conservative window", async () => {
 	const { pi, getHandlers } = createPiStub();
 	zaiCodingPlan(pi as never);
 
-	const [handler] = getHandlers<(event: { systemPrompt: string }, ctx: { model?: { provider?: string; id?: string } }) => Promise<{ systemPrompt: string } | undefined>>("before_agent_start");
-	const result = await handler({ systemPrompt: "Base instructions" }, { model: { provider: ZAI_CODING_PLAN_PROVIDER_ID, id: "glm-5.1" } });
+	const model = { provider: ZAI_PROVIDER_ID, id: "glm-5.1", contextWindow: 200_000 };
+	const [handler] = getHandlers<(event: { systemPrompt: string }, ctx: { model?: typeof model }) => Promise<{ systemPrompt: string } | undefined>>("before_agent_start");
+	const result = await handler({ systemPrompt: "Base instructions" }, { model });
 
 	assert.ok(result);
+	assert.equal(model.contextWindow, GLM_5_EFFECTIVE_CONTEXT_WINDOW);
 	assert.ok(result.systemPrompt.startsWith("Base instructions\n\n- Be concise, direct, and matter-of-fact."));
 	assert.match(result.systemPrompt, /Do not be flattering, sycophantic, or overly eager to please\./);
 });
 
-test("non-GLM-5.1 turns are left unchanged", async () => {
+test("built-in zai/glm-5.2 gets the same prompt nudge as 5.1", async () => {
 	const { pi, getHandlers } = createPiStub();
 	zaiCodingPlan(pi as never);
 
-	const [handler] = getHandlers<(event: { systemPrompt: string }, ctx: { model?: { provider?: string; id?: string } }) => Promise<{ systemPrompt: string } | undefined>>("before_agent_start");
-	assert.equal(await handler({ systemPrompt: "Base instructions" }, { model: { provider: ZAI_CODING_PLAN_PROVIDER_ID, id: "glm-5-turbo" } }), undefined);
-	assert.equal(await handler({ systemPrompt: "Base instructions" }, { model: { provider: "other-provider", id: "glm-5.1" } }), undefined);
-});
-
-test("GLM-5.2 gets the same concise/in-less-sycophantic nudge as 5.1", async () => {
-	const { pi, getHandlers } = createPiStub();
-	zaiCodingPlan(pi as never);
-
-	const [handler] = getHandlers<(event: { systemPrompt: string }, ctx: { model?: { provider?: string; id?: string } }) => Promise<{ systemPrompt: string } | undefined>>("before_agent_start");
-	const result = await handler({ systemPrompt: "Base instructions" }, { model: { provider: ZAI_CODING_PLAN_PROVIDER_ID, id: "glm-5.2" } });
+	const [handler] = getHandlers<(event: { systemPrompt: string }, ctx: { model?: { provider?: string; id?: string; contextWindow?: number } }) => Promise<{ systemPrompt: string } | undefined>>("before_agent_start");
+	const result = await handler({ systemPrompt: "Base instructions" }, { model: { provider: ZAI_PROVIDER_ID, id: "glm-5.2", contextWindow: 1_000_000 } });
 	assert.ok(result);
 	assert.ok(result.systemPrompt.includes("Do not be flattering, sycophantic, or overly eager to please."));
+});
+
+test("non-tuned models are left unchanged", async () => {
+	const { pi, getHandlers } = createPiStub();
+	zaiCodingPlan(pi as never);
+
+	const [handler] = getHandlers<(event: { systemPrompt: string }, ctx: { model?: { provider?: string; id?: string; contextWindow?: number } }) => Promise<{ systemPrompt: string } | undefined>>("before_agent_start");
+	assert.equal(await handler({ systemPrompt: "Base instructions" }, { model: { provider: ZAI_PROVIDER_ID, id: "glm-5-turbo", contextWindow: 200_000 } }), undefined);
+	assert.equal(await handler({ systemPrompt: "Base instructions" }, { model: { provider: "other-provider", id: "glm-5.1", contextWindow: 200_000 } }), undefined);
 });
 
 test("hasUsageError accepts successful live quota payloads that use code 200", () => {
@@ -128,12 +111,14 @@ test("hasUsageError accepts successful live quota payloads that use code 200", (
 	assert.equal(hasUsageError({ code: 1001, msg: "Authentication parameter not received", success: false }), true);
 });
 
-test("usage tracker uses status only and clears it on shutdown", async () => {
+test("usage tracker uses status only, clamps official GLM context, and clears it on shutdown", async () => {
 	const { pi, getHandlers } = createPiStub();
 	zaiCodingPlan(pi as never);
 
 	const statuses: Array<{ key: string; text: string | undefined }> = [];
+	const model = { provider: ZAI_PROVIDER_ID, id: "glm-5.2", baseUrl: ZAI_CODING_PLAN_BASE_URL, reasoning: true, contextWindow: 1_000_000 };
 	const ctx = createUsageCtx({
+		model,
 		ui: {
 			theme: { fg: (_color: string, text: string) => text, bold: (text: string) => text },
 			setStatus(key: string, text: string | undefined) {
@@ -149,6 +134,7 @@ test("usage tracker uses status only and clears it on shutdown", async () => {
 	});
 
 	await getHandlers<(event: unknown, ctx: any) => Promise<void>>("session_start")[0]({}, ctx);
+	assert.equal(model.contextWindow, GLM_5_EFFECTIVE_CONTEXT_WINDOW);
 	assert.deepEqual(statuses[0], { key: "zai-usage-indicator", text: "◌ z.ai quota…" });
 
 	await getHandlers<(event: unknown, ctx: any) => Promise<void>>("session_shutdown")[0]({}, ctx);

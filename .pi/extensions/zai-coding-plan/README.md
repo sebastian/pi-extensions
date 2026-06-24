@@ -1,47 +1,25 @@
-# Z.AI Coding Plan Provider for pi
+# Z.AI Built-in Provider Enhancer for pi
 
-Adds an explicit `zai-coding-plan/*` provider namespace to pi so Z.AI GLM Coding Plan traffic goes to the official coding endpoint:
+Enhances pi's built-in `zai/*` provider instead of registering a custom provider.
+
+Use pi's official model IDs, for example:
+
+- `zai/glm-5.2`
+- `zai/glm-5.1`
+
+## What this package still does
+
+- Shows a compact live Z.AI quota indicator in the interactive status line.
+- Adds a small per-turn system-prompt nudge for `zai/glm-5.1` and `zai/glm-5.2` to be concise, direct, and less sycophantic.
+- Clamps the active `zai/glm-5.1` and `zai/glm-5.2` `contextWindow` to `116384`, so pi compacts around ~100k prompt tokens instead of riding the much larger advertised window.
+
+## What this package no longer does
+
+It does **not** register a separate `zai-coding-plan/*` provider or custom model list. Pi's built-in `zai` provider already uses the official coding-plan endpoint:
 
 - `https://api.z.ai/api/coding/paas/v4`
 
-That is the endpoint Z.AI documents for supported coding tools using the OpenAI-compatible protocol, and it is what makes requests count against the **GLM Coding Plan quota** instead of separate general API billing.
-
-## Why this package exists
-
-Z.AI documents two main integration patterns for coding agents:
-
-- **Claude Code** uses Z.AI's Anthropic-compatible endpoint:
-  - `https://api.z.ai/api/anthropic`
-- **Other tools** that speak the OpenAI-compatible API should use the dedicated coding endpoint:
-  - `https://api.z.ai/api/coding/paas/v4`
-
-OpenCode also exposes a separate **Z.AI Coding Plan** provider alongside the regular Z.AI provider, which makes the coding-plan path explicit for users.
-
-This pi package follows that same idea and registers a dedicated provider:
-
-- provider id: `zai-coding-plan`
-- login/model display name: `Z.AI Coding Plan`
-- auth env var: `ZAI_API_KEY` (registered as the explicit pi config reference `$ZAI_API_KEY`)
-- API type: `openai-completions`
-
-The package also applies the Z.AI-specific OpenAI compatibility flags pi needs for:
-
-- top-level boolean thinking control (`thinkingFormat: "zai"` plus model-level `thinkingLevelMap` that exposes `off`/`high` only)
-- no `developer` role
-- tool-call streaming on the newer coding-plan models
-
-It also adds a compact live quota indicator to pi's status line while a relevant Z.AI model is active in the interactive TUI. The indicator auto-refreshes over time and after completed turns, and it uses the same monitor endpoint family that Z.AI's official `glm-plan-usage` Claude plugin uses.
-
-## Included models
-
-- `zai-coding-plan/glm-5.2`
-- `zai-coding-plan/glm-5.1`
-- `zai-coding-plan/glm-5-turbo`
-- `zai-coding-plan/glm-5`
-- `zai-coding-plan/glm-4.7`
-- `zai-coding-plan/glm-4.5-air`
-
-These match the GLM Coding Plan model families documented by Z.AI for coding-tool usage.
+That built-in provider now carries the current Z.AI compatibility metadata, including GLM-5.2 `reasoning_effort` / `xhigh` support. This extension only adds the local workflow tweaks above.
 
 ## Install
 
@@ -65,7 +43,7 @@ pi -e /absolute/path/to/.pi/extensions/zai-coding-plan
 
 ## Configure auth
 
-Set your Z.AI API key in the environment before starting pi. Current pi versions require provider configs to use explicit `$ENV_VAR` references, and this extension registers `$ZAI_API_KEY` for you:
+Use pi's normal built-in `zai` provider auth. For environment auth:
 
 ```bash
 export ZAI_API_KEY=your_zai_api_key
@@ -73,25 +51,22 @@ export ZAI_API_KEY=your_zai_api_key
 
 ## Use it
 
-Start pi, open `/model`, and pick one of the `zai-coding-plan/*` models.
-
-When a Z.AI-backed model is active, the extension shows a small live usage status with your current 5-hour and 7-day quota headroom whenever the monitor endpoint exposes those windows.
+Start pi, open `/model`, and pick a built-in `zai/*` model.
 
 CLI example:
 
 ```bash
-pi --provider zai-coding-plan --model glm-5.1
+pi --provider zai --model glm-5.2
 ```
+
+When a Z.AI-backed model is active, the extension shows a small live usage status with your current 5-hour and 7-day quota headroom whenever the monitor endpoint exposes those windows.
 
 ## Notes
 
-- On newer pi versions, core may already ship built-in `zai/*` models aimed at the same coding endpoint. This package is still useful as an explicit, backportable `zai-coding-plan/*` namespace.
-- `zai-coding-plan/glm-5.1` and `zai-coding-plan/glm-5.2` get an extra per-turn system-prompt append that nudges the model to be more concise, direct, and less sycophantic.
-- The package declares boolean thinking metadata for most of its models, so pi's thinking-level selector skips unsupported intermediate and `xhigh` levels instead of showing controls that all collapse to the same Z.AI `enable_thinking` flag. `zai-coding-plan/glm-5.2` is the exception: it mirrors the pi 0.79.5+ built-in `zai/glm-5.2` and exposes `low`/`medium`/`high`/`xhigh`, mapping to Z.AI's `reasoning_effort` `high`/`max`.
-- `zai-coding-plan/glm-5.1` and `glm-5.2` also use a conservative effective context window so pi compacts around ~100k prompt tokens by default instead of riding the model's larger advertised limit.
 - The quota status indicator uses `GET /api/monitor/usage/quota/limit` on `api.z.ai`, which is also what Z.AI's official usage-query plugin relies on.
-- The quota indicator is installed only in pi's interactive UI; RPC/JSON/print runs still get the provider registration without status polling.
-- Z.AI's coding-plan docs recommend the OpenAI-compatible coding endpoint for non-Claude coding tools; this package intentionally follows that route instead of the Anthropic-compatible Claude Code path.
+- The quota indicator is installed only in pi's interactive UI; RPC/JSON/print runs still get the prompt/context-window tweaks without status polling.
+- The context-window clamp mutates only the active built-in `zai/glm-5.1` or `zai/glm-5.2` model object. It does not replace the provider or its model list.
+- If pi later exposes extension-level `modelOverrides`, replace that small active-model mutation with a public override.
 
 ## Sources
 
@@ -100,4 +75,3 @@ pi --provider zai-coding-plan --model glm-5.1
 - Z.AI "Other Tools" guide: `https://docs.z.ai/devpack/tool/others`
 - Z.AI OpenCode guide: `https://docs.z.ai/devpack/tool/opencode`
 - Z.AI GLM-5.1 guide: `https://docs.z.ai/guides/llm/glm-5.1`
-- OpenCode providers docs: `https://opencode.ai/docs/providers/`

@@ -8,10 +8,9 @@ import {
 	parseZaiQuotaSnapshot,
 } from "./usage-indicator.ts";
 
-export const ZAI_CODING_PLAN_PROVIDER_ID = "zai-coding-plan";
+export const ZAI_PROVIDER_ID = "zai";
 export const ZAI_CODING_PLAN_BASE_URL = "https://api.z.ai/api/coding/paas/v4";
-export const ZAI_CODING_PLAN_API_KEY_ENV = "ZAI_API_KEY";
-export const ZAI_CODING_PLAN_API_KEY_CONFIG = `$${ZAI_CODING_PLAN_API_KEY_ENV}`;
+const ZAI_TUNED_MODEL_IDS = new Set(["glm-5.1", "glm-5.2"]);
 
 const ZAI_USAGE_STATUS_KEY = "zai-usage-indicator";
 const ZAI_USAGE_MONITOR_PATH = "/api/monitor/usage/quota/limit";
@@ -19,46 +18,6 @@ const ZAI_USAGE_REFRESH_INTERVAL_MS = 90_000;
 const ZAI_USAGE_MIN_FETCH_INTERVAL_MS = 20_000;
 const ZAI_USAGE_POST_TURN_REFRESH_DELAY_MS = 2_000;
 const ZAI_USAGE_REQUEST_TIMEOUT_MS = 10_000;
-
-const ZERO_COST = {
-	input: 0,
-	output: 0,
-	cacheRead: 0,
-	cacheWrite: 0,
-} as const;
-
-const ZAI_COMPAT = {
-	supportsDeveloperRole: false,
-	thinkingFormat: "zai",
-} as const;
-
-const ZAI_TOOL_STREAM_COMPAT = {
-	...ZAI_COMPAT,
-	zaiToolStream: true,
-} as const;
-
-// ponytail: mirrors the built-in zai/glm-5.2 from pi 0.79.5+, which sends Z.AI's
-// reasoning_effort (high/max) instead of the legacy boolean thinking flag. Other
-// GLM coding models stay on boolean-only thinking until upstream advertises effort.
-const GLM_5_2_TOOL_STREAM_COMPAT = {
-	...ZAI_TOOL_STREAM_COMPAT,
-	supportsReasoningEffort: true,
-} as const;
-
-const ZAI_BOOLEAN_THINKING_LEVEL_MAP = {
-	minimal: null,
-	low: null,
-	medium: null,
-	xhigh: null,
-} as const;
-
-const GLM_5_2_THINKING_LEVEL_MAP = {
-	minimal: null,
-	low: "high",
-	medium: "high",
-	high: "high",
-	xhigh: "max",
-} as const;
 
 const GLM_5_REIN_IN_PROMPT = [
 	"- Be concise, direct, and matter-of-fact.",
@@ -68,79 +27,10 @@ const GLM_5_REIN_IN_PROMPT = [
 	"- State uncertainty briefly when needed, then continue with the best grounded answer.",
 ].join("\n");
 
-// ponytail: one conservative window shared across the GLM-5.x coding models. Compacts
-// around ~100k prompt tokens instead of riding each model's advertised limit. Tune per
-// model if a specific GLM-5.x release proves it can hold a larger window reliably.
-const GLM_5_EFFECTIVE_CONTEXT_WINDOW = 116_384;
-
-export const ZAI_CODING_PLAN_MODELS = [
-	{
-		id: "glm-5.2",
-		name: "GLM-5.2",
-		reasoning: true,
-		thinkingLevelMap: GLM_5_2_THINKING_LEVEL_MAP,
-		input: ["text"],
-		cost: ZERO_COST,
-		contextWindow: GLM_5_EFFECTIVE_CONTEXT_WINDOW,
-		maxTokens: 131072,
-		compat: GLM_5_2_TOOL_STREAM_COMPAT,
-	},
-	{
-		id: "glm-5.1",
-		name: "GLM-5.1",
-		reasoning: true,
-		thinkingLevelMap: ZAI_BOOLEAN_THINKING_LEVEL_MAP,
-		input: ["text"],
-		cost: ZERO_COST,
-		contextWindow: GLM_5_EFFECTIVE_CONTEXT_WINDOW,
-		maxTokens: 131072,
-		compat: ZAI_TOOL_STREAM_COMPAT,
-	},
-	{
-		id: "glm-5-turbo",
-		name: "GLM-5-Turbo",
-		reasoning: true,
-		thinkingLevelMap: ZAI_BOOLEAN_THINKING_LEVEL_MAP,
-		input: ["text"],
-		cost: ZERO_COST,
-		contextWindow: 200000,
-		maxTokens: 131072,
-		compat: ZAI_TOOL_STREAM_COMPAT,
-	},
-	{
-		id: "glm-5",
-		name: "GLM-5",
-		reasoning: true,
-		thinkingLevelMap: ZAI_BOOLEAN_THINKING_LEVEL_MAP,
-		input: ["text"],
-		cost: ZERO_COST,
-		contextWindow: 204800,
-		maxTokens: 131072,
-		compat: ZAI_TOOL_STREAM_COMPAT,
-	},
-	{
-		id: "glm-4.7",
-		name: "GLM-4.7",
-		reasoning: true,
-		thinkingLevelMap: ZAI_BOOLEAN_THINKING_LEVEL_MAP,
-		input: ["text"],
-		cost: ZERO_COST,
-		contextWindow: 204800,
-		maxTokens: 131072,
-		compat: ZAI_TOOL_STREAM_COMPAT,
-	},
-	{
-		id: "glm-4.5-air",
-		name: "GLM-4.5-Air",
-		reasoning: true,
-		thinkingLevelMap: ZAI_BOOLEAN_THINKING_LEVEL_MAP,
-		input: ["text"],
-		cost: ZERO_COST,
-		contextWindow: 131072,
-		maxTokens: 98304,
-		compat: ZAI_COMPAT,
-	},
-] as const;
+// ponytail: mutate only the active built-in zai model metadata. registerProvider(models)
+// would replace the whole official provider; use models.json modelOverrides if pi later
+// exposes a public extension API for this.
+export const GLM_5_EFFECTIVE_CONTEXT_WINDOW = 116_384;
 
 interface UsageTrackerState {
 	active: boolean;
@@ -156,24 +46,18 @@ interface UsageTrackerState {
 	lastStatusSignature: string | null;
 }
 
-function cloneModels() {
-	return ZAI_CODING_PLAN_MODELS.map((model) => ({
-		...model,
-		thinkingLevelMap: { ...model.thinkingLevelMap },
-		input: [...model.input],
-		cost: { ...model.cost },
-		compat: { ...model.compat },
-	}));
+type MutableModel = { provider?: string; id?: string; contextWindow?: number };
+
+function isTunedBuiltInZaiModel(model: MutableModel | undefined): boolean {
+	return model?.provider === ZAI_PROVIDER_ID && typeof model.id === "string" && ZAI_TUNED_MODEL_IDS.has(model.id);
 }
 
-export function registerZaiCodingPlan(pi: Pick<ExtensionAPI, "registerProvider">): void {
-	pi.registerProvider(ZAI_CODING_PLAN_PROVIDER_ID, {
-		name: "Z.AI Coding Plan",
-		baseUrl: ZAI_CODING_PLAN_BASE_URL,
-		apiKey: ZAI_CODING_PLAN_API_KEY_CONFIG,
-		api: "openai-completions",
-		models: cloneModels(),
-	});
+export function applyConservativeZaiContextWindow(model: MutableModel | undefined): boolean {
+	if (!isTunedBuiltInZaiModel(model)) return false;
+	const nextWindow = Math.min(model.contextWindow ?? GLM_5_EFFECTIVE_CONTEXT_WINDOW, GLM_5_EFFECTIVE_CONTEXT_WINDOW);
+	if (model.contextWindow === nextWindow) return false;
+	model.contextWindow = nextWindow;
+	return true;
 }
 
 async function parseJsonResponse(response: Response): Promise<unknown> {
@@ -389,17 +273,20 @@ function createUsageTracker() {
 }
 
 export default function zaiCodingPlan(pi: ExtensionAPI): void {
-	registerZaiCodingPlan(pi);
-
 	pi.on("before_agent_start", async (event, ctx) => {
-		if (ctx.model?.provider !== ZAI_CODING_PLAN_PROVIDER_ID || (ctx.model.id !== "glm-5.1" && ctx.model.id !== "glm-5.2")) return undefined;
+		applyConservativeZaiContextWindow(ctx.model);
+		if (!isTunedBuiltInZaiModel(ctx.model)) return undefined;
 		return { systemPrompt: event.systemPrompt ? `${event.systemPrompt}\n\n${GLM_5_REIN_IN_PROMPT}` : GLM_5_REIN_IN_PROMPT };
 	});
 
 	const usageTracker = createUsageTracker();
 
-	pi.on("session_start", async (_event, ctx) => usageTracker.start(ctx));
+	pi.on("session_start", async (_event, ctx) => {
+		applyConservativeZaiContextWindow(ctx.model);
+		usageTracker.start(ctx);
+	});
 	pi.on("model_select", async (_event, ctx) => {
+		applyConservativeZaiContextWindow(ctx.model);
 		usageTracker.syncStatus(ctx);
 		void usageTracker.refresh(ctx, { force: true });
 	});

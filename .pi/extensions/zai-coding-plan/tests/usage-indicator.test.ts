@@ -17,7 +17,7 @@ const plainTheme = {
 
 test("isZaiUsageModel matches z.ai providers and hosts only", () => {
 	assert.equal(isZaiUsageModel(undefined), false);
-	assert.equal(isZaiUsageModel({ provider: "zai-coding-plan", baseUrl: "https://api.z.ai/api/coding/paas/v4" }), true);
+	assert.equal(isZaiUsageModel({ provider: "zai", baseUrl: "https://api.z.ai/api/coding/paas/v4" }), true);
 	assert.equal(isZaiUsageModel({ provider: "custom", baseUrl: "https://api.z.ai/api/anthropic" }), true);
 	assert.equal(isZaiUsageModel({ provider: "openai", baseUrl: "https://api.openai.com/v1" }), false);
 });
