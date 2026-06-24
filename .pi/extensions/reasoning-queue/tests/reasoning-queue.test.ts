@@ -103,6 +103,15 @@ test("clamps reasoning levels to the closest level supported by the model", () =
 	const mappedModel = { ...reasoningModel, thinkingLevelMap: { off: null, minimal: "low", low: null, medium: null, xhigh: "max" } } as ReasoningModel;
 	assert.deepEqual(getSupportedReasoningLevels(mappedModel), ["minimal", "high", "xhigh"]);
 	assert.equal(clampReasoningLevel("off", mappedModel), "minimal");
+
+	// GLM-5.2 maps low/medium/high all to "high" and xhigh to "max"; only the equivalent
+	// match (high) plus the distinct top tier (xhigh=max) are advertised, the collapsing
+	// low/medium are dropped.
+	const glm52Model = { ...reasoningModel, api: "openai-completions", id: "glm-5.2", name: "GLM-5.2", provider: "zai", thinkingLevelMap: { minimal: null, low: "high", medium: "high", high: "high", xhigh: "max" }, compat: { thinkingFormat: "zai", supportsReasoningEffort: true } } as ReasoningModel;
+	assert.deepEqual(getSupportedReasoningLevels(glm52Model), ["off", "high", "xhigh"]);
+	assert.equal(clampReasoningLevel("low", glm52Model), "high");
+	assert.equal(clampReasoningLevel("medium", glm52Model), "high");
+	assert.equal(clampReasoningLevel("xhigh", glm52Model), "xhigh");
 });
 
 test("model selection applies the closest supported reasoning level", async () => {

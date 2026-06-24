@@ -166,12 +166,35 @@ function getExplicitSupportedLevels(model: ReasoningModel | undefined): Thinking
 function getThinkingLevelMapSupportedLevels(model: ReasoningModel | undefined): ThinkingLevel[] | undefined {
 	const map = model?.thinkingLevelMap;
 	if (!isRecord(map)) return undefined;
-	return THINKING_LEVELS.filter((level) => {
+
+	// Levels the map offers: anything not explicitly null, with xhigh additionally
+	// requiring an explicit mapping.
+	const offered = THINKING_LEVELS.filter((level) => {
 		const mapped = map[level];
 		if (mapped === null) return false;
 		if (level === "xhigh") return mapped !== undefined;
 		return true;
 	});
+
+	// ponytail: when several offered levels map to the SAME explicit provider value, the
+	// provider cannot distinguish them (GLM-5.2 maps low/medium/high all to "high"), so
+	// advertising all of them is misleading. Keep only the highest-ranked level per
+	// explicit value. Levels with no explicit mapping (undefined) stay distinct — the
+	// map leaves those to provider defaults such as token-budget thinking.
+	const claimed = new Set<string>();
+	const kept: ThinkingLevel[] = [];
+	for (let i = offered.length - 1; i >= 0; i--) {
+		const level = offered[i];
+		const mapped = map[level];
+		if (typeof mapped !== "string") {
+			kept.push(level);
+			continue;
+		}
+		if (claimed.has(mapped)) continue;
+		claimed.add(mapped);
+		kept.push(level);
+	}
+	return kept.reverse();
 }
 
 function isBooleanThinkingFormat(model: ReasoningModel | undefined): boolean {
