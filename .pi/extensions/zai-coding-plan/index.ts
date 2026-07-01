@@ -27,9 +27,8 @@ const GLM_5_REIN_IN_PROMPT = [
 	"- State uncertainty briefly when needed, then continue with the best grounded answer.",
 ].join("\n");
 
-// ponytail: mutate only the active built-in zai model metadata. registerProvider(models)
-// would replace the whole official provider; use models.json modelOverrides if pi later
-// exposes a public extension API for this.
+// ponytail: no extension-level modelOverrides API yet; clamp official registry entries
+// in place instead of replacing the built-in provider. Replace with modelOverrides when public.
 export const GLM_5_EFFECTIVE_CONTEXT_WINDOW = 116_384;
 
 interface UsageTrackerState {
@@ -47,17 +46,33 @@ interface UsageTrackerState {
 }
 
 type MutableModel = { provider?: string; id?: string; contextWindow?: number };
+type ZaiModelRegistryLike = { find?: (provider: string, modelId: string) => MutableModel | undefined };
+type ZaiContextLike = { model?: MutableModel; modelRegistry?: ZaiModelRegistryLike };
 
 function isTunedBuiltInZaiModel(model: MutableModel | undefined): boolean {
 	return model?.provider === ZAI_PROVIDER_ID && typeof model.id === "string" && ZAI_TUNED_MODEL_IDS.has(model.id);
 }
 
-export function applyConservativeZaiContextWindow(model: MutableModel | undefined): boolean {
+function clampConservativeZaiContextWindow(model: MutableModel | undefined): boolean {
 	if (!isTunedBuiltInZaiModel(model)) return false;
 	const nextWindow = Math.min(model.contextWindow ?? GLM_5_EFFECTIVE_CONTEXT_WINDOW, GLM_5_EFFECTIVE_CONTEXT_WINDOW);
 	if (model.contextWindow === nextWindow) return false;
 	model.contextWindow = nextWindow;
 	return true;
+}
+
+export function applyConservativeZaiContextWindows(ctx: ZaiContextLike): number {
+	const models = new Set<MutableModel>();
+	for (const id of ZAI_TUNED_MODEL_IDS) {
+		const model = ctx.modelRegistry?.find?.(ZAI_PROVIDER_ID, id);
+		if (model) models.add(model);
+	}
+	if (ctx.model) models.add(ctx.model);
+	let changed = 0;
+	for (const model of models) {
+		if (clampConservativeZaiContextWindow(model)) changed++;
+	}
+	return changed;
 }
 
 async function parseJsonResponse(response: Response): Promise<unknown> {
@@ -274,7 +289,7 @@ function createUsageTracker() {
 
 export default function zaiCodingPlan(pi: ExtensionAPI): void {
 	pi.on("before_agent_start", async (event, ctx) => {
-		applyConservativeZaiContextWindow(ctx.model);
+		applyConservativeZaiContextWindows(ctx);
 		if (!isTunedBuiltInZaiModel(ctx.model)) return undefined;
 		return { systemPrompt: event.systemPrompt ? `${event.systemPrompt}\n\n${GLM_5_REIN_IN_PROMPT}` : GLM_5_REIN_IN_PROMPT };
 	});
@@ -282,11 +297,11 @@ export default function zaiCodingPlan(pi: ExtensionAPI): void {
 	const usageTracker = createUsageTracker();
 
 	pi.on("session_start", async (_event, ctx) => {
-		applyConservativeZaiContextWindow(ctx.model);
+		applyConservativeZaiContextWindows(ctx);
 		usageTracker.start(ctx);
 	});
 	pi.on("model_select", async (_event, ctx) => {
-		applyConservativeZaiContextWindow(ctx.model);
+		applyConservativeZaiContextWindows(ctx);
 		usageTracker.syncStatus(ctx);
 		void usageTracker.refresh(ctx, { force: true });
 	});

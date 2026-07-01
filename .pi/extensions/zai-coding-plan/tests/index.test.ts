@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import zaiCodingPlan, {
-	applyConservativeZaiContextWindow,
+	applyConservativeZaiContextWindows,
 	GLM_5_EFFECTIVE_CONTEXT_WINDOW,
 	hasUsageError,
 	ZAI_CODING_PLAN_BASE_URL,
@@ -51,25 +51,25 @@ test("uses the built-in zai provider instead of registering a custom provider", 
 	assert.deepEqual(providerRegistrations, []);
 });
 
-test("clamps only built-in zai/glm-5.1 and zai/glm-5.2 context windows", () => {
+test("clamps built-in zai/glm-5.1 and zai/glm-5.2 registry entries", () => {
 	const glm52 = { provider: ZAI_PROVIDER_ID, id: "glm-5.2", contextWindow: 1_000_000 };
-	assert.equal(applyConservativeZaiContextWindow(glm52), true);
-	assert.equal(glm52.contextWindow, GLM_5_EFFECTIVE_CONTEXT_WINDOW);
-
 	const glm51 = { provider: ZAI_PROVIDER_ID, id: "glm-5.1", contextWindow: 200_000 };
-	assert.equal(applyConservativeZaiContextWindow(glm51), true);
-	assert.equal(glm51.contextWindow, GLM_5_EFFECTIVE_CONTEXT_WINDOW);
+	const otherZai = { provider: ZAI_PROVIDER_ID, id: "glm-5-turbo", contextWindow: 200_000 };
+	const models = new Map([glm52, glm51, otherZai].map((model) => [model.id, model]));
 
+	assert.equal(applyConservativeZaiContextWindows({ modelRegistry: { find: (_provider, id) => models.get(id) } }), 2);
+	assert.equal(glm52.contextWindow, GLM_5_EFFECTIVE_CONTEXT_WINDOW);
+	assert.equal(glm51.contextWindow, GLM_5_EFFECTIVE_CONTEXT_WINDOW);
+	assert.equal(otherZai.contextWindow, 200_000);
+});
+
+test("clamps active model fallback only for tuned built-in zai models", () => {
 	const alreadySmaller = { provider: ZAI_PROVIDER_ID, id: "glm-5.2", contextWindow: 80_000 };
-	assert.equal(applyConservativeZaiContextWindow(alreadySmaller), false);
+	assert.equal(applyConservativeZaiContextWindows({ model: alreadySmaller }), 0);
 	assert.equal(alreadySmaller.contextWindow, 80_000);
 
-	const otherZai = { provider: ZAI_PROVIDER_ID, id: "glm-5-turbo", contextWindow: 200_000 };
-	assert.equal(applyConservativeZaiContextWindow(otherZai), false);
-	assert.equal(otherZai.contextWindow, 200_000);
-
 	const legacyCustomProvider = { provider: "zai-coding-plan", id: "glm-5.2", contextWindow: 1_000_000 };
-	assert.equal(applyConservativeZaiContextWindow(legacyCustomProvider), false);
+	assert.equal(applyConservativeZaiContextWindows({ model: legacyCustomProvider }), 0);
 	assert.equal(legacyCustomProvider.contextWindow, 1_000_000);
 });
 
