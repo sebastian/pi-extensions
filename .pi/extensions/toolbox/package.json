@@ -1,6 +1,6 @@
 {
   "name": "toolbox-pi-package",
-  "version": "0.4.6",
+  "version": "0.4.7",
   "description": "Small pi toolbox package with provider rate-limit handling and the /review command.",
   "type": "module",
   "keywords": [

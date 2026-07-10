@@ -38,8 +38,7 @@ const REVIEW_THINKING_LEVELS = new Map([
 	["openai/gpt-5.6-sol", "xhigh"],
 	["openai-codex/gpt-5.5", "xhigh"],
 	["openai/gpt-5.5", "xhigh"],
-	// GLM-5.2 maps xhigh upward to max; high avoids the expensive max tier.
-	["zai/glm-5.2", "high"],
+	["zai/glm-5.2", "max"],
 ]);
 
 function normalizeModelRef(ref: string): string {
