@@ -45,10 +45,12 @@ function createUsageCtx(overrides: Record<string, unknown> = {}) {
 	};
 }
 
-test("uses the built-in zai provider instead of registering a custom provider", () => {
-	const { pi, providerRegistrations } = createPiStub();
+test("uses the built-in zai provider and refreshes quota only after the agent settles", () => {
+	const { pi, providerRegistrations, getHandlers } = createPiStub();
 	zaiCodingPlan(pi as never);
 	assert.deepEqual(providerRegistrations, []);
+	assert.equal(getHandlers("agent_settled").length, 1);
+	assert.equal(getHandlers("agent_end").length, 0);
 });
 
 test("clamps built-in zai/glm-5.1 and zai/glm-5.2 registry entries", () => {

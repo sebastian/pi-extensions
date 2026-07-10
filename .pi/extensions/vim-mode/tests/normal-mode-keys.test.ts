@@ -1,6 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { normalizeParsedNormalModeKey } from "../normal-mode-keys.ts";
+import { getNormalModeInputAction, normalizeParsedNormalModeKey } from "../normal-mode-keys.ts";
+
+test("normal mode submits the configured submit key and ignores configured newline keys", () => {
+	const bindings = new Map([
+		["enter", "tui.input.submit"],
+		["ctrl+j", "tui.input.newLine"],
+	]);
+	const matches = (data: string, action: string) => bindings.get(data) === action;
+	assert.equal(getNormalModeInputAction("enter", matches), "submit");
+	assert.equal(getNormalModeInputAction("ctrl+j", matches), "ignore");
+	assert.equal(getNormalModeInputAction("x", matches), undefined);
+});
 
 test("normalizeParsedNormalModeKey preserves plain keys", () => {
 	assert.equal(normalizeParsedNormalModeKey("w"), "w");

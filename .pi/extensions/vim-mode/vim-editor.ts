@@ -1,6 +1,6 @@
 import { CustomEditor, type AppKeybinding, type KeybindingsManager } from "@earendil-works/pi-coding-agent";
 import { decodeKittyPrintable, Key, matchesKey, parseKey, truncateToWidth, type EditorTheme, type TUI, visibleWidth } from "@earendil-works/pi-tui";
-import { normalizeParsedNormalModeKey } from "./normal-mode-keys.ts";
+import { getNormalModeInputAction, normalizeParsedNormalModeKey } from "./normal-mode-keys.ts";
 import type { BufferState, Cursor, VimBuffer } from "./vim-controller.ts";
 import { VimController } from "./vim-controller.ts";
 
@@ -181,9 +181,12 @@ export class VimEditor extends CustomEditor {
 			rerender();
 			return;
 		}
-		if (matchesKey(data, Key.enter) || matchesKey(data, Key.return) || matchesKey(data, Key.shift("enter"))) {
+		const inputAction = getNormalModeInputAction(data, (input, action) => this.appKeybindings.matches(input, action));
+		if (inputAction === "submit") {
+			super.handleInput(data);
 			return;
 		}
+		if (inputAction === "ignore") return;
 
 		if (this.appKeybindings.matches(data, "app.exit") && this.getText().length === 0) {
 			super.handleInput(data);

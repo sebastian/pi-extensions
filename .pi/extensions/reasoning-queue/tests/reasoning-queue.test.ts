@@ -85,6 +85,7 @@ test("registers without invoking runtime action methods during extension loading
 test("parses slash, colon, and bracket reasoning directives", () => {
 	assert.deepEqual(parseReasoningDirective("/think high fix the tests"), { kind: "directive", level: "high", rest: "fix the tests", syntax: "slash" });
 	assert.deepEqual(parseReasoningDirective(":xh plan carefully"), { kind: "directive", level: "xhigh", rest: "plan carefully", syntax: "colon" });
+	assert.deepEqual(parseReasoningDirective(":max inspect everything"), { kind: "directive", level: "max", rest: "inspect everything", syntax: "colon" });
 	assert.deepEqual(parseReasoningDirective("[r:low] do the cheap thing"), { kind: "directive", level: "low", rest: "do the cheap thing", syntax: "bracket" });
 });
 
@@ -100,18 +101,19 @@ test("clamps reasoning levels to the closest level supported by the model", () =
 	assert.equal(clampReasoningLevel("medium", glmReasoningModel), "high");
 	assert.equal(clampReasoningLevel("off", glmReasoningModel), "off");
 
-	const mappedModel = { ...reasoningModel, thinkingLevelMap: { off: null, minimal: "low", low: null, medium: null, xhigh: "max" } } as ReasoningModel;
-	assert.deepEqual(getSupportedReasoningLevels(mappedModel), ["minimal", "high", "xhigh"]);
+	const mappedModel = { ...reasoningModel, thinkingLevelMap: { off: null, minimal: "low", low: null, medium: null, xhigh: "xhigh", max: "max" } } as ReasoningModel;
+	assert.deepEqual(getSupportedReasoningLevels(mappedModel), ["minimal", "high", "xhigh", "max"]);
 	assert.equal(clampReasoningLevel("off", mappedModel), "minimal");
 
-	// GLM-5.2 maps low/medium/high all to "high" and xhigh to "max"; only the equivalent
-	// match (high) plus the distinct top tier (xhigh=max) are advertised, the collapsing
-	// low/medium are dropped.
-	const glm52Model = { ...reasoningModel, api: "openai-completions", id: "glm-5.2", name: "GLM-5.2", provider: "zai", thinkingLevelMap: { minimal: null, low: "high", medium: "high", high: "high", xhigh: "max" }, compat: { thinkingFormat: "zai", supportsReasoningEffort: true } } as ReasoningModel;
-	assert.deepEqual(getSupportedReasoningLevels(glm52Model), ["off", "high", "xhigh"]);
+	// GLM-5.2 maps low/medium/high all to "high" and max to "max"; only the equivalent
+	// match (high) plus the distinct max tier are advertised, while collapsing low/medium
+	// and unsupported xhigh are dropped.
+	const glm52Model = { ...reasoningModel, api: "openai-completions", id: "glm-5.2", name: "GLM-5.2", provider: "zai", thinkingLevelMap: { minimal: null, low: "high", medium: "high", high: "high", max: "max" }, compat: { thinkingFormat: "zai", supportsReasoningEffort: true } } as ReasoningModel;
+	assert.deepEqual(getSupportedReasoningLevels(glm52Model), ["off", "high", "max"]);
 	assert.equal(clampReasoningLevel("low", glm52Model), "high");
 	assert.equal(clampReasoningLevel("medium", glm52Model), "high");
-	assert.equal(clampReasoningLevel("xhigh", glm52Model), "xhigh");
+	assert.equal(clampReasoningLevel("xhigh", glm52Model), "max");
+	assert.equal(clampReasoningLevel("max", glm52Model), "max");
 });
 
 test("model selection applies the closest supported reasoning level", async () => {
@@ -200,11 +202,12 @@ test("provider payload rewriting follows the request payload model when context 
 	assert.equal("enable_thinking" in rewritten, false);
 });
 
-test("rewrites OpenAI Responses reasoning without mutating original payload", () => {
-	const payload = { model: "gpt-5.4-codex", input: [], reasoning: { effort: "low", summary: "auto" } };
-	const rewritten = rewriteProviderPayload(payload, "xhigh", reasoningModel) as { reasoning: { effort: string }; include: string[] };
+test("rewrites OpenAI Responses max reasoning without mutating original payload", () => {
+	const model = { ...reasoningModel, id: "gpt-5.6-sol", name: "GPT-5.6 Sol", thinkingLevelMap: { xhigh: "xhigh", max: "max", minimal: "low" } } as ReasoningModel;
+	const payload = { model: "gpt-5.6-sol", input: [], reasoning: { effort: "low", summary: "auto" } };
+	const rewritten = rewriteProviderPayload(payload, "max", model) as { reasoning: { effort: string }; include: string[] };
 	assert.equal(payload.reasoning.effort, "low");
-	assert.equal(rewritten.reasoning.effort, "xhigh");
+	assert.equal(rewritten.reasoning.effort, "max");
 	assert.deepEqual(rewritten.include, ["reasoning.encrypted_content"]);
 });
 

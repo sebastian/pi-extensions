@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai/compat";
 
-export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
 
 export type ReasoningModel = Pick<Model<any>, "api" | "id" | "name" | "provider" | "reasoning" | "maxTokens" | "compat" | "baseUrl"> & {
@@ -41,7 +41,7 @@ const LEVEL_ALIASES: Record<string, ThinkingLevel> = {
 	xh: "xhigh",
 	xhi: "xhigh",
 	xhigh: "xhigh",
-	max: "xhigh",
+	max: "max",
 };
 
 const SLASH_DIRECTIVE_PATTERN = /^\/(?:r|reason|reasoning|think|thinking)(?:\s+(\S+))?(?:\s+([\s\S]*))?$/iu;
@@ -54,6 +54,7 @@ const DEFAULT_ANTHROPIC_BUDGETS: Record<Exclude<ThinkingLevel, "off">, number> =
 	medium: 8192,
 	high: 16384,
 	xhigh: 16384,
+	max: 16384,
 };
 
 const DEFAULT_GENERIC_BUDGETS: Record<Exclude<ThinkingLevel, "off">, number> = {
@@ -62,6 +63,7 @@ const DEFAULT_GENERIC_BUDGETS: Record<Exclude<ThinkingLevel, "off">, number> = {
 	medium: 10240,
 	high: 32768,
 	xhigh: 32768,
+	max: 32768,
 };
 
 export function normalizeThinkingLevel(value: string | undefined): ThinkingLevel | undefined {
@@ -167,12 +169,11 @@ function getThinkingLevelMapSupportedLevels(model: ReasoningModel | undefined): 
 	const map = model?.thinkingLevelMap;
 	if (!isRecord(map)) return undefined;
 
-	// Levels the map offers: anything not explicitly null, with xhigh additionally
-	// requiring an explicit mapping.
+	// Standard levels default to supported; extended xhigh/max require explicit mappings.
 	const offered = THINKING_LEVELS.filter((level) => {
 		const mapped = map[level];
 		if (mapped === null) return false;
-		if (level === "xhigh") return mapped !== undefined;
+		if (level === "xhigh" || level === "max") return mapped !== undefined;
 		return true;
 	});
 
@@ -218,8 +219,8 @@ export function getSupportedReasoningLevels(model: ReasoningModel | undefined): 
 
 	if (isBooleanThinkingFormat(model) || (model?.api ?? "").includes("mistral")) return ["off", "high"];
 	if (getCodexModelFamily(model) === "gpt-5.1-codex-mini") return ["off", "medium", "high"];
-	if (modelSupportsXhigh(model)) return [...THINKING_LEVELS];
-	return THINKING_LEVELS.filter((level) => level !== "xhigh");
+	if (modelSupportsXhigh(model)) return THINKING_LEVELS.filter((level) => level !== "max");
+	return THINKING_LEVELS.filter((level) => level !== "xhigh" && level !== "max");
 }
 
 export function clampReasoningLevel(level: ThinkingLevel, model: ReasoningModel | undefined): ThinkingLevel {
@@ -376,6 +377,8 @@ function mapAnthropicEffort(level: Exclude<ThinkingLevel, "off">, model: Reasoni
 			if (modelId.includes("opus-4-6") || modelId.includes("opus-4.6")) return "max";
 			if (modelId.includes("opus-4-7") || modelId.includes("opus-4.7") || modelId.includes("opus-4-8") || modelId.includes("opus-4.8") || modelId.includes("fable-5")) return "xhigh";
 			return "high";
+		case "max":
+			return "max";
 	}
 }
 
@@ -437,15 +440,16 @@ function getGoogleThinkingLevel(level: Exclude<ThinkingLevel, "off">, model: Rea
 			return "MEDIUM";
 		case "high":
 		case "xhigh":
+		case "max":
 			return "HIGH";
 	}
 }
 
 function getGoogleBudget(model: ReasoningModel | undefined, level: Exclude<ThinkingLevel, "off">): number {
 	const id = model?.id ?? "";
-	if (id.includes("2.5-pro")) return { minimal: 128, low: 2048, medium: 8192, high: 32768, xhigh: 32768 }[level];
-	if (id.includes("2.5-flash-lite")) return { minimal: 512, low: 2048, medium: 8192, high: 24576, xhigh: 24576 }[level];
-	if (id.includes("2.5-flash")) return { minimal: 128, low: 2048, medium: 8192, high: 24576, xhigh: 24576 }[level];
+	if (id.includes("2.5-pro")) return { minimal: 128, low: 2048, medium: 8192, high: 32768, xhigh: 32768, max: 32768 }[level];
+	if (id.includes("2.5-flash-lite")) return { minimal: 512, low: 2048, medium: 8192, high: 24576, xhigh: 24576, max: 24576 }[level];
+	if (id.includes("2.5-flash")) return { minimal: 128, low: 2048, medium: 8192, high: 24576, xhigh: 24576, max: 24576 }[level];
 	return DEFAULT_GENERIC_BUDGETS[level] ?? -1;
 }
 

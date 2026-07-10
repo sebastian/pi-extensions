@@ -25,4 +25,5 @@ A more capable vim-style modal editor for pi.
 - The custom editor installs only in pi's interactive TUI mode; RPC/JSON/print runs leave the editor surface untouched.
 - `Esc` leaves insert mode. In normal mode, `Esc` still aborts pi when no vim sub-command is pending.
 - Arrow keys still work for basic navigation in normal mode.
+- The configured submit key (`Enter` by default) submits from normal mode regardless of cursor position; configured newline keys remain insert-mode-only.
 - This is intentionally not a full Vim clone yet, but it covers a much larger and more useful navigation/editing surface.

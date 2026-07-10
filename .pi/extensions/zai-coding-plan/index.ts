@@ -305,7 +305,7 @@ export default function zaiCodingPlan(pi: ExtensionAPI): void {
 		usageTracker.syncStatus(ctx);
 		void usageTracker.refresh(ctx, { force: true });
 	});
-	pi.on("agent_end", async (_event, ctx) => {
+	pi.on("agent_settled", async (_event, ctx) => {
 		if (ctx.model && isZaiUsageModel(ctx.model)) usageTracker.scheduleRefresh(ctx, ZAI_USAGE_POST_TURN_REFRESH_DELAY_MS, true);
 	});
 	pi.on("session_shutdown", async (_event, ctx) => usageTracker.stop(ctx));

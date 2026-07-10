@@ -8,12 +8,12 @@ Prefix a message with a level directive:
 
 ```text
 :low fix the typo after the current tool call
-:xhigh design the migration plan
+:max design the migration plan
 /think medium implement the next step
 [r:off] summarize what changed
 ```
 
-Supported levels: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`.
+Supported levels: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`.
 
 A standalone directive changes the default inherited level for later messages:
 
@@ -30,7 +30,7 @@ The extension follows pi's model-level `thinkingLevelMap` metadata, so GLM/Z.AI-
 ## Notes
 
 - Directives are stripped before the message is sent to the model.
-- If the selected model cannot use a requested level, the extension applies the closest supported level instead. For example, boolean on/off thinking models such as GLM/Z.AI clamp any non-`off` request, including `xhigh`, to `high`.
+- If the selected model cannot use a requested level, the extension applies the closest supported level instead. Extended `xhigh` and `max` levels are offered only when model metadata maps them explicitly.
 - The rewriter leaves pi 0.79.9+ `chat-template` models untouched: pi-ai already resolves their `chat_template_kwargs` from the active thinking level, so this extension does not overwrite those kwargs with the qwen-style shape.
 - The extension uses pi's `InputEvent.streamingBehavior` metadata to distinguish idle prompts from mid-stream steering and follow-up messages, so queued directives do not change the active in-flight provider request.
 - The extension tracks queued messages in order and rewrites provider requests so steering messages inside an active agent run can still use their queued reasoning level.

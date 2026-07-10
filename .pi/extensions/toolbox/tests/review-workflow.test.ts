@@ -26,7 +26,7 @@ test("deduplicateReviewFindings merges overlapping findings from different revie
 			],
 		},
 		{
-			model: "zai-coding-plan/glm-5.1",
+			model: "zai/glm-5.2",
 			findings: [
 				{
 					id: "b",
@@ -43,7 +43,7 @@ test("deduplicateReviewFindings merges overlapping findings from different revie
 
 	assert.equal(findings.length, 1);
 	assert.equal(findings[0].severity, "high");
-	assert.deepEqual(findings[0].reporters.map((reporter) => reporter.model), ["openai-codex/gpt-5.3-codex", "zai-coding-plan/glm-5.1"]);
+	assert.deepEqual(findings[0].reporters.map((reporter) => reporter.model), ["openai-codex/gpt-5.3-codex", "zai/glm-5.2"]);
 });
 
 test("deduplicateReviewFindings keeps distinct categories separate", () => {
@@ -53,7 +53,7 @@ test("deduplicateReviewFindings keeps distinct categories separate", () => {
 			findings: [{ id: "a", category: "security", severity: "high", summary: "Shell injection", details: "Input reaches bash.", suggestedFix: "Avoid shell.", paths: ["src/run.ts"] }],
 		},
 		{
-			model: "zai-coding-plan/glm-5.1",
+			model: "zai/glm-5.2",
 			findings: [{ id: "b", category: "regression", severity: "medium", summary: "Retry loses error", details: "Throws generic timeout.", suggestedFix: "Preserve reason.", paths: ["src/run.ts"] }],
 		},
 	]);
@@ -76,11 +76,13 @@ test("review finding prompts include the full finding list and details", () => {
 	assert.match(buildFindingDecisionPrompt(0, findings[0]!), /Address this finding\?/);
 });
 
-test("getReviewThinkingLevel forces gpt-5.4 reviewers to xhigh", () => {
-	assert.equal(getReviewThinkingLevel("openai-codex/gpt-5.4", "high"), "xhigh");
-	assert.equal(getReviewThinkingLevel("OPENAI-CODEX/GPT-5.4", "low"), "xhigh");
-	assert.equal(getReviewThinkingLevel("zai-coding-plan/glm-5.1", "high"), "high");
-	assert.equal(getReviewThinkingLevel("zai-coding-plan/glm-5.1"), undefined);
+test("getReviewThinkingLevel uses each preferred review model's strongest native level", () => {
+	assert.equal(getReviewThinkingLevel("openai-codex/gpt-5.6-sol", "high"), "max");
+	assert.equal(getReviewThinkingLevel("openai/gpt-5.6-sol", "high"), "max");
+	assert.equal(getReviewThinkingLevel("OPENAI-CODEX/GPT-5.5", "low"), "xhigh");
+	assert.equal(getReviewThinkingLevel("zai/glm-5.2", "high"), "max");
+	assert.equal(getReviewThinkingLevel("openai-codex/gpt-5.4", "high"), "high");
+	assert.equal(getReviewThinkingLevel("zai/glm-5.1"), undefined);
 });
 
 test("parseReviewRequest splits explicit scope and focus text", () => {

@@ -36,7 +36,7 @@ test("buildSubagentArgs can keep normal extensions enabled and add explicit exte
 		cwd: "/repo",
 		systemPrompt: "System",
 		prompt: "Review this change",
-		model: "zai-coding-plan/glm-5.1",
+		model: "zai/glm-5.2",
 		loadExtensions: true,
 		extensions: ["/repo/.pi/extensions/zai-coding-plan", "/repo/.pi/extensions/toolbox"],
 	});
@@ -48,7 +48,7 @@ test("buildSubagentArgs can keep normal extensions enabled and add explicit exte
 	}
 	assert.deepEqual(extensionArgs, [resolve("/repo/.pi/extensions/zai-coding-plan"), resolve("/repo/.pi/extensions/toolbox")]);
 	assert.ok(args.includes("--model"));
-	assert.ok(args.includes("zai-coding-plan/glm-5.1"));
+	assert.ok(args.includes("zai/glm-5.2"));
 });
 
 test("buildSubagentArgs can approve trusted project-local inputs for non-interactive subagents", () => {

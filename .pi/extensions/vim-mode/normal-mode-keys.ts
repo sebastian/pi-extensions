@@ -36,6 +36,15 @@ function stripAltModifierForEscRecovery(parsedKey: string): string {
 	return parts.filter((part) => part !== "alt").join("+");
 }
 
+export function getNormalModeInputAction(
+	data: string,
+	matches: (data: string, action: "tui.input.submit" | "tui.input.newLine") => boolean,
+): "submit" | "ignore" | undefined {
+	if (matches(data, "tui.input.submit")) return "submit";
+	if (matches(data, "tui.input.newLine")) return "ignore";
+	return undefined;
+}
+
 export function normalizeParsedNormalModeKey(
 	parsedKey: string | undefined,
 	kittyPrintable?: string | undefined,

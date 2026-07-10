@@ -19,7 +19,7 @@ It does **not** register a separate `zai-coding-plan/*` provider or custom model
 
 - `https://api.z.ai/api/coding/paas/v4`
 
-That built-in provider now carries the current Z.AI compatibility metadata, including GLM-5.2 `reasoning_effort` / `xhigh` support. This extension only adds the local workflow tweaks above.
+That built-in provider now carries the current Z.AI compatibility metadata, including GLM-5.2 `reasoning_effort` / `max` support. This extension only adds the local workflow tweaks above.
 
 ## Install
 
@@ -65,8 +65,8 @@ When a Z.AI-backed model is active, the extension shows a small live usage statu
 
 - The quota status indicator uses `GET /api/monitor/usage/quota/limit` on `api.z.ai`, which is also what Z.AI's official usage-query plugin relies on.
 - The quota indicator is installed only in pi's interactive UI; RPC/JSON/print runs still get the prompt/context-window tweaks without status polling.
-- The context-window clamp mutates only the active built-in `zai/glm-5.1` or `zai/glm-5.2` model object. It does not replace the provider or its model list.
-- If pi later exposes extension-level `modelOverrides`, replace that small active-model mutation with a public override.
+- The context-window clamp updates the built-in `zai/glm-5.1` and `zai/glm-5.2` registry entries, with the active model as a fallback. It does not replace the provider or its model list.
+- If pi later exposes extension-level `modelOverrides`, replace that small registry mutation with a public override.
 
 ## Sources
 

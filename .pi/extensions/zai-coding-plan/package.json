@@ -1,6 +1,6 @@
 {
   "name": "zai-coding-plan-pi-package",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Enhances pi's built-in ZAI Coding Plan provider with quota status, concise prompt nudges, and conservative GLM-5.x context windows.",
   "type": "module",
   "keywords": [

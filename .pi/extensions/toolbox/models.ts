@@ -6,17 +6,16 @@ export interface ReviewModelPlan {
 	topLevel: string[];
 }
 
-const GPT_55_MODEL_REF = "openai-codex/gpt-5.5";
+const GPT_56_SOL_MODEL_REFS = ["openai-codex/gpt-5.6-sol", "openai/gpt-5.6-sol"] as const;
+const GPT_55_MODEL_REFS = ["openai-codex/gpt-5.5", "openai/gpt-5.5"] as const;
 const GPT_54_MODEL_REF = "openai-codex/gpt-5.4";
 const GPT_53_CODEX_MODEL_REF = "openai-codex/gpt-5.3-codex";
 const GLM_52_MODEL_REFS = [
 	"zai/glm-5.2",
-	"zai-coding-plan/glm-5.2",
 	"huggingface/zai-org/GLM-5.2",
 ] as const;
 const GLM_51_MODEL_REFS = [
 	"zai/glm-5.1",
-	"zai-coding-plan/glm-5.1",
 	"huggingface/zai-org/GLM-5.1",
 ] as const;
 
@@ -24,15 +23,17 @@ const GLM_51_MODEL_REFS = [
 const GLM_MODEL_REFS = [...GLM_52_MODEL_REFS, ...GLM_51_MODEL_REFS] as const;
 
 const PREFERRED_MODEL_ORDER = [
-	GPT_55_MODEL_REF,
-	GPT_54_MODEL_REF,
+	...GPT_56_SOL_MODEL_REFS,
+	...GPT_55_MODEL_REFS,
 	...GLM_MODEL_REFS,
+	GPT_54_MODEL_REF,
 	GPT_53_CODEX_MODEL_REF,
 ] as const;
 const PREFERRED_REVIEWER_MODEL_ORDER = [
-	GPT_54_MODEL_REF,
+	...GPT_56_SOL_MODEL_REFS,
 	...GLM_MODEL_REFS,
-	GPT_55_MODEL_REF,
+	...GPT_55_MODEL_REFS,
+	GPT_54_MODEL_REF,
 	GPT_53_CODEX_MODEL_REF,
 ] as const;
 
@@ -65,6 +66,8 @@ function preferredModelIndex(ref: string, preferredOrder: readonly string[]): nu
 
 function reviewModelFamily(ref: string): string {
 	const normalized = normalizeRef(ref);
+	if (GPT_56_SOL_MODEL_REFS.some((candidate) => normalizeRef(candidate) === normalized)) return "gpt-5.6-sol";
+	if (GPT_55_MODEL_REFS.some((candidate) => normalizeRef(candidate) === normalized)) return "gpt-5.5";
 	if (GLM_MODEL_REFS.some((candidate) => normalizeRef(candidate) === normalized)) return "glm";
 	return normalized;
 }

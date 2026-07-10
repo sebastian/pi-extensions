@@ -33,16 +33,20 @@ import {
 const REVIEW_STATUS_KEY = "guided-review";
 const REVIEW_WIDGET_KEY = "guided-review";
 const REVIEW_TOOLS = ["read", "bash", "grep", "find", "ls"];
-const GPT_54_REVIEW_MODEL_REF = "openai-codex/gpt-5.4";
-const GPT_54_REVIEW_THINKING_LEVEL = "xhigh";
+const REVIEW_THINKING_LEVELS = new Map([
+	["openai-codex/gpt-5.6-sol", "max"],
+	["openai/gpt-5.6-sol", "max"],
+	["openai-codex/gpt-5.5", "xhigh"],
+	["openai/gpt-5.5", "xhigh"],
+	["zai/glm-5.2", "max"],
+]);
 
 function normalizeModelRef(ref: string): string {
 	return ref.trim().toLowerCase();
 }
 
 export function getReviewThinkingLevel(model: string, fallbackThinkingLevel?: string): string | undefined {
-	if (normalizeModelRef(model) === normalizeModelRef(GPT_54_REVIEW_MODEL_REF)) return GPT_54_REVIEW_THINKING_LEVEL;
-	return fallbackThinkingLevel || undefined;
+	return REVIEW_THINKING_LEVELS.get(normalizeModelRef(model)) ?? (fallbackThinkingLevel || undefined);
 }
 
 function projectLocalInputsTrusted(ctx: ExtensionContext): boolean {
