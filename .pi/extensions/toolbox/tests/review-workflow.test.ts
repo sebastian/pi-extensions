@@ -76,11 +76,11 @@ test("review finding prompts include the full finding list and details", () => {
 	assert.match(buildFindingDecisionPrompt(0, findings[0]!), /Address this finding\?/);
 });
 
-test("getReviewThinkingLevel uses each preferred review model's strongest native level", () => {
-	assert.equal(getReviewThinkingLevel("openai-codex/gpt-5.6-sol", "high"), "max");
-	assert.equal(getReviewThinkingLevel("openai/gpt-5.6-sol", "high"), "max");
+test("getReviewThinkingLevel avoids max effort for preferred reviewers", () => {
+	assert.equal(getReviewThinkingLevel("openai-codex/gpt-5.6-sol", "high"), "xhigh");
+	assert.equal(getReviewThinkingLevel("openai/gpt-5.6-sol", "high"), "xhigh");
 	assert.equal(getReviewThinkingLevel("OPENAI-CODEX/GPT-5.5", "low"), "xhigh");
-	assert.equal(getReviewThinkingLevel("zai/glm-5.2", "high"), "max");
+	assert.equal(getReviewThinkingLevel("zai/glm-5.2", "max"), "high");
 	assert.equal(getReviewThinkingLevel("openai-codex/gpt-5.4", "high"), "high");
 	assert.equal(getReviewThinkingLevel("zai/glm-5.1"), undefined);
 });

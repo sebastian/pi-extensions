@@ -34,11 +34,12 @@ const REVIEW_STATUS_KEY = "guided-review";
 const REVIEW_WIDGET_KEY = "guided-review";
 const REVIEW_TOOLS = ["read", "bash", "grep", "find", "ls"];
 const REVIEW_THINKING_LEVELS = new Map([
-	["openai-codex/gpt-5.6-sol", "max"],
-	["openai/gpt-5.6-sol", "max"],
+	["openai-codex/gpt-5.6-sol", "xhigh"],
+	["openai/gpt-5.6-sol", "xhigh"],
 	["openai-codex/gpt-5.5", "xhigh"],
 	["openai/gpt-5.5", "xhigh"],
-	["zai/glm-5.2", "max"],
+	// GLM-5.2 maps xhigh upward to max; high avoids the expensive max tier.
+	["zai/glm-5.2", "high"],
 ]);
 
 function normalizeModelRef(ref: string): string {
