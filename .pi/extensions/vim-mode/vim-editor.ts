@@ -1,6 +1,6 @@
-import { CustomEditor, type AppKeybinding, type KeybindingsManager } from "@earendil-works/pi-coding-agent";
+import { CustomEditor, type KeybindingsManager } from "@earendil-works/pi-coding-agent";
 import { decodeKittyPrintable, Key, matchesKey, parseKey, truncateToWidth, type EditorTheme, type TUI, visibleWidth } from "@earendil-works/pi-tui";
-import { getNormalModeInputAction, normalizeParsedNormalModeKey } from "./normal-mode-keys.ts";
+import { getNormalModeInputAction, normalizeParsedNormalModeKey, SAFE_APP_SHORTCUTS } from "./normal-mode-keys.ts";
 import type { BufferState, Cursor, VimBuffer } from "./vim-controller.ts";
 import { VimController } from "./vim-controller.ts";
 
@@ -19,25 +19,6 @@ interface EditorInternals {
 	cancelAutocomplete(): void;
 	getText(): string;
 }
-
-const SAFE_APP_SHORTCUTS: AppKeybinding[] = [
-	"app.clear",
-	"app.suspend",
-	"app.thinking.cycle",
-	"app.model.cycleForward",
-	"app.model.cycleBackward",
-	"app.model.select",
-	"app.tools.expand",
-	"app.thinking.toggle",
-	"app.editor.external",
-	"app.message.followUp",
-	"app.message.dequeue",
-	"app.clipboard.pasteImage",
-	"app.session.new",
-	"app.session.tree",
-	"app.session.fork",
-	"app.session.resume",
-];
 
 function sameCursor(left: Cursor, right: Cursor): boolean {
 	return left.line === right.line && left.col === right.col;

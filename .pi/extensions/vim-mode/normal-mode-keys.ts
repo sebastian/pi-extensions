@@ -1,3 +1,25 @@
+import type { AppKeybinding } from "@earendil-works/pi-coding-agent";
+
+export const SAFE_APP_SHORTCUTS = [
+	"app.clear",
+	"app.suspend",
+	"app.thinking.cycle",
+	"app.model.cycleForward",
+	"app.model.cycleBackward",
+	"app.model.select",
+	"app.tools.expand",
+	"app.thinking.toggle",
+	"app.editor.external",
+	"app.message.copy",
+	"app.message.followUp",
+	"app.message.dequeue",
+	"app.clipboard.pasteImage",
+	"app.session.new",
+	"app.session.tree",
+	"app.session.fork",
+	"app.session.resume",
+] as const satisfies readonly AppKeybinding[];
+
 const SHIFT_CHAR_MAP: Record<string, string> = {
 	"1": "!",
 	"2": "@",

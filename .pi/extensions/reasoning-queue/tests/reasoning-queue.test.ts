@@ -230,13 +230,13 @@ test("honors Anthropic adaptive-thinking compat metadata", () => {
 	assert.equal(enabled.max_tokens, 4096);
 });
 
-test("honors Claude Fable 5 adaptive-thinking xhigh metadata", () => {
-	const model = { ...reasoningModel, api: "anthropic-messages", id: "claude-fable-5", name: "Claude Fable 5", provider: "anthropic", maxTokens: 64000, thinkingLevelMap: { off: null, xhigh: "xhigh" }, compat: { forceAdaptiveThinking: true } } as ReasoningModel;
-	assert.deepEqual(getSupportedReasoningLevels(model), ["minimal", "low", "medium", "high", "xhigh"]);
+test("honors Claude Fable 5 adaptive-thinking xhigh and max metadata", () => {
+	const model = { ...reasoningModel, api: "anthropic-messages", id: "claude-fable-5", name: "Claude Fable 5", provider: "anthropic", maxTokens: 64000, thinkingLevelMap: { off: null, xhigh: "xhigh", max: "max" }, compat: { forceAdaptiveThinking: true } } as ReasoningModel;
+	assert.deepEqual(getSupportedReasoningLevels(model), ["minimal", "low", "medium", "high", "xhigh", "max"]);
 	assert.equal(clampReasoningLevel("off", model), "minimal");
-	const enabled = rewriteProviderPayload({ model: model.id, max_tokens: 4096, thinking: { type: "disabled" } }, "xhigh", model) as { thinking: { type: string; display: string }; output_config: { effort: string } };
+	const enabled = rewriteProviderPayload({ model: model.id, max_tokens: 4096, thinking: { type: "disabled" } }, "max", model) as { thinking: { type: string; display: string }; output_config: { effort: string } };
 	assert.deepEqual(enabled.thinking, { type: "adaptive", display: "summarized" });
-	assert.deepEqual(enabled.output_config, { effort: "xhigh" });
+	assert.deepEqual(enabled.output_config, { effort: "max" });
 });
 
 test("allows Anthropic adaptive-thinking compat metadata to opt out", () => {

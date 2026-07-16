@@ -1,6 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { getNormalModeInputAction, normalizeParsedNormalModeKey } from "../normal-mode-keys.ts";
+import { getNormalModeInputAction, normalizeParsedNormalModeKey, SAFE_APP_SHORTCUTS } from "../normal-mode-keys.ts";
+
+test("normal mode passes through pi's message-copy shortcut", () => {
+	assert.ok(SAFE_APP_SHORTCUTS.includes("app.message.copy"));
+});
 
 test("normal mode submits the configured submit key and ignores configured newline keys", () => {
 	const bindings = new Map([
