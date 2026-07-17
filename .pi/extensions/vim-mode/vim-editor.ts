@@ -1,7 +1,7 @@
 import { CustomEditor, type KeybindingsManager } from "@earendil-works/pi-coding-agent";
-import { decodeKittyPrintable, Key, matchesKey, parseKey, truncateToWidth, type EditorTheme, type TUI, visibleWidth } from "@earendil-works/pi-tui";
+import { decodeKittyPrintable, Key, matchesKey, parseKey, sliceByColumn, truncateToWidth, type EditorTheme, type TUI, visibleWidth } from "@earendil-works/pi-tui";
 import { getNormalModeInputAction, normalizeParsedNormalModeKey, SAFE_APP_SHORTCUTS } from "./normal-mode-keys.ts";
-import type { BufferState, Cursor, VimBuffer } from "./vim-controller.ts";
+import type { BufferState, Cursor, VimBuffer, VimMode } from "./vim-controller.ts";
 import { VimController } from "./vim-controller.ts";
 
 interface EditorInternals {
@@ -12,12 +12,21 @@ interface EditorInternals {
 	};
 	historyIndex: number;
 	lastAction: string | null;
+	lastWidth: number;
+	scrollOffset: number;
+	paddingX: number;
 	onChange?: (text: string) => void;
 	setCursorCol(col: number): void;
 	pushUndoSnapshot(): void;
 	undo(): void;
 	cancelAutocomplete(): void;
 	getText(): string;
+	buildVisualLineMap(width: number): Array<{ logicalLine: number; startCol: number; length: number }>;
+}
+
+interface VimEditorOptions {
+	onModeChange?: (mode: VimMode) => void;
+	hasPendingMessages?: () => boolean;
 }
 
 function sameCursor(left: Cursor, right: Cursor): boolean {
@@ -79,16 +88,18 @@ export class VimEditor extends CustomEditor {
 	private readonly labelTheme: EditorTheme;
 	private readonly appKeybindings: KeybindingsManager;
 	private readonly controller: VimController;
-	private readonly onModeChange?: (mode: "normal" | "insert") => void;
+	private readonly onModeChange?: (mode: VimMode) => void;
+	private readonly hasPendingMessages?: () => boolean;
 	private lastInsertEscapeAt = 0;
 	private readonly insertEscapeRecoveryWindowMs = 180;
 
-	constructor(tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager, options?: { onModeChange?: (mode: "normal" | "insert") => void }) {
+	constructor(tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager, options?: VimEditorOptions) {
 		super(tui, theme, keybindings);
 		this.labelTheme = theme;
 		this.appKeybindings = keybindings;
 		this.controller = new VimController(new EditorBufferAdapter(this), { initialMode: "insert" });
 		this.onModeChange = options?.onModeChange;
+		this.hasPendingMessages = options?.hasPendingMessages;
 		this.onModeChange?.(this.controller.getMode());
 	}
 
@@ -116,12 +127,18 @@ export class VimEditor extends CustomEditor {
 				rerender();
 				return;
 			}
-			if (this.controller.hasPendingState()) {
-				this.controller.clearPendingState();
+			if (this.controller.isVisualMode() || this.controller.hasPendingState()) {
+				this.controller.handleNormalKey("escape");
 				rerender();
 				return;
 			}
 			super.handleInput(data);
+			return;
+		}
+
+		if (matchesKey(data, Key.up) && this.getText().length === 0 && this.hasPendingMessages?.()) {
+			this.actionHandlers.get("app.message.dequeue")?.();
+			rerender();
 			return;
 		}
 
@@ -198,9 +215,45 @@ export class VimEditor extends CustomEditor {
 		}
 	}
 
+	private highlightVisualSelection(rendered: string[], width: number): void {
+		const selection = this.controller.getVisualSelection();
+		if (!selection) return;
+		// ponytail: pi has no selection renderer; drop this internal layout mapping when it exposes one.
+		const internals = this.getInternals();
+		const visualLines = internals.buildVisualLineMap(internals.lastWidth);
+		const maxVisibleLines = Math.max(5, Math.floor(this.tui.terminal.rows * 0.3));
+		const visibleLines = visualLines.slice(internals.scrollOffset, internals.scrollOffset + maxVisibleLines);
+		const paddingX = Math.min(internals.paddingX, Math.max(0, Math.floor((width - 1) / 2)));
+		const lineOffsets: number[] = [];
+		let offset = 0;
+		for (const line of internals.state.lines) {
+			lineOffsets.push(offset);
+			offset += line.length + 1;
+		}
+
+		for (let index = 0; index < visibleLines.length; index++) {
+			const visualLine = visibleLines[index]!;
+			const source = internals.state.lines[visualLine.logicalLine] ?? "";
+			const chunkStart = (lineOffsets[visualLine.logicalLine] ?? 0) + visualLine.startCol;
+			const start = Math.max(selection.start, chunkStart);
+			const end = Math.min(selection.end, chunkStart + visualLine.length);
+			if (start >= end) continue;
+			const chunk = source.slice(visualLine.startCol, visualLine.startCol + visualLine.length);
+			const startColumn = paddingX + visibleWidth(chunk.slice(0, start - chunkStart));
+			const endColumn = paddingX + visibleWidth(chunk.slice(0, end - chunkStart));
+			const line = rendered[index + 1];
+			if (!line) continue;
+			const before = sliceByColumn(line, 0, startColumn);
+			const selected = sliceByColumn(line, startColumn, endColumn - startColumn).replaceAll("\x1b[0m", "\x1b[0m\x1b[4m");
+			const after = sliceByColumn(line, endColumn, Math.max(0, visibleWidth(line) - endColumn));
+			rendered[index + 1] = `${before}\x1b[4m${selected}\x1b[24m${after}`;
+		}
+	}
+
 	override render(width: number): string[] {
 		const lines = super.render(width);
 		if (lines.length === 0) return lines;
+		this.highlightVisualSelection(lines, width);
 		const label = this.labelTheme.borderColor(this.controller.getStatusLabel());
 		const last = lines.length - 1;
 		if (visibleWidth(lines[last]!) >= visibleWidth(label)) {

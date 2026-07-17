@@ -1,4 +1,4 @@
-export type VimMode = "normal" | "insert";
+export type VimMode = "normal" | "insert" | "visual";
 export type VimOperatorKind = "delete" | "change" | "yank";
 
 export interface Cursor {
@@ -57,7 +57,7 @@ interface Motion {
 	linewise?: boolean;
 }
 
-interface SelectionRange {
+export interface SelectionRange {
 	start: number;
 	end: number;
 }
@@ -65,6 +65,7 @@ interface SelectionRange {
 const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 const wordSegmenter = new Intl.Segmenter(undefined, { granularity: "word" });
 const ASCII_PUNCTUATION_PATTERN = /[(){}[\]<>.,;:'"!?+\-=*/\\|&%^$#@~`]/u;
+const VISUAL_MOTION_KEYS = new Set(["h", "j", "k", "l", "w", "W", "b", "B", "e", "E", "0", "^", "$", "%", "g", "G", "f", "F", "t", "T", ";", ","]);
 
 interface WordMotionSegment extends Intl.SegmentData {
 	vimClass: string;
@@ -673,6 +674,7 @@ export class VimController {
 	private lastFind: LastFind | null = null;
 	private preferredColumn: number | null = null;
 	private register: VimRegister = { kind: "char", text: "" };
+	private visualAnchor: Cursor | null = null;
 
 	constructor(buffer: VimBuffer, options?: { initialMode?: VimMode }) {
 		this.buffer = buffer;
@@ -685,6 +687,16 @@ export class VimController {
 
 	isInsertMode(): boolean {
 		return this.mode === "insert";
+	}
+
+	isVisualMode(): boolean {
+		return this.mode === "visual";
+	}
+
+	getVisualSelection(): SelectionRange | null {
+		if (!this.visualAnchor || !this.isVisualMode()) return null;
+		const state = this.buffer.getState();
+		return buildCharwiseRange(state, this.visualAnchor, { target: state.cursor, inclusive: true });
 	}
 
 	hasPendingState(): boolean {
@@ -701,7 +713,7 @@ export class VimController {
 	}
 
 	getStatusLabel(): string {
-		const pieces: string[] = [this.mode === "insert" ? "INSERT" : "NORMAL"];
+		const pieces: string[] = [this.mode === "insert" ? "INSERT" : this.mode === "visual" ? "VISUAL" : "NORMAL"];
 		if (this.countBuffer) pieces.push(this.countBuffer);
 		if (this.pendingOperator) {
 			pieces.push(this.pendingOperator.key);
@@ -716,6 +728,7 @@ export class VimController {
 
 	enterNormalModeFromInsert(): void {
 		this.mode = "normal";
+		this.visualAnchor = null;
 		this.clearPendingState();
 		const state = this.buffer.getState();
 		const line = currentLine(state);
@@ -727,8 +740,12 @@ export class VimController {
 	}
 
 	handleNormalKey(key: string): boolean {
-		if (this.mode !== "normal") return false;
+		if (this.mode === "insert") return false;
 		if (key === "escape") {
+			if (this.isVisualMode()) {
+				this.exitVisualMode();
+				return true;
+			}
 			if (!this.hasPendingState()) return false;
 			this.clearPendingState();
 			return true;
@@ -746,7 +763,7 @@ export class VimController {
 			return this.handleOperatorMotionKey(key);
 		}
 		if (this.maybeAccumulateCount(key)) return true;
-		return this.handleStandaloneNormalKey(key);
+		return this.isVisualMode() ? this.handleVisualKey(key) : this.handleStandaloneNormalKey(key);
 	}
 
 	private maybeAccumulateCount(key: string): boolean {
@@ -790,6 +807,7 @@ export class VimController {
 
 	private enterInsertMode(cursor: Cursor): void {
 		this.mode = "insert";
+		this.visualAnchor = null;
 		this.clearPendingState();
 		this.resetPreferredColumn();
 		const state = this.buffer.getState();
@@ -875,6 +893,9 @@ export class VimController {
 				return true;
 			case "y":
 				this.startOperator("yank", "y");
+				return true;
+			case "v":
+				this.enterVisualMode();
 				return true;
 			case "x":
 				this.deleteCharsUnderCursor(this.consumeCount(), false);
@@ -968,6 +989,61 @@ export class VimController {
 				this.clearPendingState();
 				return true;
 		}
+	}
+
+	private enterVisualMode(): void {
+		this.mode = "visual";
+		this.visualAnchor = cloneCursor(this.buffer.getState().cursor);
+		this.clearPendingState();
+		this.resetPreferredColumn();
+	}
+
+	private exitVisualMode(): void {
+		this.mode = "normal";
+		this.visualAnchor = null;
+		this.clearPendingState();
+		this.resetPreferredColumn();
+	}
+
+	private handleVisualKey(key: string): boolean {
+		if (VISUAL_MOTION_KEYS.has(key)) return this.handleStandaloneNormalKey(key);
+		switch (key) {
+			case "v":
+				this.exitVisualMode();
+				return true;
+			case "d":
+			case "x":
+				this.applyVisualOperator("delete");
+				return true;
+			case "c":
+			case "s":
+				this.applyVisualOperator("change");
+				return true;
+			case "y":
+				this.applyVisualOperator("yank");
+				return true;
+			default:
+				this.countBuffer = "";
+				return false;
+		}
+	}
+
+	private applyVisualOperator(kind: VimOperatorKind): void {
+		const selection = this.getVisualSelection();
+		if (!selection) {
+			this.exitVisualMode();
+			return;
+		}
+		const state = this.buffer.getState();
+		const start = normalizeNormalCursor(state.lines, cursorFromOffset(state.lines, selection.start));
+		this.visualAnchor = null;
+		this.applyOperatorSelection(kind, selection);
+		if (kind === "yank") {
+			this.mode = "normal";
+			this.buffer.setCursor(start);
+		}
+		this.clearPendingState();
+		this.resetPreferredColumn();
 	}
 
 	private startOperator(kind: VimOperatorKind, key: PendingOperator["key"]): void {

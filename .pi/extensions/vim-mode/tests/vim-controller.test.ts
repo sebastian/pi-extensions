@@ -132,6 +132,15 @@ test("counts work with operator motions like d2w", () => {
 	assert.equal(controller.getMode(), "normal");
 });
 
+test("visual mode selects and deletes multiline text", () => {
+	const { buffer, controller } = createController("|one\ntwo\nthree");
+
+	feed(controller, "v", "G", "$", "d");
+
+	assert.equal(renderMarked(buffer), "|");
+	assert.equal(controller.getMode(), "normal");
+});
+
 test("linewise yy/p and dd behave like vim line operations", () => {
 	const yankCase = createController("|one\ntwo\nthree");
 	feed(yankCase.controller, "y", "y", "p");

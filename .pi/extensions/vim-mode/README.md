@@ -4,7 +4,8 @@ A more capable vim-style modal editor for pi.
 
 ## What it supports
 
-- normal + insert modes
+- normal, insert, and visual modes
+- multiline visual selections with `v`, motions, and `d`/`c`/`y`
 - counts like `3w`, `2dw`, `4j`
 - motions: `h`, `j`, `k`, `l`, `w`, `W`, `b`, `B`, `e`, `E`, `ge`, `gE`, `0`, `^`, `$`, `gg`, `G`, `%`
 - Unicode-aware word motion/text-object boundaries that follow pi's current editor behavior while preserving ASCII punctuation boundaries
@@ -24,7 +25,7 @@ A more capable vim-style modal editor for pi.
 - The editor starts in **insert** mode so the chat input stays convenient.
 - The custom editor installs only in pi's interactive TUI mode; RPC/JSON/print runs leave the editor surface untouched.
 - `Esc` leaves insert mode. In normal mode, `Esc` still aborts pi when no vim sub-command is pending.
-- Arrow keys still work for basic navigation in normal mode.
+- Arrow keys still work for basic navigation in normal mode. On an empty editor, `Up` restores pending messages from Pi's queue before falling back to prompt history.
 - Pi application shortcuts, including `Ctrl+X` message copy, pass through in normal mode.
 - The configured submit key (`Enter` by default) submits from normal mode regardless of cursor position; configured newline keys remain insert-mode-only.
 - This is intentionally not a full Vim clone yet, but it covers a much larger and more useful navigation/editing surface.

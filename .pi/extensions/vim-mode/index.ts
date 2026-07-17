@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { VimMode } from "./vim-controller.ts";
 import { VimEditor } from "./vim-editor.ts";
 
 const REAPPLY_EDITOR_DELAYS_MS = [0, 25, 100, 250] as const;
@@ -11,7 +12,7 @@ export default function vimModeExtension(pi: ExtensionAPI): void {
 	let activationId = 0;
 	let pendingTimers: Array<ReturnType<typeof setTimeout>> = [];
 
-	const emitMode = (mode: "normal" | "insert"): void => {
+	const emitMode = (mode: VimMode): void => {
 		pi.events.emit("vim-mode:mode", { mode });
 	};
 
@@ -28,7 +29,10 @@ export default function vimModeExtension(pi: ExtensionAPI): void {
 
 		const applyEditor = (): void => {
 			if (sessionActivationId !== activationId) return;
-			ctx.ui.setEditorComponent((tui, theme, keybindings) => new VimEditor(tui, theme, keybindings, { onModeChange: emitMode }));
+			ctx.ui.setEditorComponent((tui, theme, keybindings) => new VimEditor(tui, theme, keybindings, {
+				onModeChange: emitMode,
+				hasPendingMessages: () => ctx.hasPendingMessages(),
+			}));
 		};
 
 		applyEditor();

@@ -59,6 +59,9 @@ function ctx(overrides: Record<string, unknown> = {}) {
 		isIdle() {
 			return true;
 		},
+		hasPendingMessages() {
+			return false;
+		},
 		ui: { notify() {}, theme: { fg: (_color: string, text: string) => text }, setStatus() {}, addAutocompleteProvider() {} },
 		...overrides,
 	};
@@ -183,6 +186,27 @@ test("streamingBehavior keeps queued reasoning from changing the active in-fligh
 	const queuedTurn = runtime.handlers.get("before_provider_request")![0]({ payload: { model: "gpt-5.4-codex", input: [], reasoning: { effort: "low", summary: "auto" } } }, testCtx as never) as { reasoning: { effort: string } };
 	assert.equal(queuedTurn.reasoning.effort, "xhigh");
 	assert.equal(runtime.thinkingLevel, "xhigh");
+});
+
+test("dequeueing a message also discards its pending reasoning metadata", async () => {
+	const runtime = registerExtension("medium");
+	let hasPendingMessages = false;
+	const testCtx = ctx({
+		isIdle: () => false,
+		hasPendingMessages: () => hasPendingMessages,
+	});
+	await runtime.handlers.get("session_start")![0]({}, testCtx as never);
+	await runtime.handlers.get("input")![0]({ text: ":low original", source: "interactive", streamingBehavior: "followUp" }, testCtx as never);
+	hasPendingMessages = true;
+
+	// Pi's dequeue action clears the real queue before the corrected input event.
+	hasPendingMessages = false;
+	await runtime.handlers.get("input")![0]({ text: ":high corrected", source: "interactive", streamingBehavior: "steer" }, testCtx as never);
+	await runtime.handlers.get("message_start")![0]({ message: { role: "user", content: "corrected" } }, testCtx as never);
+	await runtime.handlers.get("message_start")![0]({ message: { role: "user", content: "untracked" } }, testCtx as never);
+
+	const rewritten = runtime.handlers.get("before_provider_request")![0]({ payload: { model: "gpt-5.4-codex", input: [], reasoning: { effort: "low", summary: "auto" } } }, testCtx as never) as { reasoning: { effort: string } };
+	assert.equal(rewritten.reasoning.effort, "high");
 });
 
 test("provider payload rewriting follows the request payload model when context model differs", async () => {

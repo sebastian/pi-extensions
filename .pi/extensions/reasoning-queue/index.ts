@@ -731,7 +731,7 @@ export default function reasoningQueueExtension(pi: ExtensionAPI): void {
 		if (event.source === "extension") return { action: "continue" as const };
 		const queuedInput = inputIsQueued(event);
 		const idleInput = !queuedInput && contextIsIdle(ctx);
-		if (idleInput && pendingLevels.length > 0) pendingLevels = [];
+		if ((idleInput || (queuedInput && !ctx.hasPendingMessages())) && pendingLevels.length > 0) pendingLevels = [];
 
 		const parsed = parseReasoningDirective(event.text);
 		if (parsed?.kind === "invalid") {
