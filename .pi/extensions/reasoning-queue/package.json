@@ -1,6 +1,6 @@
 {
   "name": "reasoning-queue-pi-package",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "Per-message reasoning-level controls for queued pi messages.",
   "type": "module",
   "keywords": [

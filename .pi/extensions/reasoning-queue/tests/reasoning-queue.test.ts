@@ -263,6 +263,14 @@ test("honors Claude Fable 5 adaptive-thinking xhigh and max metadata", () => {
 	assert.deepEqual(enabled.output_config, { effort: "max" });
 });
 
+test("uses adaptive thinking for Bedrock Claude Opus 5 without compat metadata", () => {
+	const model = { ...reasoningModel, api: "bedrock-converse-stream", id: "global.anthropic.claude-opus-5", name: "Claude Opus 5 (Global)", provider: "amazon-bedrock", maxTokens: 128000, thinkingLevelMap: { xhigh: "xhigh", max: "max" }, compat: undefined } as ReasoningModel;
+	const payload = rewriteProviderPayload({ modelId: model.id, messages: [], additionalModelRequestFields: {} }, "xhigh", model) as { additionalModelRequestFields: { thinking: { type: string; display: string }; output_config: { effort: string }; anthropic_beta?: unknown } };
+	assert.deepEqual(payload.additionalModelRequestFields.thinking, { type: "adaptive", display: "summarized" });
+	assert.deepEqual(payload.additionalModelRequestFields.output_config, { effort: "xhigh" });
+	assert.equal(payload.additionalModelRequestFields.anthropic_beta, undefined);
+});
+
 test("allows Anthropic adaptive-thinking compat metadata to opt out", () => {
 	const model = { ...reasoningModel, api: "anthropic-messages", id: "claude-opus-4-7", name: "Claude Opus 4.7", provider: "anthropic", maxTokens: 64000, compat: { forceAdaptiveThinking: false } } as ReasoningModel;
 	const payload = rewriteProviderPayload({ model: model.id, max_tokens: 4096, thinking: { type: "disabled" } }, "xhigh", model) as { thinking: { type: string; budget_tokens: number }; output_config?: unknown };

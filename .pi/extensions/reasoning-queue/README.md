@@ -25,7 +25,7 @@ Messages without a directive inherit the current default. If you queue `:low tas
 
 Reasoning-level autocomplete opens for slash, colon, and bracket directive forms on current pi versions.
 
-The extension follows pi's model-level `thinkingLevelMap` metadata, so GLM/Z.AI-style boolean thinking models clamp choices to the closest supported level. Anthropic-compatible adaptive thinking follows pi's `compat.forceAdaptiveThinking` metadata for built-in models, custom providers, and aliases.
+The extension follows pi's model-level `thinkingLevelMap` metadata, so GLM/Z.AI-style boolean thinking models clamp choices to the closest supported level. Anthropic-compatible adaptive thinking follows pi's `compat.forceAdaptiveThinking` metadata for built-in models, custom providers, and aliases, with family detection for Bedrock models such as Claude Opus 5.
 
 ## Notes
 

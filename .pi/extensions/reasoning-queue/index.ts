@@ -136,6 +136,8 @@ function modelSupportsXhigh(model: ReasoningModel | undefined): boolean {
 		value.includes("opus-4.7") ||
 		value.includes("opus-4-8") ||
 		value.includes("opus-4.8") ||
+		value.includes("opus-5") ||
+		value.includes("opus 5") ||
 		value.includes("fable-5")
 	);
 }
@@ -353,6 +355,8 @@ function supportsAdaptiveAnthropic(model: ReasoningModel | undefined): boolean {
 		value.includes("opus-4.7") ||
 		value.includes("opus-4-8") ||
 		value.includes("opus-4.8") ||
+		value.includes("opus-5") ||
+		value.includes("opus 5") ||
 		value.includes("sonnet-4-6") ||
 		value.includes("sonnet-4.6") ||
 		value.includes("sonnet-4-7") ||
@@ -375,7 +379,7 @@ function mapAnthropicEffort(level: Exclude<ThinkingLevel, "off">, model: Reasoni
 			return "high";
 		case "xhigh":
 			if (modelId.includes("opus-4-6") || modelId.includes("opus-4.6")) return "max";
-			if (modelId.includes("opus-4-7") || modelId.includes("opus-4.7") || modelId.includes("opus-4-8") || modelId.includes("opus-4.8") || modelId.includes("fable-5")) return "xhigh";
+			if (modelId.includes("opus-4-7") || modelId.includes("opus-4.7") || modelId.includes("opus-4-8") || modelId.includes("opus-4.8") || modelId.includes("opus-5") || modelId.includes("opus 5") || modelId.includes("fable-5")) return "xhigh";
 			return "high";
 		case "max":
 			return "max";
