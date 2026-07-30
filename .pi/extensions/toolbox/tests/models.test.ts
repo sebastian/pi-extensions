@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { resolveReviewModelsFromRefs } from "../models.ts";
+import { resolveReviewModels, resolveReviewModelsFromRefs } from "../models.ts";
 
 const preferredModels = [
 	"openai-codex/gpt-5.6-sol",
@@ -45,6 +45,20 @@ test("prefers Codex aliases and falls back to direct OpenAI without duplicate mo
 		"custom/provider-model",
 	);
 	assert.deepEqual(directOnly.reviewers, ["openai/gpt-5.6-sol", "zai/glm-5.2"]);
+});
+
+test("honors the current session model scope", () => {
+	const models = resolveReviewModels({
+		model: { provider: "openai-codex", id: "gpt-5.5" },
+		scopedModels: [
+			{ model: { provider: "openai-codex", id: "gpt-5.5" } },
+			{ model: { provider: "zai", id: "glm-5.2" } },
+			{ model: { provider: "openai-codex", id: "gpt-5.4" } },
+		],
+		modelRegistry: { getAvailable: () => { throw new Error("scope should be used"); } },
+	} as never);
+
+	assert.deepEqual(models.reviewers, ["zai/glm-5.2", "openai-codex/gpt-5.4"]);
 });
 
 test("falls back to older preferred models when the new pool is unavailable", () => {

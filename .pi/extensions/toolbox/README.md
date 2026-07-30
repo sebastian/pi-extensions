@@ -9,7 +9,7 @@ Small pi toolbox package for `/review` and provider rate-limit cleanup.
 - adds `/review` for the current uncommitted change
 - supports `/review <exact-revision-or-range>` for jj/git snapshots, e.g. `/review main..HEAD`
 - supports `/review for <focus>` and `/review <scope> with an extra focus on <focus>`
-- runs alternate reviewers from GPT-5.6 Sol, GPT-5.5, and GLM-5.2 when available, using `xhigh` for GPT and `max` for GLM, then deduplicates findings and lets you pick what to fix
+- runs alternate reviewers from the current pi model scope, preferring GPT-5.6 Sol, GPT-5.5, and GLM-5.2 when available, using `xhigh` for GPT and `max` for GLM, then deduplicates findings and lets you pick what to fix
 
 ## Install
 

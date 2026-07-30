@@ -107,7 +107,10 @@ export function resolveReviewModelsFromRefs(availableRefs: string[], currentMode
 }
 
 export function resolveReviewModels(ctx: ExtensionContext): ReviewModelPlan {
-	const availableRefs = ctx.modelRegistry.getAvailable().map((model) => toModelRef(model));
+	const availableModels = ctx.scopedModels.length > 0
+		? ctx.scopedModels.map(({ model }) => model)
+		: ctx.modelRegistry.getAvailable();
+	const availableRefs = availableModels.map((model) => toModelRef(model));
 	const currentModelRef = ctx.model ? toModelRef(ctx.model) : undefined;
 	return resolveReviewModelsFromRefs(availableRefs, currentModelRef);
 }
