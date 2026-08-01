@@ -1,0 +1,32 @@
+{
+	"name": "ponytail-omp-package",
+	"version": "4.8.4-omp.1",
+	"description": "An OMP-native port of Ponytail's minimal senior-developer mode.",
+	"type": "module",
+	"license": "MIT",
+	"keywords": [
+		"omp-plugin",
+		"ponytail"
+	],
+	"files": [
+		"index.ts",
+		"skills/",
+		"LICENSE"
+	],
+	"omp": {
+		"extensions": [
+			"./index.ts"
+		]
+	},
+	"peerDependencies": {
+		"@oh-my-pi/pi-coding-agent": "*"
+	},
+	"scripts": {
+		"check": "node --test ./tests/*.test.ts",
+		"test": "node --test ./tests/*.test.ts"
+	},
+	"engines": {
+		"bun": ">=1.3.14",
+		"node": ">=22.19.0"
+	}
+}

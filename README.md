@@ -14,6 +14,7 @@ I maintain this repo for my own workflows and experiments.
 ## Current contents
 
 - `.omp/extensions/vim-mode/` — the OMP-native port of the Vim mode, using OMP's public editor APIs, managed extension timers, clipboard/app shortcut names, and plugin manifest
+- `.omp/extensions/ponytail/` — an OMP-native port of [Dietrich Gebert's Ponytail](https://github.com/DietrichGebert/ponytail), with persistent `off`/`lite`/`full`/`ultra` modes, prompt injection, status and configuration commands, and the companion review/audit/debt/gain/help skills
 - `.pi/extensions/toolbox/` — a small pi extension package with concise provider rate-limit handling plus `/review`, which reviews the current change or an exact jj/git revision/range, compares preferred reviewer models, deduplicates findings, and lets you choose which ones to address
 - `.pi/extensions/reasoning-queue/` — streaming-aware per-message reasoning-level directives for normal, steering, and follow-up prompts, so queued work can switch between `low`, `high`, `xhigh`, `max`, etc. without wasting the active in-flight request or the whole queue on one setting
 - `.pi/extensions/vim-mode/` — a much more capable vim-style modal editor for pi, with multiline visual selections, counts, Unicode-aware word motions, find/till motions, operator-pending `d`/`c`/`y`, linewise commands, paste, joins, and a stronger normal-mode editing surface
@@ -22,3 +23,5 @@ I maintain this repo for my own workflows and experiments.
 ## License
 
 MIT. See [LICENSE](./LICENSE).
+
+The Ponytail port is derived from Dietrich Gebert's MIT-licensed project and retains its copyright and permission notice in [`.omp/extensions/ponytail/LICENSE`](./.omp/extensions/ponytail/LICENSE).
