@@ -126,16 +126,14 @@ test("OMP extension registers commands, persists mode, and injects filtered inst
 	});
 
 	const result = (await handlers.get("before_agent_start")?.(
-		{ systemPrompt: "BASE" },
+		{ systemPrompt: ["BASE"] },
 		context,
-	)) as { systemPrompt: string };
-	assert.ok(
-		result.systemPrompt.startsWith(
-			"BASE\n\nPONYTAIL MODE ACTIVE — level: ultra",
-		),
-	);
-	assert.match(result.systemPrompt, /ultra: "No cache until/);
-	assert.doesNotMatch(result.systemPrompt, /lite: "Done, cache added/);
+	)) as { systemPrompt: string[] };
+	assert.equal(result.systemPrompt[0], "BASE");
+	const injected = result.systemPrompt.at(-1) ?? "";
+	assert.ok(injected.startsWith("PONYTAIL MODE ACTIVE — level: ultra"));
+	assert.match(injected, /ultra: "No cache until/);
+	assert.doesNotMatch(injected, /lite: "Done, cache added/);
 });
 
 test("session restore and exact deactivation use OMP's branch API", async () => {
@@ -145,10 +143,10 @@ test("session restore and exact deactivation use OMP's branch API", async () => 
 	]);
 	await handlers.get("session_start")?.({}, context);
 	const active = (await handlers.get("before_agent_start")?.(
-		{ systemPrompt: "BASE" },
+		{ systemPrompt: ["BASE"] },
 		context,
-	)) as { systemPrompt: string };
-	assert.match(active.systemPrompt, /level: lite/);
+	)) as { systemPrompt: string[] };
+	assert.match(active.systemPrompt.at(-1) ?? "", /level: lite/);
 
 	await handlers.get("input")?.(
 		{ text: "add a normal mode toggle", source: "interactive" },
@@ -156,7 +154,7 @@ test("session restore and exact deactivation use OMP's branch API", async () => 
 	);
 	assert.ok(
 		await handlers.get("before_agent_start")?.(
-			{ systemPrompt: "BASE" },
+			{ systemPrompt: ["BASE"] },
 			context,
 		),
 	);
@@ -166,7 +164,7 @@ test("session restore and exact deactivation use OMP's branch API", async () => 
 	);
 	assert.equal(
 		await handlers.get("before_agent_start")?.(
-			{ systemPrompt: "BASE" },
+			{ systemPrompt: ["BASE"] },
 			context,
 		),
 		undefined,

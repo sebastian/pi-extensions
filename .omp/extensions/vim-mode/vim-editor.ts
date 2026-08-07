@@ -61,6 +61,29 @@ export class VimEditor extends CustomEditor {
 		this.onModeChange?.(this.controller.getMode());
 	}
 
+	override setTopBorderProvider(
+		provider: Parameters<CustomEditor["setTopBorderProvider"]>[0],
+	): void {
+		super.setTopBorderProvider((availableWidth) => {
+			const rawLabel = this.controller.getStatusLabel();
+			const labelWidth = Math.min(visibleWidth(rawLabel), availableWidth);
+			const label = this.labelTheme.borderColor(
+				truncateToWidth(rawLabel, labelWidth, ""),
+			);
+			const baseWidth = availableWidth - labelWidth;
+			const base = provider?.(baseWidth);
+			const fill = this.labelTheme.borderColor(
+				this.labelTheme.symbols.boxRound.horizontal.repeat(
+					Math.max(0, baseWidth - (base?.width ?? 0)),
+				),
+			);
+			return {
+				content: `${base?.content ?? ""}${fill}${label}`,
+				width: availableWidth,
+			};
+		});
+	}
+
 	override handleInput(data: string): void {
 		const previousMode = this.controller.getMode();
 		try {
@@ -233,19 +256,6 @@ export class VimEditor extends CustomEditor {
 
 	override render(width: number): readonly string[] {
 		this.decorationSearchOffset = 0;
-		const lines = [...super.render(width)];
-		if (lines.length === 0) return lines;
-		const label = this.labelTheme.borderColor(this.controller.getStatusLabel());
-		const last = lines.length - 1;
-		const lastLine = lines[last] ?? "";
-		lines[last] =
-			visibleWidth(lastLine) >= visibleWidth(label)
-				? truncateToWidth(
-						lastLine,
-						Math.max(0, width - visibleWidth(label)),
-						"",
-					) + label
-				: truncateToWidth(label, width, "");
-		return lines;
+		return super.render(width);
 	}
 }

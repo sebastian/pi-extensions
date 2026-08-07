@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import type { VimMode } from "./vim-controller.ts";
 import { VimEditor } from "./vim-editor.ts";
 
@@ -6,15 +6,15 @@ const REAPPLY_EDITOR_DELAYS_MS = [25, 100, 250] as const;
 
 export default function vimModeExtension(omp: ExtensionAPI): void {
 	let activationId = 0;
-	let pendingTimers: Array<{ context: ExtensionContext; timer: Timer }> = [];
+	let cancelPendingTimers: Array<() => void> = [];
 
 	const emitMode = (mode: VimMode): void => {
 		omp.events.emit("vim-mode:mode", { mode });
 	};
 
 	const clearPendingTimers = (): void => {
-		for (const { context, timer } of pendingTimers) context.clearTimer(timer);
-		pendingTimers = [];
+		for (const cancel of cancelPendingTimers) cancel();
+		cancelPendingTimers = [];
 	};
 
 	omp.on("session_start", (_event, ctx) => {
@@ -36,10 +36,8 @@ export default function vimModeExtension(omp: ExtensionAPI): void {
 
 		applyEditor();
 		for (const delayMs of REAPPLY_EDITOR_DELAYS_MS) {
-			pendingTimers.push({
-				context: ctx,
-				timer: ctx.setTimeout(applyEditor, delayMs),
-			});
+			const timer = ctx.setTimeout(applyEditor, delayMs);
+			cancelPendingTimers.push(() => ctx.clearTimer(timer));
 		}
 	});
 

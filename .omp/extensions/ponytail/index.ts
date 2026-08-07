@@ -338,10 +338,6 @@ export default function ponytailExtension(omp: ExtensionAPI): void {
 	omp.on("before_agent_start", async (event) => {
 		const instructions = instructionsFor(currentMode);
 		if (!instructions) return undefined;
-		const base =
-			typeof event?.systemPrompt === "string" && event.systemPrompt
-				? `${event.systemPrompt}\n\n`
-				: "";
-		return { systemPrompt: `${base}${instructions}` };
+		return { systemPrompt: [...event.systemPrompt, instructions] };
 	});
 }

@@ -1,6 +1,6 @@
 {
 	"name": "ponytail-omp-package",
-	"version": "4.8.4-omp.1",
+	"version": "4.8.4-omp.2",
 	"description": "An OMP-native port of Ponytail's minimal senior-developer mode.",
 	"type": "module",
 	"license": "MIT",
