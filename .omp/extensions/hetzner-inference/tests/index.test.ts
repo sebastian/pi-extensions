@@ -7,10 +7,15 @@ interface RegisteredProvider {
 	apiKey: string;
 	api: string;
 	authHeader: boolean;
-	fetchDynamicModels: (apiKey: string | undefined) => Promise<readonly unknown[]>;
+	models: ReadonlyArray<{
+		id: string;
+		contextWindow: number;
+		maxTokens: number;
+	}>;
+	fetchDynamicModels?: unknown;
 }
 
-test("registers every model returned by Hetzner", async (t) => {
+test("registers picker-visible Hetzner models synchronously", () => {
 	let providerName: string | undefined;
 	let providerConfig: RegisteredProvider | undefined;
 	hetznerInference({
@@ -20,39 +25,32 @@ test("registers every model returned by Hetzner", async (t) => {
 		},
 	} as never);
 
-	t.mock.method(globalThis, "fetch", async (input, init) => {
-		assert.equal(input, "https://inference.hetzner.com/api/v1/models");
-		assert.equal(
-			new Headers(init?.headers).get("Authorization"),
-			"Bearer test-key",
-		);
-		return new Response(
-			JSON.stringify({
-				data: [
-					{
-						id: "Qwen/Qwen3.6-35B-A3B-FP8",
-						max_model_len: 262_144,
-					},
-				],
-			}),
-		);
-	});
-
 	assert.equal(providerName, "hetzner");
 	assert.ok(providerConfig);
 	assert.equal(providerConfig.baseUrl, "https://inference.hetzner.com/api/v1");
 	assert.equal(providerConfig.apiKey, "HETZNER_API_KEY");
 	assert.equal(providerConfig.api, "openai-completions");
 	assert.equal(providerConfig.authHeader, true);
-	assert.deepEqual(await providerConfig.fetchDynamicModels("test-key"), [
-		{
-			id: "Qwen/Qwen3.6-35B-A3B-FP8",
-			name: "Qwen3.6-35B-A3B-FP8",
-			reasoning: false,
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 262_144,
-			maxTokens: 32_768,
-		},
-	]);
+	assert.equal(providerConfig.fetchDynamicModels, undefined);
+	assert.deepEqual(
+		providerConfig.models.map(({ id, contextWindow, maxTokens }) => ({
+			id,
+			contextWindow,
+			maxTokens,
+		})),
+		[
+			{
+				id: "DeepSeek-V4-Flash-0731",
+				contextWindow: 512_000,
+				maxTokens: 32_768,
+			},
+			{ id: "GLM-5.2-NVFP4", contextWindow: 512_000, maxTokens: 32_768 },
+			{ id: "Kimi-K2.7-Code", contextWindow: 262_144, maxTokens: 32_768 },
+			{
+				id: "Qwen/Qwen3.6-35B-A3B-FP8",
+				contextWindow: 262_144,
+				maxTokens: 32_768,
+			},
+		],
+	);
 });

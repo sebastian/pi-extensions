@@ -5,55 +5,25 @@ import type {
 
 const BASE_URL = "https://inference.hetzner.com/api/v1";
 
-function parseModel(value: unknown): ProviderModelConfig {
-	if (
-		!value ||
-		typeof value !== "object" ||
-		!("id" in value) ||
-		typeof value.id !== "string" ||
-		!("max_model_len" in value) ||
-		typeof value.max_model_len !== "number" ||
-		!Number.isSafeInteger(value.max_model_len) ||
-		value.max_model_len <= 0
-	) {
-		throw new Error("Hetzner returned invalid model metadata");
-	}
-
+function model(id: string, contextWindow: number): ProviderModelConfig {
 	return {
-		id: value.id,
-		name: value.id.slice(value.id.lastIndexOf("/") + 1),
+		id,
+		name: id.slice(id.lastIndexOf("/") + 1),
 		reasoning: false,
 		input: ["text"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: value.max_model_len,
-		// ponytail: cap unknown output limits at 32K; use provider metadata if Hetzner adds it.
-		maxTokens: Math.min(value.max_model_len, 32_768),
+		contextWindow,
+		maxTokens: 32_768,
 	};
 }
 
-async function fetchModels(
-	apiKey: string | undefined,
-): Promise<readonly ProviderModelConfig[]> {
-	if (!apiKey) throw new Error("HETZNER_API_KEY is required");
-
-	const response = await fetch(`${BASE_URL}/models`, {
-		headers: { Authorization: `Bearer ${apiKey}` },
-	});
-	if (!response.ok) {
-		throw new Error(`Hetzner model discovery failed: HTTP ${response.status}`);
-	}
-
-	const payload: unknown = await response.json();
-	if (
-		!payload ||
-		typeof payload !== "object" ||
-		!("data" in payload) ||
-		!Array.isArray(payload.data)
-	) {
-		throw new Error("Hetzner returned an invalid model list");
-	}
-	return payload.data.map(parseModel);
-}
+// ponytail: OMP 17.2.12's /model omits dynamic extension models; restore live discovery when fixed.
+const MODELS = [
+	model("DeepSeek-V4-Flash-0731", 512_000),
+	model("GLM-5.2-NVFP4", 512_000),
+	model("Kimi-K2.7-Code", 262_144),
+	model("Qwen/Qwen3.6-35B-A3B-FP8", 262_144),
+];
 
 export default function hetznerInference(pi: ExtensionAPI): void {
 	pi.registerProvider("hetzner", {
@@ -61,6 +31,6 @@ export default function hetznerInference(pi: ExtensionAPI): void {
 		apiKey: "HETZNER_API_KEY",
 		api: "openai-completions",
 		authHeader: true,
-		fetchDynamicModels: fetchModels,
+		models: MODELS,
 	});
 }

@@ -14,7 +14,7 @@ I maintain this repo for my own workflows and experiments.
 ## Current contents
 
 - `.omp/extensions/vim-mode/` — the OMP-native port of the Vim mode, using OMP's public editor APIs, managed extension timers, clipboard/app shortcut names, and plugin manifest
-- `.omp/extensions/hetzner-inference/` — live discovery of Hetzner's free OpenAI-compatible Inference models using `HETZNER_API_KEY`
+- `.omp/extensions/hetzner-inference/` — Hetzner's free OpenAI-compatible Inference models using `HETZNER_API_KEY`
 - `.omp/extensions/ponytail/` — an OMP-native port of [Dietrich Gebert's Ponytail](https://github.com/DietrichGebert/ponytail), with persistent `off`/`lite`/`full`/`ultra` modes, prompt injection, status and configuration commands, and the companion review/audit/debt/gain/help skills
 - `.pi/extensions/toolbox/` — a small pi extension package with concise provider rate-limit handling plus `/review`, which reviews the current change or an exact jj/git revision/range, compares preferred reviewer models, deduplicates findings, and lets you choose which ones to address
 - `.pi/extensions/reasoning-queue/` — streaming-aware per-message reasoning-level directives for normal, steering, and follow-up prompts, so queued work can switch between `low`, `high`, `xhigh`, `max`, etc. without wasting the active in-flight request or the whole queue on one setting
