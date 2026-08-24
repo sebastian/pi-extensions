@@ -55,8 +55,8 @@ export class VimEditor extends CustomEditor {
 		this.hasPendingMessages = options?.hasPendingMessages;
 
 		const decorateOmpText = this.decorateText;
-		this.decorateText = (text) =>
-			this.decorateVisualSelection(text, decorateOmpText?.(text) ?? text);
+		this.decorateText = (text, context) =>
+			this.decorateVisualSelection(text, decorateOmpText(text, context));
 		this.buffer.beginInsertSession();
 		this.onModeChange?.(this.controller.getMode());
 	}
@@ -127,12 +127,30 @@ export class VimEditor extends CustomEditor {
 			return;
 		}
 
-		if (matchesKey(data, Key.left)) return this.handleNormalMotion("h");
-		if (matchesKey(data, Key.right)) return this.handleNormalMotion("l");
-		if (matchesKey(data, Key.up)) return this.handleNormalMotion("k");
-		if (matchesKey(data, Key.down)) return this.handleNormalMotion("j");
-		if (matchesKey(data, Key.home)) return this.handleNormalMotion("0");
-		if (matchesKey(data, Key.end)) return this.handleNormalMotion("$");
+		if (matchesKey(data, Key.left)) {
+			this.handleNormalMotion("h");
+			return;
+		}
+		if (matchesKey(data, Key.right)) {
+			this.handleNormalMotion("l");
+			return;
+		}
+		if (matchesKey(data, Key.up)) {
+			this.handleNormalMotion("k");
+			return;
+		}
+		if (matchesKey(data, Key.down)) {
+			this.handleNormalMotion("j");
+			return;
+		}
+		if (matchesKey(data, Key.home)) {
+			this.handleNormalMotion("0");
+			return;
+		}
+		if (matchesKey(data, Key.end)) {
+			this.handleNormalMotion("$");
+			return;
+		}
 
 		const inputAction = getNormalModeInputAction(data, (input, action) =>
 			this.appKeybindings.matches(input, action),
