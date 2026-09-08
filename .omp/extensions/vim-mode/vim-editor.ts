@@ -4,13 +4,13 @@ import {
 } from "@oh-my-pi/pi-coding-agent";
 import {
 	decodePrintableKey,
+	type EditorTextDecorationContext,
 	type EditorTheme,
 	Key,
 	matchesKey,
 	parseKey,
 	sliceByColumn,
 	type TUI,
-	truncateToWidth,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
 import {
@@ -30,13 +30,11 @@ interface VimEditorOptions {
 const MODIFIED_KEY_PATTERN = /(?:^|\+)(?:alt|ctrl|super)(?:\+|$)/u;
 
 export class VimEditor extends CustomEditor {
-	private readonly labelTheme: EditorTheme;
 	private readonly appKeybindings: KeybindingsManager;
 	private readonly buffer: OmpEditorBufferAdapter;
 	private readonly controller: VimController;
 	private readonly onModeChange?: (mode: VimMode) => void;
 	private readonly hasPendingMessages?: () => boolean;
-	private decorationSearchOffset = 0;
 	private lastInsertEscapeAt = 0;
 	private readonly insertEscapeRecoveryWindowMs = 180;
 
@@ -47,7 +45,6 @@ export class VimEditor extends CustomEditor {
 		options?: VimEditorOptions,
 	) {
 		super(tui, theme, keybindings);
-		this.labelTheme = theme;
 		this.appKeybindings = keybindings;
 		this.buffer = new OmpEditorBufferAdapter(this);
 		this.controller = new VimController(this.buffer, { initialMode: "insert" });
@@ -56,32 +53,13 @@ export class VimEditor extends CustomEditor {
 
 		const decorateOmpText = this.decorateText;
 		this.decorateText = (text, context) =>
-			this.decorateVisualSelection(text, decorateOmpText(text, context));
+			this.decorateVisualSelection(
+				text,
+				decorateOmpText(text, context),
+				context,
+			);
 		this.buffer.beginInsertSession();
 		this.onModeChange?.(this.controller.getMode());
-	}
-
-	override setTopBorderProvider(
-		provider: Parameters<CustomEditor["setTopBorderProvider"]>[0],
-	): void {
-		super.setTopBorderProvider((availableWidth) => {
-			const rawLabel = this.controller.getStatusLabel();
-			const labelWidth = Math.min(visibleWidth(rawLabel), availableWidth);
-			const label = this.labelTheme.borderColor(
-				truncateToWidth(rawLabel, labelWidth, ""),
-			);
-			const baseWidth = availableWidth - labelWidth;
-			const base = provider?.(baseWidth);
-			const fill = this.labelTheme.borderColor(
-				this.labelTheme.symbols.boxRound.horizontal.repeat(
-					Math.max(0, baseWidth - (base?.width ?? 0)),
-				),
-			);
-			return {
-				content: `${base?.content ?? ""}${fill}${label}`,
-				width: availableWidth,
-			};
-		});
 	}
 
 	override handleInput(data: string): void {
@@ -243,15 +221,20 @@ export class VimEditor extends CustomEditor {
 		this.tui?.requestRender();
 	}
 
-	private decorateVisualSelection(text: string, decorated: string): string {
+	private decorateVisualSelection(
+		text: string,
+		decorated: string,
+		context: EditorTextDecorationContext,
+	): string {
 		const selection = this.controller.getVisualSelection();
 		if (!selection || text.length === 0) return decorated;
 
-		const source = this.getText();
-		const chunkStart = source.indexOf(text, this.decorationSearchOffset);
-		if (chunkStart < 0) return decorated;
-		this.decorationSearchOffset = chunkStart + text.length;
-		const chunkEnd = chunkStart + text.length;
+		const lines = this.getLines();
+		let chunkStart = context.startCol;
+		for (let line = 0; line < context.line; line++) {
+			chunkStart += (lines[line]?.length ?? 0) + 1;
+		}
+		const chunkEnd = chunkStart + context.endCol - context.startCol;
 		const start = Math.max(selection.start, chunkStart);
 		const end = Math.min(selection.end, chunkEnd);
 		if (start >= end) return decorated;
@@ -270,10 +253,5 @@ export class VimEditor extends CustomEditor {
 			Math.max(0, visibleWidth(decorated) - endColumn),
 		);
 		return `${before}\x1b[4m${selected}\x1b[24m${after}`;
-	}
-
-	override render(width: number): readonly string[] {
-		this.decorationSearchOffset = 0;
-		return super.render(width);
 	}
 }

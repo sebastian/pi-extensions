@@ -7,6 +7,7 @@ const REAPPLY_EDITOR_DELAYS_MS = [25, 100, 250] as const;
 export default function vimModeExtension(omp: ExtensionAPI): void {
 	let activationId = 0;
 	let cancelPendingTimers: Array<() => void> = [];
+	let clearModeStatus = (): void => {};
 
 	const emitMode = (mode: VimMode): void => {
 		omp.events.emit("vim-mode:mode", { mode });
@@ -20,15 +21,20 @@ export default function vimModeExtension(omp: ExtensionAPI): void {
 	omp.on("session_start", (_event, ctx) => {
 		activationId += 1;
 		const sessionActivationId = activationId;
+		clearModeStatus();
 		clearPendingTimers();
 		if (!ctx.hasUI) return;
+		clearModeStatus = () => ctx.ui.setStatus("vim-mode", undefined);
 
 		const applyEditor = (): void => {
 			if (sessionActivationId !== activationId) return;
 			ctx.ui.setEditorComponent(
 				(tui, theme, keybindings) =>
 					new VimEditor(tui, theme, keybindings, {
-						onModeChange: emitMode,
+						onModeChange: (mode) => {
+							emitMode(mode);
+							ctx.ui.setStatus("vim-mode", `vim: ${mode}`);
+						},
 						hasPendingMessages: () => ctx.hasPendingMessages(),
 					}),
 			);
@@ -43,6 +49,8 @@ export default function vimModeExtension(omp: ExtensionAPI): void {
 
 	omp.on("session_shutdown", () => {
 		activationId += 1;
+		clearModeStatus();
+		clearModeStatus = (): void => {};
 		clearPendingTimers();
 	});
 }

@@ -4,10 +4,10 @@ import type { KeybindingsManager } from "@oh-my-pi/pi-coding-agent";
 import {
 	CURSOR_MARKER,
 	type EditorTheme,
-	Key,
 	type TUI,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
+import vimModeExtension from "../index.ts";
 import { VimEditor } from "../vim-editor.ts";
 
 const box = {
@@ -39,10 +39,15 @@ const theme = {
 	},
 } as unknown as EditorTheme;
 
-function createEditor(): VimEditor {
-	const editor = new VimEditor({} as TUI, theme, {
-		matches: () => false,
-	} as unknown as KeybindingsManager);
+function createEditor(onModeChange?: (mode: string) => void): VimEditor {
+	const editor = new VimEditor(
+		{} as TUI,
+		theme,
+		{
+			matches: () => false,
+		} as unknown as KeybindingsManager,
+		{ onModeChange },
+	);
 	editor.focused = true;
 	editor.setTopBorderProvider((width) => ({
 		content: "status".slice(0, width),
@@ -53,7 +58,7 @@ function createEditor(): VimEditor {
 
 function assertEndVisible(editor: VimEditor): void {
 	const rendered = editor.render(20);
-	assert.ok(rendered.some((line) => line.includes("jklm")));
+	assert.ok(rendered.some((line) => line.includes("jkl")));
 	assert.ok(rendered.some((line) => line.includes(CURSOR_MARKER)));
 	const rowWidths = rendered.map((line) =>
 		visibleWidth(line.replaceAll(CURSOR_MARKER, "")),
@@ -61,11 +66,74 @@ function assertEndVisible(editor: VimEditor): void {
 	assert.ok(rowWidths.every((width) => width <= 20), JSON.stringify(rowWidths));
 }
 
-test("mode label keeps the end of input visible in insert and normal modes", () => {
-	const editor = createEditor();
-	editor.setText("abcdefghijklm");
-	assertEndVisible(editor);
+test("input stays visible across OMP 18 composer shapes", () => {
+	for (const style of ["box", "band", "rule", "borderless"] as const) {
+		const modes: string[] = [];
+		const editor = createEditor((mode) => modes.push(mode));
+		editor.setBorderStyle(style);
+		editor.setText("abcdefghijklm");
+		assertEndVisible(editor);
 
-	editor.handleInput(Key.escape);
-	assertEndVisible(editor);
+		editor.handleInput("\x1b");
+		assertEndVisible(editor);
+		assert.deepEqual(modes, ["insert", "normal"], style);
+	}
+});
+
+test("visual decoration uses context for repeated out-of-order chunks", () => {
+	const editor = createEditor();
+	editor.setText("same same");
+	editor.handleInput("\x1b");
+	editor.handleInput("0");
+	for (let index = 0; index < 5; index++) editor.handleInput("l");
+	editor.handleInput("v");
+	for (let index = 0; index < 3; index++) editor.handleInput("l");
+
+	assert.match(
+		editor.decorateText?.("same", { line: 0, startCol: 5, endCol: 9 }) ?? "",
+		/\x1b\[4m/u,
+	);
+	assert.doesNotMatch(
+		editor.decorateText?.("same", { line: 0, startCol: 0, endCol: 4 }) ?? "",
+		/\x1b\[4m/u,
+	);
+});
+
+test("publishes mode through the native OMP status surface", () => {
+	const handlers = new Map<string, (event: unknown, context: never) => void>();
+	const statuses: Array<string | undefined> = [];
+	let editor: VimEditor | undefined;
+	vimModeExtension({
+		on: (name: string, handler: (event: unknown, context: never) => void) =>
+			handlers.set(name, handler),
+		events: { emit: () => {} },
+	} as never);
+	const context = {
+		hasUI: true,
+		hasPendingMessages: () => false,
+		setTimeout: () => 0,
+		clearTimer: () => {},
+		ui: {
+			setStatus: (_key: string, text: string | undefined) =>
+				statuses.push(text),
+			setEditorComponent: (
+				factory: (
+					tui: TUI,
+					editorTheme: EditorTheme,
+					keybindings: KeybindingsManager,
+				) => VimEditor,
+			) => {
+				editor = factory(
+					{} as TUI,
+					theme,
+					{ matches: () => false } as unknown as KeybindingsManager,
+				);
+			},
+		},
+	};
+
+	handlers.get("session_start")?.({}, context as never);
+	assert.equal(statuses.at(-1), "vim: insert");
+	editor?.handleInput("\x1b");
+	assert.equal(statuses.at(-1), "vim: normal");
 });
