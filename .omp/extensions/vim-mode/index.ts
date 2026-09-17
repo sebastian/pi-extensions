@@ -31,10 +31,9 @@ export default function vimModeExtension(omp: ExtensionAPI): void {
 			ctx.ui.setEditorComponent(
 				(tui, theme, keybindings) =>
 					new VimEditor(tui, theme, keybindings, {
-						onModeChange: (mode) => {
-							emitMode(mode);
-							ctx.ui.setStatus("vim-mode", `vim: ${mode}`);
-						},
+						onModeChange: emitMode,
+						onStatusChange: (status) =>
+							ctx.ui.setStatus("vim-mode", `vim: ${status}`),
 						hasPendingMessages: () => ctx.hasPendingMessages(),
 					}),
 			);

@@ -24,6 +24,7 @@ import { VimController } from "./vim-controller.ts";
 
 interface VimEditorOptions {
 	onModeChange?: (mode: VimMode) => void;
+	onStatusChange?: (status: string) => void;
 	hasPendingMessages?: () => boolean;
 }
 
@@ -34,6 +35,7 @@ export class VimEditor extends CustomEditor {
 	private readonly buffer: OmpEditorBufferAdapter;
 	private readonly controller: VimController;
 	private readonly onModeChange?: (mode: VimMode) => void;
+	private readonly onStatusChange?: (status: string) => void;
 	private readonly hasPendingMessages?: () => boolean;
 	private lastInsertEscapeAt = 0;
 	private readonly insertEscapeRecoveryWindowMs = 180;
@@ -49,6 +51,7 @@ export class VimEditor extends CustomEditor {
 		this.buffer = new OmpEditorBufferAdapter(this);
 		this.controller = new VimController(this.buffer, { initialMode: "insert" });
 		this.onModeChange = options?.onModeChange;
+		this.onStatusChange = options?.onStatusChange;
 		this.hasPendingMessages = options?.hasPendingMessages;
 
 		const decorateOmpText = this.decorateText;
@@ -60,6 +63,11 @@ export class VimEditor extends CustomEditor {
 			);
 		this.buffer.beginInsertSession();
 		this.onModeChange?.(this.controller.getMode());
+		this.notifyStatusChange();
+	}
+
+	override setVimMode(_enabled: boolean): void {
+		super.setVimMode(false);
 	}
 
 	override handleInput(data: string): void {
@@ -69,6 +77,7 @@ export class VimEditor extends CustomEditor {
 		} finally {
 			const nextMode = this.controller.getMode();
 			if (nextMode !== previousMode) this.onModeChange?.(nextMode);
+			this.notifyStatusChange();
 		}
 	}
 
@@ -215,6 +224,10 @@ export class VimEditor extends CustomEditor {
 	private handleNormalMotion(key: string): void {
 		this.controller.handleNormalKey(key);
 		this.requestRender();
+	}
+
+	private notifyStatusChange(): void {
+		this.onStatusChange?.(this.controller.getStatusLabel().trim());
 	}
 
 	private requestRender(): void {

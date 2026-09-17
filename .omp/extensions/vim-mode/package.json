@@ -1,6 +1,6 @@
 {
   "name": "vim-mode-omp-package",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "A capable Vim-style modal editor for Oh My Pi.",
   "type": "module",
   "keywords": [

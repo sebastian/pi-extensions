@@ -1000,6 +1000,8 @@ export class VimController {
 		];
 		if (this.countBuffer) pieces.push(this.countBuffer);
 		if (this.pendingOperator) {
+			if (this.pendingOperator.count > 1)
+				pieces.push(String(this.pendingOperator.count));
 			pieces.push(this.pendingOperator.key);
 			if (this.pendingOperator.motionCountBuffer)
 				pieces.push(this.pendingOperator.motionCountBuffer);

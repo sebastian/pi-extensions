@@ -39,14 +39,17 @@ const theme = {
 	},
 } as unknown as EditorTheme;
 
-function createEditor(onModeChange?: (mode: string) => void): VimEditor {
+function createEditor(
+	onModeChange?: (mode: string) => void,
+	onStatusChange?: (status: string) => void,
+): VimEditor {
 	const editor = new VimEditor(
 		{} as TUI,
 		theme,
 		{
 			matches: () => false,
 		} as unknown as KeybindingsManager,
-		{ onModeChange },
+		{ onModeChange, onStatusChange },
 	);
 	editor.focused = true;
 	editor.setTopBorderProvider((width) => ({
@@ -99,6 +102,15 @@ test("visual decoration uses context for repeated out-of-order chunks", () => {
 	);
 });
 
+test("keeps OMP's built-in modal layer disabled", () => {
+	const statuses: string[] = [];
+	const editor = createEditor(undefined, (status) => statuses.push(status));
+	editor.setVimMode(true);
+	assert.equal(editor.vimEnabled, false);
+	editor.handleInput("\x1b");
+	assert.equal(statuses.at(-1), "NORMAL");
+});
+
 test("publishes mode through the native OMP status surface", () => {
 	const handlers = new Map<string, (event: unknown, context: never) => void>();
 	const statuses: Array<string | undefined> = [];
@@ -133,7 +145,10 @@ test("publishes mode through the native OMP status surface", () => {
 	};
 
 	handlers.get("session_start")?.({}, context as never);
-	assert.equal(statuses.at(-1), "vim: insert");
+	assert.equal(statuses.at(-1), "vim: INSERT");
 	editor?.handleInput("\x1b");
-	assert.equal(statuses.at(-1), "vim: normal");
+	assert.equal(statuses.at(-1), "vim: NORMAL");
+	editor?.handleInput("2");
+	editor?.handleInput("d");
+	assert.equal(statuses.at(-1), "vim: NORMAL 2 d");
 });
