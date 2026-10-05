@@ -22,6 +22,19 @@ I maintain this repo for my own workflows and experiments.
 - `.pi/extensions/vim-mode/` — a much more capable vim-style modal editor for pi, with multiline visual selections, counts, Unicode-aware word motions, find/till motions, operator-pending `d`/`c`/`y`, linewise commands, paste, joins, and a stronger normal-mode editing surface
 - `.pi/extensions/zai-coding-plan/` — an enhancer for pi's built-in `zai/*` provider that keeps the live quota indicator, less-sycophantic GLM-5.1/5.2 prompt nudge, and conservative ~100k context window without registering custom models
 
+## OMP Ponytail setup
+
+Add this checkout's absolute source directory to the existing `extensions` array in `~/.omp/agent/config.yml`, preserving any other entries:
+
+```yaml
+extensions:
+  - /Users/sebastian/Code/pi-extensions/.omp/extensions/ponytail
+```
+
+Adjust the path to your checkout. Use the source path directly, not `omp plugin link`: OMP deduplicates entry paths, not symlink aliases, so linking this package globally also loads it a second time inside this repository.
+
+Restart OMP. Ponytail defaults to `full` in new sessions and automatically loads in task/eval children, including custom agents. `/ponytail status` shows the current and default modes; `/ponytail full` re-enables a resumed session that previously saved `off`. `/ponytail default full` persists the default; `PONYTAIL_DEFAULT_MODE` takes precedence if set.
+
 ## OMP judge setup
 
 Export `CLOUDFLARE_WORKERS_AI_API_KEY` and `TYPESAFE_JEV` in the shell that launches OMP, then link the provider globally:
