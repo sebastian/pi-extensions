@@ -30,6 +30,11 @@ test("resolveZaiAuthToken falls back to the built-in z.ai env key", () => {
 	assert.equal(resolveZaiAuthToken({ provider: "zai" }, { apiKey: "configured-token" }, { ZAI_API_KEY: "env-token" }), "configured-token");
 });
 
+test("resolveZaiAuthToken tolerates null header deletion markers", () => {
+	assert.equal(resolveZaiAuthToken({ provider: "zai" }, { headers: { Authorization: null, "x-api-key": "header-token" } }, {}), "header-token");
+	assert.equal(resolveZaiAuthToken({ provider: "zai" }, { headers: { Authorization: null } }, {}), null);
+});
+
 test("parseZaiQuotaSnapshot extracts 5-hour and 7-day limits and ignores monthly MCP entries", () => {
 	const snapshot = parseZaiQuotaSnapshot({
 		data: {

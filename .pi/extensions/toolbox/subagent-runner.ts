@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { access, readdir } from "node:fs/promises";
 import { type Dirent, existsSync } from "node:fs";
 import { basename, resolve } from "node:path";
-import type { Message, TextContent } from "@earendil-works/pi-ai/compat";
+import type { Message, TextContent } from "@earendil-works/pi-ai";
 
 export interface SubagentInvocation {
 	cwd: string;
@@ -147,7 +147,7 @@ export function buildSubagentArgs(invocation: SubagentInvocation): string[] {
 	for (const file of invocation.files ?? []) {
 		args.push(`@${resolve(file)}`);
 	}
-	args.push(invocation.prompt);
+	args.push("--", invocation.prompt);
 	return args;
 }
 

@@ -269,7 +269,8 @@ function createUsageTracker() {
 
 	function start(ctx: ExtensionContext): void {
 		clearTimers();
-		state.active = true;
+		state.active = ctx.mode === "tui";
+		if (!state.active) return;
 		syncStatus(ctx);
 		if (!ctx.hasUI) return;
 		state.intervalHandle = setInterval(() => void refresh(ctx), ZAI_USAGE_REFRESH_INTERVAL_MS);
@@ -290,8 +291,8 @@ function createUsageTracker() {
 export default function zaiCodingPlan(pi: ExtensionAPI): void {
 	pi.on("before_agent_start", async (event, ctx) => {
 		applyConservativeZaiContextWindows(ctx);
-		if (!isTunedBuiltInZaiModel(ctx.model)) return undefined;
-		return { systemPrompt: event.systemPrompt ? `${event.systemPrompt}\n\n${GLM_5_REIN_IN_PROMPT}` : GLM_5_REIN_IN_PROMPT };
+		if (isTunedBuiltInZaiModel(ctx.model)) event.systemPromptOptions.sections.zai_guidance = GLM_5_REIN_IN_PROMPT;
+		else delete event.systemPromptOptions.sections.zai_guidance;
 	});
 
 	const usageTracker = createUsageTracker();

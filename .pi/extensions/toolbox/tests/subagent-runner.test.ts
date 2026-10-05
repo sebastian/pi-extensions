@@ -18,6 +18,11 @@ test("buildSubagentArgs disables extension discovery by default", () => {
 	assert.ok(!args.includes("-e"));
 });
 
+test("buildSubagentArgs treats dash-prefixed prompts as input, not CLI options", () => {
+	const args = buildSubagentArgs({ cwd: "/repo", systemPrompt: "", prompt: "--review this change" });
+	assert.deepEqual(args.slice(-2), ["--", "--review this change"]);
+});
+
 test("buildSubagentArgs can name JSON-mode startup sessions", () => {
 	const args = buildSubagentArgs({
 		cwd: "/repo",

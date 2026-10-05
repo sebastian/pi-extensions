@@ -30,6 +30,7 @@ function createPiStub() {
 
 function createUsageCtx(overrides: Record<string, unknown> = {}) {
 	return {
+		mode: "tui",
 		hasUI: true,
 		model: { provider: ZAI_PROVIDER_ID, id: "glm-5.1", baseUrl: ZAI_CODING_PLAN_BASE_URL, reasoning: true, contextWindow: 200_000 },
 		ui: {
@@ -80,37 +81,55 @@ test("built-in zai/glm-5.1 gets concise and less-sycophantic prompt nudging plus
 	zaiCodingPlan(pi as never);
 
 	const model = { provider: ZAI_PROVIDER_ID, id: "glm-5.1", contextWindow: 200_000 };
-	const [handler] = getHandlers<(event: { systemPrompt: string }, ctx: { model?: typeof model }) => Promise<{ systemPrompt: string } | undefined>>("before_agent_start");
-	const result = await handler({ systemPrompt: "Base instructions" }, { model });
+	const [handler] = getHandlers<Function>("before_agent_start");
+	const sections: Record<string, string> = { existing: "Base instructions" };
+	assert.equal(await handler({ systemPromptOptions: { sections } }, { model }), undefined);
 
-	assert.ok(result);
 	assert.equal(model.contextWindow, GLM_5_EFFECTIVE_CONTEXT_WINDOW);
-	assert.ok(result.systemPrompt.startsWith("Base instructions\n\n- Be concise, direct, and matter-of-fact."));
-	assert.match(result.systemPrompt, /Do not be flattering, sycophantic, or overly eager to please\./);
+	assert.equal(sections.existing, "Base instructions");
+	assert.match(sections.zai_guidance, /Be concise, direct, and matter-of-fact\./);
+	assert.match(sections.zai_guidance, /Do not be flattering, sycophantic, or overly eager to please\./);
 });
 
 test("built-in zai/glm-5.2 gets the same prompt nudge as 5.1", async () => {
 	const { pi, getHandlers } = createPiStub();
 	zaiCodingPlan(pi as never);
 
-	const [handler] = getHandlers<(event: { systemPrompt: string }, ctx: { model?: { provider?: string; id?: string; contextWindow?: number } }) => Promise<{ systemPrompt: string } | undefined>>("before_agent_start");
-	const result = await handler({ systemPrompt: "Base instructions" }, { model: { provider: ZAI_PROVIDER_ID, id: "glm-5.2", contextWindow: 1_000_000 } });
-	assert.ok(result);
-	assert.ok(result.systemPrompt.includes("Do not be flattering, sycophantic, or overly eager to please."));
+	const [handler] = getHandlers<Function>("before_agent_start");
+	const sections: Record<string, string> = {};
+	await handler({ systemPromptOptions: { sections } }, { model: { provider: ZAI_PROVIDER_ID, id: "glm-5.2", contextWindow: 1_000_000 } });
+	assert.match(sections.zai_guidance, /Do not be flattering, sycophantic, or overly eager to please\./);
 });
 
 test("non-tuned models are left unchanged", async () => {
 	const { pi, getHandlers } = createPiStub();
 	zaiCodingPlan(pi as never);
 
-	const [handler] = getHandlers<(event: { systemPrompt: string }, ctx: { model?: { provider?: string; id?: string; contextWindow?: number } }) => Promise<{ systemPrompt: string } | undefined>>("before_agent_start");
-	assert.equal(await handler({ systemPrompt: "Base instructions" }, { model: { provider: ZAI_PROVIDER_ID, id: "glm-5-turbo", contextWindow: 200_000 } }), undefined);
-	assert.equal(await handler({ systemPrompt: "Base instructions" }, { model: { provider: "other-provider", id: "glm-5.1", contextWindow: 200_000 } }), undefined);
+	const [handler] = getHandlers<Function>("before_agent_start");
+	const sections: Record<string, string> = { existing: "Base instructions", zai_guidance: "Previous Z.AI nudge" };
+	assert.equal(await handler({ systemPromptOptions: { sections } }, { model: { provider: ZAI_PROVIDER_ID, id: "glm-5-turbo", contextWindow: 200_000 } }), undefined);
+	assert.deepEqual(sections, { existing: "Base instructions" });
+	assert.equal(await handler({ systemPromptOptions: { sections } }, { model: { provider: "other-provider", id: "glm-5.1", contextWindow: 200_000 } }), undefined);
+	assert.deepEqual(sections, { existing: "Base instructions" });
 });
 
 test("hasUsageError accepts successful live quota payloads that use code 200", () => {
 	assert.equal(hasUsageError({ code: 200, msg: "Operation successful", success: true }), false);
 	assert.equal(hasUsageError({ code: 1001, msg: "Authentication parameter not received", success: false }), true);
+});
+
+test("RPC dialog support does not start quota polling", async () => {
+	const { pi, getHandlers } = createPiStub();
+	zaiCodingPlan(pi as never);
+	let authCalls = 0;
+	const ctx = createUsageCtx({ mode: "rpc", modelRegistry: { async getApiKeyAndHeaders() { authCalls++; return { ok: false }; } } });
+	try {
+		await getHandlers<Function>("session_start")[0]({}, ctx);
+		assert.equal(authCalls, 0);
+		assert.equal(ctx.model.contextWindow, GLM_5_EFFECTIVE_CONTEXT_WINDOW);
+	} finally {
+		await getHandlers<Function>("session_shutdown")[0]({}, ctx);
+	}
 });
 
 test("usage tracker uses status only, clamps official GLM context, and clears it on shutdown", async () => {

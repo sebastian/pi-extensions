@@ -9,7 +9,7 @@ I maintain this repo for my own workflows and experiments.
 - Feel free to use, copy, adapt, and learn from anything here.
 - I am **not** looking for external contributions, feature requests, or maintenance help on this repo.
 - If something here is useful to you, great — please treat it as a freely available personal toolbox.
-- The pi packages track pi's current runtime floor, currently target pi `0.83.x`, and declare Node.js `>=22.19.0`; OMP packages target the current OMP extension API and Bun `>=1.3.14`.
+- The pi packages track pi's current runtime floor, currently target pi `1.0.x`, and declare Node.js `>=22.19.0`; OMP packages target the current OMP extension API and Bun `>=1.3.14`.
 
 ## Current contents
 

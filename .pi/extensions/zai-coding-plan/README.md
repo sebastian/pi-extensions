@@ -5,12 +5,12 @@ Enhances pi's built-in `zai/*` provider instead of registering a custom provider
 Use pi's official model IDs, for example:
 
 - `zai/glm-5.2`
-- `zai/glm-5.1`
+- `zai/glm-5.1` (legacy, if your catalog still exposes it)
 
 ## What this package still does
 
 - Shows a compact live Z.AI quota indicator in the interactive status line.
-- Adds a small per-turn system-prompt nudge for `zai/glm-5.1` and `zai/glm-5.2` to be concise, direct, and less sycophantic.
+- Adds a structured `zai_guidance` prompt section for `zai/glm-5.1` and `zai/glm-5.2` to be concise, direct, and less sycophantic, without replacing pi's system prompt.
 - Clamps the active `zai/glm-5.1` and `zai/glm-5.2` `contextWindow` to `116384`, so pi compacts around ~100k prompt tokens instead of riding the much larger advertised window.
 
 ## What this package no longer does

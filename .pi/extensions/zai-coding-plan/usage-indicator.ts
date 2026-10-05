@@ -1,4 +1,4 @@
-import type { Model } from "@earendil-works/pi-ai/compat";
+import type { Model } from "@earendil-works/pi-ai";
 
 export interface ZaiQuotaWindow {
 	kind: "5h" | "7d" | "unknown";
@@ -99,7 +99,7 @@ export function getZaiUsageKey(model: Pick<Model<any>, "provider" | "baseUrl">):
 
 export function extractZaiAuthToken(resolvedAuth: {
 	apiKey?: string;
-	headers?: Record<string, string>;
+	headers?: Record<string, string | null>;
 }): string | null {
 	if (typeof resolvedAuth.apiKey === "string" && resolvedAuth.apiKey.trim()) {
 		return resolvedAuth.apiKey.trim();
@@ -122,7 +122,7 @@ export function resolveZaiAuthToken(
 	model: Pick<Model<any>, "provider">,
 	resolvedAuth: {
 		apiKey?: string;
-		headers?: Record<string, string>;
+		headers?: Record<string, string | null>;
 		env?: Record<string, string | undefined>;
 	},
 	env: Record<string, string | undefined> = process.env,

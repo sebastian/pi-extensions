@@ -25,14 +25,26 @@ Messages without a directive inherit the current default. If you queue `:low tas
 
 Reasoning-level autocomplete opens for slash, colon, and bracket directive forms on current pi versions.
 
-The extension follows pi's model-level `thinkingLevelMap` metadata, so GLM/Z.AI-style boolean thinking models clamp choices to the closest supported level. Anthropic-compatible adaptive thinking follows pi's `compat.forceAdaptiveThinking` metadata for built-in models, custom providers, and aliases, with family detection for Bedrock models such as Claude Opus 5.
+Targets pi 1.0.x. The extension follows pi's model-level `thinkingLevelMap` metadata and sets the level when each user message starts. Pi's native request preparation handles provider effort mappings, adaptive thinking, chat-template controls, and `samplingParamsByThinkingLevel`; this extension does not rewrite provider payloads.
 
 ## Notes
 
 - Directives are stripped before the message is sent to the model.
 - If the selected model cannot use a requested level, the extension applies the closest supported level instead. Extended `xhigh` and `max` levels are offered only when model metadata maps them explicitly.
-- The rewriter leaves pi 0.79.9+ `chat-template` models untouched: pi-ai already resolves their `chat_template_kwargs` from the active thinking level, so this extension does not overwrite those kwargs with the qwen-style shape.
+- Equivalent effort aliases remain selectable when `samplingParamsByThinkingLevel` can distinguish them.
 - The extension uses pi's `InputEvent.streamingBehavior` metadata to distinguish idle prompts from mid-stream steering and follow-up messages, so queued directives do not change the active in-flight provider request.
-- The extension tracks queued messages in order, drops stale metadata when Pi's queue is restored for editing, and rewrites provider requests so steering messages inside an active agent run can still use their queued reasoning level.
+- The extension tracks queued messages in order and drops stale metadata when Pi's queue is restored for editing. Pi refreshes native request options after each queued message starts.
 - Model changes made while the agent is working are deferred until the queued message starts, so the in-flight request keeps its original model and reasoning payload shape.
 - The status line shows the current inherited default as `reasoning:<level>` and stays in sync with pi's built-in thinking-level controls.
+
+## Checks
+
+```sh
+node --test ./tests/*.test.ts
+```
+
+To also run the native-runtime regression with an installed pi package (mocked provider fetch, no network requests):
+
+```sh
+PI_TEST_CODING_AGENT="$(npm root -g)/@earendil-works/pi-coding-agent" node --test ./tests/*.test.ts
+```
