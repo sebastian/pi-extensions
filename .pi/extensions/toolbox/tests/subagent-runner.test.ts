@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { getEventListeners } from "node:events";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -69,6 +70,38 @@ test("buildSubagentArgs can approve trusted project-local inputs for non-interac
 	assert.ok(!args.includes("--no-extensions"));
 });
 
+test("workers can retain skills without implicitly granting project trust", () => {
+	const args = buildSubagentArgs({ cwd: "/repo", systemPrompt: "", prompt: "task", loadSkills: true, approveProject: false });
+	assert.ok(!args.includes("--no-skills"));
+	assert.ok(args.includes("--no-approve"));
+	assert.ok(!args.includes("--approve"));
+});
+
+test("runSubagent rejects pre-aborted work without spawning", async () => {
+	await assert.rejects(runSubagent({ cwd: "/missing-directory", systemPrompt: "", prompt: "task", signal: AbortSignal.abort(new Error("already aborted")) }), /already aborted/);
+});
+
+test("runSubagent escalates ignored SIGTERM and releases its abort listener", { timeout: 12_000 }, async () => {
+	const root = await mkdtemp(join(tmpdir(), "toolbox-subagent-cancel-"));
+	const previousArgv1 = process.argv[1];
+	const controller = new AbortController();
+	let pid: number | undefined;
+	try {
+		const fakePi = join(root, "fake-pi.mjs");
+		await writeFile(fakePi, 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000); console.log(JSON.stringify({ type: "tool_execution_start", toolName: "ready", args: { pid: process.pid } }));\n');
+		process.argv[1] = fakePi;
+		await assert.rejects(runSubagent({
+			cwd: root, systemPrompt: "", prompt: "task", signal: controller.signal,
+			onEvent: (event) => { if (event.type === "tool") { pid = (event.args as { pid: number }).pid; controller.abort(); } },
+		}), /aborted/);
+		assert.equal(getEventListeners(controller.signal, "abort").length, 0);
+	} finally {
+		if (pid) { try { process.kill(pid, "SIGKILL"); } catch {} }
+		process.argv[1] = previousArgv1;
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
 test("runSubagent treats retrying agent_end events as non-final", async () => {
 	const root = await mkdtemp(join(tmpdir(), "toolbox-subagent-runner-retry-"));
 	const previousArgv1 = process.argv[1];
@@ -92,10 +125,12 @@ test("runSubagent treats retrying agent_end events as non-final", async () => {
 
 		process.argv[1] = fakePi;
 		const events: Array<{ type: string; message?: string }> = [];
+		const controller = new AbortController();
 		const result = await runSubagent({
 			cwd: root,
 			systemPrompt: "",
 			prompt: "ignored",
+			signal: controller.signal,
 			onEvent: (event) => events.push(event),
 		});
 
@@ -110,6 +145,7 @@ test("runSubagent treats retrying agent_end events as non-final", async () => {
 		);
 		assert.equal(result.usage.turns, 2);
 		assert.equal(result.usage.totalTokens, 7);
+		assert.equal(getEventListeners(controller.signal, "abort").length, 0);
 	} finally {
 		process.argv[1] = previousArgv1;
 		await rm(root, { recursive: true, force: true });

@@ -1,7 +1,7 @@
 {
   "name": "toolbox-pi-package",
-  "version": "0.4.9",
-  "description": "Small pi toolbox package with provider rate-limit handling and the /review command.",
+  "version": "0.5.0",
+  "description": "Pi toolbox with /review, opt-in task orchestration, and provider rate-limit handling.",
   "type": "module",
   "keywords": [
     "pi-package"
@@ -11,6 +11,8 @@
     "guidance.ts",
     "index.ts",
     "models.ts",
+    "orchestration.ts",
+    "work-queue.ts",
     "rate-limit.ts",
     "repo.ts",
     "review-progress.ts",
@@ -26,7 +28,8 @@
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
   },
   "scripts": {
     "build": "echo 'No build step required'",

@@ -14,6 +14,9 @@ export interface SubagentInvocation {
 	thinkingLevel?: string;
 	name?: string;
 	loadExtensions?: boolean;
+	loadSkills?: boolean;
+	ipc?: boolean;
+	env?: NodeJS.ProcessEnv;
 	approveProject?: boolean;
 	extensions?: string[];
 	signal?: AbortSignal;
@@ -50,7 +53,7 @@ export interface SubagentRunResult {
 
 function getPiInvocation(args: string[]): { command: string; args: string[] } {
 	const currentScript = process.argv[1];
-	if (currentScript && existsSync(currentScript)) {
+	if (currentScript && !currentScript.startsWith("/$bunfs/root/") && existsSync(currentScript)) {
 		return { command: process.execPath, args: [currentScript, ...args] };
 	}
 
@@ -128,13 +131,14 @@ export function buildSubagentArgs(invocation: SubagentInvocation): string[] {
 	const sessionName = invocation.name?.trim();
 	if (sessionName) args.push("--name", sessionName);
 
-	if (invocation.approveProject) args.push("--approve");
+	if (invocation.approveProject !== undefined) args.push(invocation.approveProject ? "--approve" : "--no-approve");
 	if (!invocation.loadExtensions) args.push("--no-extensions");
 	for (const extension of uniqueStrings(invocation.extensions ?? [])) {
 		args.push("-e", resolve(extension));
 	}
 
-	args.push("--no-skills", "--no-prompt-templates", "--no-themes");
+	if (!invocation.loadSkills) args.push("--no-skills");
+	args.push("--no-prompt-templates", "--no-themes");
 
 	if (invocation.model) args.push("--model", invocation.model);
 	if (invocation.thinkingLevel) args.push("--thinking", invocation.thinkingLevel);
@@ -222,14 +226,16 @@ export function addSubagentUsageTotals(total: SubagentUsageTotals, delta: Subage
 }
 
 export async function runSubagent(invocation: SubagentInvocation): Promise<SubagentRunResult> {
+	invocation.signal?.throwIfAborted();
 	const args = buildSubagentArgs(invocation);
 	const spawned = getPiInvocation(args);
 
 	return await new Promise<SubagentRunResult>((resolvePromise, rejectPromise) => {
 		const proc = spawn(spawned.command, spawned.args, {
 			cwd: invocation.cwd,
+			env: { ...process.env, ...invocation.env },
 			shell: false,
-			stdio: ["ignore", "pipe", "pipe"],
+			stdio: invocation.ipc ? ["ignore", "pipe", "pipe", "ipc"] : ["ignore", "pipe", "pipe"],
 		});
 
 		let stdoutBuffer = "";
@@ -241,6 +247,19 @@ export async function runSubagent(invocation: SubagentInvocation): Promise<Subag
 		let errorMessage: string | undefined;
 		let usage = emptySubagentUsageTotals();
 		let aborted = false;
+		let killTimer: ReturnType<typeof setTimeout> | undefined;
+		const handleAbort = () => {
+			aborted = true;
+			// Pi's SIGTERM handler aborts tools and cleans up its tracked shell children.
+			proc.kill("SIGTERM");
+			killTimer = setTimeout(() => {
+				if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
+			}, 5_000);
+		};
+		const cleanup = () => {
+			if (killTimer) clearTimeout(killTimer);
+			invocation.signal?.removeEventListener("abort", handleAbort);
+		};
 
 		const processEvent = (event: Record<string, unknown>) => {
 			switch (event.type) {
@@ -298,7 +317,7 @@ export async function runSubagent(invocation: SubagentInvocation): Promise<Subag
 			}
 		};
 
-		proc.stdout.on("data", (chunk) => {
+		proc.stdout!.on("data", (chunk) => {
 			stdoutBuffer += chunk.toString();
 			const lines = stdoutBuffer.split(/\r?\n/);
 			stdoutBuffer = lines.pop() ?? "";
@@ -308,16 +327,18 @@ export async function runSubagent(invocation: SubagentInvocation): Promise<Subag
 			}
 		});
 
-		proc.stderr.on("data", (chunk) => {
+		proc.stderr!.on("data", (chunk) => {
 			stderr += chunk.toString();
 		});
 
 		proc.on("error", (error) => {
+			cleanup();
 			rejectPromise(error);
 		});
 
 		proc.on("close", (code) => {
-			exitCode = code ?? 0;
+			cleanup();
+			exitCode = code ?? 1;
 			if (stdoutBuffer.trim()) {
 				const event = parseEventLine(stdoutBuffer);
 				if (event) processEvent(event);
@@ -338,16 +359,7 @@ export async function runSubagent(invocation: SubagentInvocation): Promise<Subag
 			});
 		});
 
-		if (invocation.signal) {
-			const handleAbort = () => {
-				aborted = true;
-				proc.kill("SIGTERM");
-				setTimeout(() => {
-					if (!proc.killed) proc.kill("SIGKILL");
-				}, 5_000);
-			};
-			if (invocation.signal.aborted) handleAbort();
-			else invocation.signal.addEventListener("abort", handleAbort, { once: true });
-		}
+		if (invocation.signal?.aborted) handleAbort();
+		else invocation.signal?.addEventListener("abort", handleAbort, { once: true });
 	});
 }
