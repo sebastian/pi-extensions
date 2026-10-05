@@ -57,7 +57,7 @@ export default function registerOrchestration(pi: ExtensionAPI): void {
 			...unfinished.slice(0, 6).map((task) => `#${task.id} [${task.status}] ${task.title.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")}`),
 			...(unfinished.length > 6 ? [`… ${unfinished.length - 6} more; /tasks shows all`] : []),
 			...(queue.active && activity ? [activity] : []),
-			"/tasks [id] · /orchestra pause|start|cancel <id>",
+			"/tasks [id] · /orchestrate pause|start|cancel <id>",
 		]);
 	}
 	function schedule(): void {
@@ -134,7 +134,7 @@ export default function registerOrchestration(pi: ExtensionAPI): void {
 	function requireQueue(): void {
 		if (loadError) throw new Error(loadError);
 		if (ctx.mode !== "tui" && ctx.mode !== "rpc") throw new Error("Orchestration needs an interactive or RPC session, not a one-shot process");
-		if (!queue.state.enabled) throw new Error("Enable supervisor mode with /orchestra first");
+		if (!queue.state.enabled) throw new Error("Enable supervisor mode with /orchestrate first");
 	}
 	function show(id?: number): void {
 		if (loadError) throw new Error(loadError);
@@ -168,9 +168,9 @@ export default function registerOrchestration(pi: ExtensionAPI): void {
 		},
 	});
 
-	const orchestraCommand = {
+	pi.registerCommand("orchestrate", {
 		description: "Enable supervisor mode; optional controls: off, start, pause, cancel <id>, retry <id>, status [id]",
-		handler: async (args: string, context: ExtensionContext) => {
+		handler: async (args, context) => {
 			ctx = context;
 			try {
 				if (loadError) throw new Error(loadError);
@@ -206,9 +206,7 @@ export default function registerOrchestration(pi: ExtensionAPI): void {
 				show();
 			} catch (error) { reportError(error); }
 		},
-	};
-	pi.registerCommand("orchestra", orchestraCommand);
-	pi.registerCommand("orchestrate", orchestraCommand);
+	});
 	pi.registerCommand("tasks", {
 		description: "Show the tracked work queue, or /tasks <id> for a report and acceptance checks",
 		handler: async (args, context) => {
@@ -238,7 +236,7 @@ export default function registerOrchestration(pi: ExtensionAPI): void {
 	});
 	pi.on("tool_call", (event) => {
 		if (queue.state.enabled && !SUPERVISOR_TOOLS.has(event.toolName)) {
-			return { block: true, reason: "Supervisor mode: delegate implementation and shell commands through work_queue. Use /orchestra off for direct work." };
+			return { block: true, reason: "Supervisor mode: delegate implementation and shell commands through work_queue. Use /orchestrate off for direct work." };
 		}
 	});
 	pi.on("agent_settled", (_event, context) => { ctx = context; schedule(); });
