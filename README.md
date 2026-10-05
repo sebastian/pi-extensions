@@ -60,14 +60,14 @@ Merge this routing into `~/.omp/agent/config.yml` without replacing other roles:
 
 ```yaml
 modelRoles:
-  judge: cloudflare-workers-ai/clef
+  judge: typesafe/jev-latest
 retry:
   fallbackChains:
     judge:
-      - typesafe/jev-latest
+      - cloudflare-workers-ai/clef
 ```
 
-Restart OMP to load the extension and exported keys. The extension owns an ephemeral loopback adapter between OMP's native Jev protocol and [Clef's Workers AI endpoint](https://developers.cloudflare.com/workers-ai/models/clef/); no separate service is needed. Quota/API failures fall through OMP's existing retry chain to Jev. This reacts to API errors, not a proactive free-credit balance check.
+Restart OMP to load the extension and exported keys. Jev is the primary judge; quota/API failures fall through OMP's existing retry chain to Clef. The extension owns an ephemeral loopback adapter between OMP's native Jev protocol and [Clef's Workers AI endpoint](https://developers.cloudflare.com/workers-ai/models/clef/); no separate service is needed. Fallback reacts to API errors, not a proactive free-credit balance check.
 
 My `default` role uses `openai-codex/gpt-6-astra:max` with `retry.fallbackChains.default: []` in `~/.omp/agent/config.yml`. Failed requests stop after normal retries instead of switching models; other role-specific fallback chains remain enabled. This controls request recovery, not OMP's separate startup selection if the configured model is absent from its catalog.
 
