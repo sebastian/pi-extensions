@@ -88,17 +88,20 @@ console.log(JSON.stringify({ type: "agent_end", messages: [message] }));
 		};
 		await session.prompt("Normal conversation");
 		assert.equal(payloads.at(-1)!.includes("conversational supervisor"), false);
-		await session.prompt("/orchestrate on");
+		await session.prompt("/orchestra");
 		assert.equal(state().enabled, true);
 		assert.deepEqual(session.getActiveToolNames().sort(), ["find", "grep", "ls", "read", "work_queue"]);
-		await session.prompt("/orchestrate pause");
+		await session.prompt("/orchestra");
+		assert.equal(state().enabled, true, "bare /orchestra enables rather than toggles");
+		assert.deepEqual(state().previousTools, originalTools, "repeated activation preserves normal tools");
+		await session.prompt("/orchestra pause");
 		for (const title of ["A", "B", "C"]) {
 			nextAction = { action: "add", title, request: `Implement ${title}`, acceptance: ["Check passes"] };
 			await session.prompt(`Add task ${title}`);
 		}
 		assert.equal((await trace()).length, 0);
 		assert.ok(payloads.at(-1)!.includes("conversational supervisor"));
-		await session.prompt("/orchestrate start");
+		await session.prompt("/orchestra start");
 		await until(async () => (await trace()).length === 1);
 		supervisorGate = Promise.withResolvers<void>();
 		nextAction = { action: "reorder", order: [3, 2] };

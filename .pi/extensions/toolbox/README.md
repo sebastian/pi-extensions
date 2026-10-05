@@ -13,7 +13,7 @@ Small pi toolbox package for `/review`, **opt-in per-session** task orchestratio
 
 ## Task orchestration (off by default)
 
-Run `/orchestrate on` in a session to make the foreground agent a supervisor.
+Run `/orchestra` in a session to make the foreground agent a supervisor—no `on` argument needed.
 Then talk normally:
 
 ```text
@@ -31,13 +31,15 @@ retry loops. Use `/tasks <id>` to inspect the evidence.
 
 | Command | Effect |
 |---|---|
-| `/orchestrate on` | Opt this session in; normal sessions remain unchanged |
+| `/orchestra` | Opt this session in; normal sessions remain unchanged |
 | `/tasks` / `/tasks <id>` | Show the queue or a task's report, validation and cost |
-| `/orchestrate pause` | Stop dispatching; let the active task finish |
-| `/orchestrate start` | Resume dispatch after resolving any blocked tasks |
-| `/orchestrate cancel <id>` | Explicitly cancel queued or active work; no rollback |
-| `/orchestrate retry <id>` | Requeue a stopped blocked/cancelled task; then use `start` |
-| `/orchestrate off` | Restore normal tools; finish/cancel active work first |
+| `/orchestra pause` | Stop dispatching; let the active task finish |
+| `/orchestra start` | Resume dispatch after resolving any blocked tasks |
+| `/orchestra cancel <id>` | Explicitly cancel queued or active work; no rollback |
+| `/orchestra retry <id>` | Requeue a stopped blocked/cancelled task; then use `start` |
+| `/orchestra off` | Restore normal tools; finish/cancel active work first |
+
+`/orchestrate` remains an alias, including the existing `/orchestrate on` form.
 
 Task state is stored in the session, not project files. Resuming or reloading keeps
 the queue **paused**, and interrupted work becomes blocked rather than silently

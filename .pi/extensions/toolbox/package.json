@@ -1,6 +1,6 @@
 {
   "name": "toolbox-pi-package",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Pi toolbox with /review, opt-in task orchestration, and provider rate-limit handling.",
   "type": "module",
   "keywords": [
