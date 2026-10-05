@@ -56,6 +56,8 @@ retry:
 
 Restart OMP to load the extension and exported keys. The extension owns an ephemeral loopback adapter between OMP's native Jev protocol and [Clef's Workers AI endpoint](https://developers.cloudflare.com/workers-ai/models/clef/); no separate service is needed. Quota/API failures fall through OMP's existing retry chain to Jev. This reacts to API errors, not a proactive free-credit balance check.
 
+My `default` role uses `openai-codex/gpt-6-astra:max` with `retry.fallbackChains.default: []` in `~/.omp/agent/config.yml`. Failed requests stop after normal retries instead of switching models; other role-specific fallback chains remain enabled. This controls request recovery, not OMP's separate startup selection if the configured model is absent from its catalog.
+
 My DeepSeek Flash roles use `opencode-go/deepseek-v4.1-flash` first and `deepseek/deepseek-flash` only as fallback, preserving each role's thinking level. Kimi K3 is absent from all configured roles and fallback chains; Kimi K2.7 is separate. OMP has no per-model hard denylist, so this does not prevent an explicit manual K3 selection.
 
 Adapter regression check:
