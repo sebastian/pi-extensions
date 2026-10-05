@@ -3,6 +3,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Type } from "typebox";
 import { fileURLToPath } from "node:url";
 import { emptyQueue, restoreQueue, WorkQueue, type QueueAction, type WorkTask } from "./work-queue.ts";
+import { renderQueueWidget, TaskFeedback } from "./orchestration-ui.ts";
 
 const STATE = "toolbox-work-queue-v1";
 const TOOL = "work_queue";
@@ -37,28 +38,39 @@ export default function registerOrchestration(pi: ExtensionAPI): void {
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	let loadError: string | undefined;
 	let persisted = false;
-	let activity = "";
+	const feedback = new TaskFeedback();
+	let recentDoneIds: number[] = [];
+	let refreshWidget: (() => void) | undefined;
 
 	function reportError(error: unknown): void {
 		ctx.ui.notify(`Orchestration: ${String(error)}`, "error");
 	}
 	function render(): void {
+		feedback.sync(ctx.mode === "tui" && queue.state.enabled && !queue.closed
+			? queue.state.tasks.find((task) => task.status === "running" || task.status === "validating") : undefined);
 		if (!ctx.hasUI) return;
-		if (!queue.state.enabled) {
+		if (!queue.state.enabled || queue.closed) {
 			ctx.ui.setWidget(STATE, undefined);
+			refreshWidget = undefined;
 			ctx.ui.setStatus(STATE, undefined);
 			return;
 		}
 		const tasks = queue.state.tasks;
-		const unfinished = tasks.filter((task) => !["done", "cancelled"].includes(task.status));
 		ctx.ui.setStatus(STATE, `tasks ${tasks.filter((task) => task.status === "done").length}/${tasks.length}${queue.state.paused ? " paused" : ""}`);
-		ctx.ui.setWidget(STATE, [
-			`Supervisor · ${queue.state.paused ? "paused (active work may finish)" : "one background worker"}`,
-			...unfinished.slice(0, 6).map((task) => `#${task.id} [${task.status}] ${task.title.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")}`),
-			...(unfinished.length > 6 ? [`… ${unfinished.length - 6} more; /tasks shows all`] : []),
-			...(queue.active && activity ? [activity] : []),
-			"/tasks [id] · /orchestrate pause|start|cancel <id>",
-		]);
+		if (ctx.mode !== "tui") {
+			ctx.ui.setWidget(STATE, renderQueueWidget(queue.state, feedback, 100, undefined, recentDoneIds));
+			return;
+		}
+		if (!refreshWidget) ctx.ui.setWidget(STATE, (tui) => {
+			const refresh = () => tui.requestRender(); // Pi coalesces/throttles renders; never await a child UI update.
+			refreshWidget = refresh;
+			return {
+				render: (width) => renderQueueWidget(queue.state, feedback, width, ctx.ui.theme, recentDoneIds),
+				invalidate() {}, // Stateless rendering also picks up theme changes and terminal resizes.
+				dispose() { if (refreshWidget === refresh) refreshWidget = undefined; },
+			};
+		}, { placement: "aboveEditor" });
+		refreshWidget?.();
 	}
 	function schedule(): void {
 		if (timer || queue.closed || loadError || !queue.state.enabled || queue.state.paused || queue.active || !queue.state.tasks.some((task) => task.status === "pending")) return;
@@ -70,15 +82,13 @@ export default function registerOrchestration(pi: ExtensionAPI): void {
 			if (!ctx.isIdle() || ctx.hasPendingMessages()) return;
 			try {
 				if (!ctx.model) throw new Error("Select a model before dispatching work");
-				activity = "Starting worker";
+				const dispatchedQueue = queue;
 				const work = queue.kick({
 					cwd: ctx.cwd, model: `${ctx.model.provider}/${ctx.model.id}`, thinkingLevel: pi.getThinkingLevel(),
 					approveProject: ctx.isProjectTrusted(), extensions: [fileURLToPath(import.meta.url)],
-					onEvent: (event) => {
-						if (event.type === "tool") {
-							activity = `Worker: ${event.toolName}`;
-							render();
-						}
+					onEvent: (event, taskId, phase) => {
+						if (ctx.mode === "tui" && queue === dispatchedQueue && !queue.closed && queue.state.enabled
+							&& feedback.update(event, taskId, phase)) refreshWidget?.();
 					},
 				});
 				void work?.catch((error) => { queue.state.paused = true; reportError(error); });
@@ -102,6 +112,10 @@ export default function registerOrchestration(pi: ExtensionAPI): void {
 		schedule();
 	}
 	function completed(task: WorkTask): void {
+		if (task.status === "done") {
+			recentDoneIds = [...recentDoneIds.filter((id) => id !== task.id), task.id].slice(-2);
+			render();
+		}
 		pi.sendMessage({
 			customType: "work-queue-result", display: true,
 			content: `Task #${task.id} [${task.status}]: ${task.title}\n${task.error ?? "All acceptance criteria passed."}\nUse /tasks ${task.id} for the report and validation evidence.`,
@@ -115,7 +129,10 @@ export default function registerOrchestration(pi: ExtensionAPI): void {
 		if (timer) clearTimeout(timer);
 		timer = undefined;
 		loadError = undefined;
-		activity = "";
+		feedback.clear();
+		recentDoneIds = [];
+		if (ctx.hasUI) ctx.ui.setWidget(STATE, undefined);
+		refreshWidget = undefined;
 		const saved = ctx.sessionManager.getBranch().filter((entry) => entry.type === "custom" && entry.customType === STATE).at(-1);
 		persisted = Boolean(saved);
 		try {
@@ -252,9 +269,9 @@ export default function registerOrchestration(pi: ExtensionAPI): void {
 		ctx = context;
 		if (timer) clearTimeout(timer);
 		timer = undefined;
-		await queue.shutdown();
+		const stopped = queue.shutdown();
+		render(); // Clear feedback immediately, before waiting for a cancelled child to exit.
+		await stopped;
 		if (persisted && !loadError) save();
-		ctx.ui.setWidget(STATE, undefined);
-		ctx.ui.setStatus(STATE, undefined);
 	});
 }

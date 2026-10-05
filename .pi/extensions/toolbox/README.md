@@ -29,6 +29,17 @@ Validation failures, malformed results and process failures block the task and p
 the queue. Retrying or changing failed criteria requires your decision, not automatic
 retry loops. Use `/tasks <id>` to inspect the evidence.
 
+Above the editor, a compact themed task list shows explicit statuses and keeps recent
+completed titles visible with terminal strikethrough. Its six task rows prioritize
+active/blocked work and upcoming tasks without changing execution order; an overflow
+count points to `/tasks` for the full queue. While working, a task ID/title and
+implementation/validation heading labels an automatically tailing six-row feedback
+panel (assistant progress, retry status, compact tool activity, or a thinking indicator—not
+hidden reasoning). Long/Unicode output fits the terminal width. Feedback is bounded,
+transient and cleared between tasks/phases and on cancellation, reload/session changes,
+shutdown or orchestration off; it is never saved or sent to the supervisor model.
+RPC keeps a plain queue overview and `/tasks` reports, without terminal styling.
+
 | Command | Effect |
 |---|---|
 | `/orchestrate` | Opt this session in; normal sessions remain unchanged |

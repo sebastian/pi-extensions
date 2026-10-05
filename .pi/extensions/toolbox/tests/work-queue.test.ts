@@ -71,6 +71,30 @@ test("foreground mutations reorder pending tasks without interrupting the single
 	await stopped;
 });
 
+test("worker events are task/phase scoped, transient, and suppressed after cancellation/shutdown", async () => {
+	const { queue, calls, snapshots } = setup();
+	queue.state.enabled = true;
+	add(queue, "A");
+	queue.apply({ action: "start" });
+	const events: Array<[number, string, string | undefined]> = [];
+	queue.kick({ ...options, onEvent: (event, id, phase) => events.push([id, phase, event.message]) });
+	const saves = snapshots.length;
+	calls[0].invocation.onEvent?.({ type: "assistant", message: "Live implementation" });
+	assert.equal(snapshots.length, saves, "stream callbacks do not persist");
+	await finish(calls, 0);
+	calls[1].invocation.onEvent?.({ type: "status", message: "Live validation" });
+	assert.deepEqual(events, [[1, "implementation", "Live implementation"], [1, "validation", "Live validation"]]);
+	queue.apply({ action: "cancel", id: 1 });
+	calls[1].invocation.onEvent?.({ type: "assistant", message: "Late cancelled output" });
+	assert.equal(events.length, 2);
+	const stopped = queue.shutdown();
+	calls[1].invocation.onEvent?.({ type: "assistant", message: "Late shutdown output" });
+	assert.equal(events.length, 2);
+	await finish(calls, 1, result(passing));
+	await stopped;
+	assert.ok(!JSON.stringify(queue.state).includes("Live"));
+});
+
 test("failed validation pauses the queue; retry needs an explicit restart", async () => {
 	const { queue, calls } = setup();
 	queue.state.enabled = true;

@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { getEventListeners } from "node:events";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import type { SubagentEvent, SubagentRunResult } from "../subagent-runner.ts";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { buildSubagentArgs, discoverProjectExtensionPaths, runSubagent } from "../subagent-runner.ts";
@@ -147,6 +148,69 @@ test("runSubagent treats retrying agent_end events as non-final", async () => {
 		assert.equal(result.usage.totalTokens, 7);
 		assert.equal(getEventListeners(controller.signal, "abort").length, 0);
 	} finally {
+		process.argv[1] = previousArgv1;
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("live child callbacks distinguish deltas/block/final snapshots and turns, decode split UTF-8 and omit reasoning", { timeout: 10_000 }, async () => {
+	const root = await mkdtemp(join(tmpdir(), "toolbox-subagent-stream-"));
+	const previousArgv1 = process.argv[1];
+	const controller = new AbortController();
+	const events: SubagentEvent[] = [];
+	let running: Promise<SubagentRunResult> | undefined;
+	let settled = false;
+	try {
+		const fakePi = join(root, "fake-pi.mjs");
+		await writeFile(fakePi, `
+import { existsSync } from "node:fs";
+import { setTimeout } from "node:timers/promises";
+const emit = (event) => console.log(JSON.stringify(event));
+const message = (text) => ({ role: "assistant", content: text ? [{ type: "text", text }, { type: "thinking", thinking: "SECRET" }] : [], stopReason: "stop" });
+emit({ type: "message_start", message: message("") });
+emit({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta: "SECRET" } });
+emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Checking ", partial: message("Checking ") } });
+emit({ type: "message_update", assistantMessageEvent: { type: "text_start", contentIndex: 0, partial: message("Checking ") } });
+const wire = Buffer.from(JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "界" } }) + "\\n");
+const split = wire.indexOf(Buffer.from("界")) + 1;
+process.stdout.write(wire.subarray(0, split));
+await setTimeout(20);
+process.stdout.write(wire.subarray(split));
+emit({ type: "message_update", assistantMessageEvent: { type: "text_end", contentIndex: 0, content: "Checking 界" } });
+emit({ type: "auto_retry_start", attempt: 2, errorMessage: "provider delay" });
+emit({ type: "tool_execution_start", toolName: "ready" });
+while (!existsSync("release")) await setTimeout(10);
+const first = message("Checking 界");
+emit({ type: "message_end", message: first });
+emit({ type: "agent_end", messages: [first] });
+emit({ type: "message_start", message: message("") });
+const second = message("Checking 界");
+emit({ type: "message_end", message: second });
+emit({ type: "message_end", message: message("") });
+emit({ type: "agent_end", messages: [second, message("")] });
+`, "utf8");
+		process.argv[1] = fakePi;
+		running = runSubagent({ cwd: root, systemPrompt: "", prompt: "ignored", signal: controller.signal, onEvent: (event) => events.push(event) });
+		void running.then(() => { settled = true; }, () => { settled = true; });
+		const deadline = Date.now() + 5000;
+		while (!events.some((event) => event.toolName === "ready")) {
+			assert.ok(Date.now() < deadline && !settled, "live feedback before child completion");
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+		assert.equal(settled, false);
+		assert.deepEqual(events.filter((event) => event.textMode === "delta").map((event) => event.message), ["Checking ", "界"]);
+		assert.deepEqual(events.filter((event) => event.textMode === "snapshot").map((event) => [event.message, event.messageId, event.contentIndex]), [["Checking ", 1, 0], ["Checking 界", 1, 0]]);
+		assert.ok(events.some((event) => event.type === "status" && event.message === "Retry 2: provider delay"));
+		assert.ok(events.some((event) => event.type === "thinking" && event.message === undefined));
+		await writeFile(join(root, "release"), "");
+		const result = await running;
+		assert.equal(result.assistantText, "Checking 界");
+		assert.deepEqual(events.filter((event) => event.type === "status" && event.textMode === "snapshot").map((event) => event.messageId), [1, 2], "empty final assistant must not relabel/repeat older text as a new turn");
+		assert.ok(!JSON.stringify(events).includes("SECRET"));
+		assert.equal(getEventListeners(controller.signal, "abort").length, 0);
+	} finally {
+		controller.abort();
+		await running?.catch(() => {});
 		process.argv[1] = previousArgv1;
 		await rm(root, { recursive: true, force: true });
 	}
