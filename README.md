@@ -14,13 +14,26 @@ I maintain this repo for my own workflows and experiments.
 ## Current contents
 
 - `.omp/extensions/vim-mode/` — the OMP-native port of the Vim mode, using OMP's public editor APIs, managed extension timers, clipboard/app shortcut names, and plugin manifest
-- `.omp/extensions/opencode-go/` — OMP's native OpenCode Go models using `OPENCODE_API_KEY`
 - `.omp/extensions/cloudflare-clef/` — Cloudflare Workers AI Clef as OMP's native judge, using `CLOUDFLARE_WORKERS_AI_API_KEY`
 - `.omp/extensions/ponytail/` — an OMP-native port of [Dietrich Gebert's Ponytail](https://github.com/DietrichGebert/ponytail), with persistent `off`/`lite`/`full`/`ultra` modes, prompt injection, status and configuration commands, and the companion review/audit/debt/gain/help skills
 - `.pi/extensions/toolbox/` — concise provider rate-limit handling, `/review` with alternate models and deduplicated findings, and **opt-in per-session** `/orchestrate` supervision with a persistent task queue, one background worker and acceptance validation
 - `.pi/extensions/reasoning-queue/` — streaming-aware per-message reasoning-level directives for normal, steering, and follow-up prompts, so queued work can switch between `low`, `high`, `xhigh`, `max`, etc. without wasting the active in-flight request or the whole queue on one setting
 - `.pi/extensions/vim-mode/` — a much more capable vim-style modal editor for pi, with multiline visual selections, counts, Unicode-aware word motions, find/till motions, operator-pending `d`/`c`/`y`, linewise commands, paste, joins, and a stronger normal-mode editing surface
 - `.pi/extensions/zai-coding-plan/` — an enhancer for pi's built-in `zai/*` provider that keeps the live quota indicator, less-sycophantic GLM-5.1/5.2 prompt nudge, and conservative ~100k context window without registering custom models
+
+## OMP OpenCode Go setup
+
+OMP natively supports `opencode-go` and `OPENCODE_API_KEY`; no provider extension is needed.
+
+For a saved key that also works when OMP is launched without your shell environment:
+
+```sh
+omp login opencode-go
+```
+
+Paste only the API key value. Alternatively, export `OPENCODE_API_KEY` before launching OMP; changes to `~/.zshrc` do not update an already-running process.
+
+Saved login keys take precedence over the environment variable. Remove a rejected saved key through `/logout` before logging in again with the correct key.
 
 ## OMP Ponytail setup
 
