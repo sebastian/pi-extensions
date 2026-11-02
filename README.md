@@ -14,7 +14,7 @@ I maintain this repo for my own workflows and experiments.
 ## Current contents
 
 - `.omp/extensions/vim-mode/` — the OMP-native port of the Vim mode, using OMP's public editor APIs, managed extension timers, clipboard/app shortcut names, and plugin manifest
-- `.omp/extensions/opencode-go/` — OMP's native OpenCode Go models using `OPENCODE_GO_API_KEY`
+- `.omp/extensions/opencode-go/` — OMP's native OpenCode Go models using `OPENCODE_API_KEY`
 - `.omp/extensions/cloudflare-clef/` — Cloudflare Workers AI Clef as OMP's native judge, using `CLOUDFLARE_WORKERS_AI_API_KEY`
 - `.omp/extensions/ponytail/` — an OMP-native port of [Dietrich Gebert's Ponytail](https://github.com/DietrichGebert/ponytail), with persistent `off`/`lite`/`full`/`ultra` modes, prompt injection, status and configuration commands, and the companion review/audit/debt/gain/help skills
 - `.pi/extensions/toolbox/` — concise provider rate-limit handling, `/review` with alternate models and deduplicated findings, and **opt-in per-session** `/orchestrate` supervision with a persistent task queue, one background worker and acceptance validation
